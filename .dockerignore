@@ -1,0 +1,17 @@
+.git
+.dist
+target
+checkpoints
+
+.env
+.env.*
+.envrc
+
+Dockerfile
+README.md
+METHODS.md
+dprint.json
+flake.lock
+flake.nix
+justfile
+catan.png

@@ -175,7 +175,7 @@ board.onActionClick = (action) => {
 };
 
 document.getElementById('btn-rotate-left').addEventListener('click', () => {
-  board.rotate(-1);
+  board.rotateCounterclockwise();
 });
 
 document.getElementById('btn-mirror-board').addEventListener('click', () => {
@@ -183,7 +183,7 @@ document.getElementById('btn-mirror-board').addEventListener('click', () => {
 });
 
 document.getElementById('btn-rotate-right').addEventListener('click', () => {
-  board.rotate(1);
+  board.rotateClockwise();
 });
 
 // ── MCTS explore ─────────────────────────────────────────────────────

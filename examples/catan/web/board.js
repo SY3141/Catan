@@ -29,6 +29,14 @@ class Board {
     this.setRotation(this.rotationStep + delta);
   }
 
+  rotateClockwise() {
+    this.rotate(this.mirrored ? -1 : 1);
+  }
+
+  rotateCounterclockwise() {
+    this.rotate(this.mirrored ? 1 : -1);
+  }
+
   setRotation(step) {
     this.rotationStep = ((step % 6) + 6) % 6;
     this._applyRotation();

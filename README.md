@@ -59,6 +59,19 @@ cargo run --example pig --features nn -- train --iterations 5 # train from scrat
 Example games live in [`examples/`](examples/). The biggest is 1v1
 Catan — see [1v1 Catan](#1v1-catan) below.
 
+## Running the web UI with Docker
+
+The Docker image serves the 1v1 Catan web analysis board described
+below, using the built-in `rollout` evaluator and exposing the board on
+port 3000:
+
+```
+docker build -t canopy-catan-ui .
+docker run --rm -p 3000:3000 canopy-catan-ui
+```
+
+Then open <http://localhost:3000>.
+
 ## What you get
 
 - **PUCT MCTS** with Dirichlet noise at the root and the
