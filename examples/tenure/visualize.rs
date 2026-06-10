@@ -1,8 +1,8 @@
 use serde::Serialize;
 use std::path::Path;
 
-use canopy::game::Game;
-use canopy::game_log::GameLog;
+use hexfish::game::Game;
+use hexfish::game_log::GameLog;
 
 use crate::game::{DESTROY_A, DESTROY_B, DONE, K, Phase, TenureGame, optimal_value};
 

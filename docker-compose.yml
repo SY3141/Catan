@@ -1,0 +1,10 @@
+services:
+  hexfish-catan-ui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    init: true
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./examples/catan/web:/app/examples/catan/web

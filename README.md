@@ -1,11 +1,11 @@
-# Canopy
+# HexFish
 
-Implement a small `Game` trait and a tensor encoder; Canopy gives you
+Implement a small `Game` trait and a tensor encoder; HexFish gives you
 PUCT MCTS, neural self-play, a training loop, a tournament runner, and
 a web analysis board. Targets single-machine training (no distributed
 or networked setup).
 
-![Canopy web analysis board on a 1v1 Catan position](catan.png)
+![HexFish web analysis board on a 1v1 Catan position](catan.png)
 
 ## Supported games
 
@@ -66,8 +66,8 @@ below, using the built-in `rollout` evaluator and exposing the board on
 port 3000:
 
 ```
-docker build -t canopy-catan-ui .
-docker run --rm -p 3000:3000 canopy-catan-ui
+docker build -t hexfish-catan-ui .
+docker run --rm -p 3000:3000 hexfish-catan-ui
 ```
 
 Then open <http://localhost:3000>.
@@ -103,7 +103,7 @@ below is the strongest public 1v1 Catan agent. The example plays
 against live colonist.io games over CDP and ships with a web analysis
 board.
 
-- Checkpoint: [catan-nexus-v3 release](https://github.com/cullback/canopy/releases/tag/catan-nexus-v3)
+- Checkpoint: [catan-nexus-v3 release](https://github.com/cullback/hexfish/releases/tag/catan-nexus-v3)
 - Details: [examples/catan/README.md](examples/catan/README.md)
 
 ## Differences from the Gumbel AlphaZero paper
@@ -134,7 +134,7 @@ practical details differ:
 
 ## Contributing
 
-Community contributions are welcome. The goal is to keep Canopy a
+Community contributions are welcome. The goal is to keep HexFish a
 general framework for training AlphaZero-style agents — a minimal
 interface that any game implementer can target to get working search
 and training for free.
@@ -155,7 +155,7 @@ Particularly interested in:
   surfaces rough edges.
 - **Catan bot.** Stronger network architectures, better feature
   encodings, search improvements specific to Catan, self-play tuning.
-  The [catan-nexus-v3](https://github.com/cullback/canopy/releases/tag/catan-nexus-v3)
+  The [catan-nexus-v3](https://github.com/cullback/hexfish/releases/tag/catan-nexus-v3)
   checkpoint is the current baseline to beat.
 - **Multi-player generalization.** Extending `Status::Decision` and
   the training targets to 3+ player non-zero-sum games is an open

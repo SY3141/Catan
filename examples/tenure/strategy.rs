@@ -1,4 +1,4 @@
-use canopy::eval::{Evaluation, Evaluator, Wdl};
+use hexfish::eval::{Evaluation, Evaluator, Wdl};
 
 use crate::game::{DESTROY_A, DESTROY_B, DONE, K, NUM_ACTIONS, Phase, TenureGame, optimal_value};
 

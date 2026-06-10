@@ -11,8 +11,8 @@ use std::sync::Arc;
 
 use clap::Arg;
 
-use canopy::cli::GameCli;
-use canopy::train::TrainConfig;
+use hexfish::cli::GameCli;
+use hexfish::train::TrainConfig;
 
 mod colonist;
 mod encoder;
@@ -27,7 +27,7 @@ use model::{init_nexus_v1, init_nexus_v2, init_nexus_v3};
 
 fn main() {
     let mut setup = GameCli::new("catan", "Catan tournament between two MCTS bots");
-    setup.add_evaluator("rollout", canopy::eval::RolloutEvaluator::default());
+    setup.add_evaluator("rollout", hexfish::eval::RolloutEvaluator::default());
 
     // Encoders
     setup.add_encoder("nexus-v1", Arc::new(NexusEncoderV1));

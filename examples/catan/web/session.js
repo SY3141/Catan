@@ -8,9 +8,14 @@ class Session {
     this.handlers = {};
     this.connected = false;
     this.queue = [];
+    this.shouldReconnect = false;
   }
 
   connect() {
+    if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
+      return;
+    }
+    this.shouldReconnect = true;
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const url = `${proto}//${location.host}/ws`;
     this.ws = new WebSocket(url);
@@ -31,7 +36,9 @@ class Session {
 
     this.ws.onclose = () => {
       this.connected = false;
-      setTimeout(() => this.connect(), 2000);
+      if (this.shouldReconnect) {
+        setTimeout(() => this.connect(), 2000);
+      }
     };
 
     this.ws.onerror = () => {
@@ -45,6 +52,16 @@ class Session {
       this.ws.send(json);
     } else {
       this.queue.push(json);
+    }
+  }
+
+  disconnect() {
+    this.shouldReconnect = false;
+    this.connected = false;
+    this.queue = [];
+    if (this.ws) {
+      this.ws.close();
+      this.ws = null;
     }
   }
 

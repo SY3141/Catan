@@ -1,6 +1,6 @@
 # Methods
 
-Architecture and optimization decisions behind Canopy, with a section
+Architecture and optimization decisions behind HexFish, with a section
 on future ideas at the end. Complements the high-level framing in the
 [README](README.md) and the Catan-specific tricks in
 [examples/catan/OPTIMIZATIONS.md](examples/catan/OPTIMIZATIONS.md).

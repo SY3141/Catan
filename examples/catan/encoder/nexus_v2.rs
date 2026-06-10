@@ -70,7 +70,7 @@
 //! | cur_frontier         |     1 | binary  |
 //! | opp_frontier         |     1 | binary  |
 
-use canopy::nn::StateEncoder;
+use hexfish::nn::StateEncoder;
 
 use crate::game::state::GameState;
 
@@ -101,7 +101,7 @@ impl NexusEncoderV2 {
 /// Dev cards (16): dev_playable(5), dev_played(5), dev_bought_turn(5), dev_played_turn(1)
 fn encode_player_nexus(
     state: &GameState,
-    player: canopy::player::Player,
+    player: hexfish::player::Player,
     tile_numbers: &[u8; 19],
     out: &mut Vec<f32>,
 ) {
@@ -371,8 +371,8 @@ mod tests {
     use crate::game::dice::Dice;
     use crate::game::state::Phase;
     use crate::game::topology::Topology;
-    use canopy::game::Game;
-    use canopy::player::Player;
+    use hexfish::game::Game;
+    use hexfish::player::Player;
     use std::sync::Arc;
 
     fn make_state() -> GameState {
@@ -808,13 +808,13 @@ mod tests {
         // Play until game over or 500 actions
         for _ in 0..500 {
             match state.status() {
-                canopy::game::Status::Terminal(_) => break,
-                canopy::game::Status::Chance => {
+                hexfish::game::Status::Terminal(_) => break,
+                hexfish::game::Status::Chance => {
                     let outcome = state.sample_chance(&mut rng).unwrap();
                     state.apply_action(outcome);
                     continue;
                 }
-                canopy::game::Status::Decision(_) => {}
+                hexfish::game::Status::Decision(_) => {}
             }
             state.legal_actions(&mut actions);
             if actions.is_empty() {

@@ -1,6 +1,6 @@
 # Colonist integration notes
 
-Live-play integration between the canopy MCTS engine and colonist.io via CDP.
+Live-play integration between the hexfish MCTS engine and colonist.io via CDP.
 
 ## Architecture: single action stream
 

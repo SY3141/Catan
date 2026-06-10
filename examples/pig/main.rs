@@ -8,8 +8,8 @@
 //! cargo run --example pig -- train --iterations 5
 //! ```
 
-use canopy::cli::GameCli;
-use canopy::game::{Game, Status};
+use hexfish::cli::GameCli;
+use hexfish::game::{Game, Status};
 
 mod encoder;
 mod game;
@@ -72,7 +72,7 @@ impl Game for PigGame {
 }
 
 fn main() {
-    use canopy::train::TrainConfig;
+    use hexfish::train::TrainConfig;
     use std::sync::Arc;
 
     let mut setup = GameCli::new("pig", "Pig dice game tournament between two MCTS bots");

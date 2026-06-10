@@ -2,7 +2,7 @@
 
 const session = new Session();
 const board = new Board(document.getElementById('board-svg'));
-window.canopyBoard = board;
+window.hexfishBoard = board;
 const mctsPanel = new MCTSPanel();
 const controls = new Controls(session);
 
@@ -408,4 +408,23 @@ document.addEventListener('keydown', (e) => {
 
 // ── Start ────────────────────────────────────────────────────────────
 
-session.connect();
+let appStarted = false;
+
+window.hexfishStartApp = () => {
+  if (appStarted) return;
+  appStarted = true;
+  session.connect();
+};
+
+window.hexfishStopApp = () => {
+  if (!appStarted) return;
+  appStarted = false;
+  session.disconnect();
+};
+
+document.addEventListener('hexfish-auth-signed-in', window.hexfishStartApp);
+document.addEventListener('hexfish-auth-signed-out', window.hexfishStopApp);
+
+if (window.hexfishAuthSignedIn) {
+  window.hexfishStartApp();
+}

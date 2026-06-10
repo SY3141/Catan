@@ -15,10 +15,10 @@ use std::sync::Arc;
 use clap::{Arg, Command};
 use indicatif::{ProgressBar, ProgressStyle};
 
-use canopy::cli::GameCli;
-use canopy::game::{Game, Status};
-use canopy::mcts::{Config, Search, Select};
-use canopy::train::TrainConfig;
+use hexfish::cli::GameCli;
+use hexfish::game::{Game, Status};
+use hexfish::mcts::{Config, Search, Select};
+use hexfish::train::TrainConfig;
 
 mod encoder;
 mod game;

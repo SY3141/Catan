@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-use canopy::player::Player;
+use hexfish::player::Player;
 
 use crate::game::action::{
     ActionId, BUY_DEV_CARD, CITY_END, CITY_START, DISCARD_END, DISCARD_START, END_TURN,

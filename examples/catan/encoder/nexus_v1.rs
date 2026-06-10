@@ -22,7 +22,7 @@
 //!
 //! No edges, no settle_legal, no longest_road_nodes.
 
-use canopy::nn::StateEncoder;
+use hexfish::nn::StateEncoder;
 
 use crate::game::state::GameState;
 
@@ -46,7 +46,7 @@ impl NexusEncoderV1 {
 /// Push 51 per-player features grouped by category (same as current).
 fn encode_player_nexus_v1(
     state: &GameState,
-    player: canopy::player::Player,
+    player: hexfish::player::Player,
     tile_numbers: &[u8; 19],
     out: &mut Vec<f32>,
 ) {

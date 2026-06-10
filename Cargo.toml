@@ -1,10 +1,10 @@
 [package]
-name = "canopy"
+name = "hexfish"
 version = "0.1.0"
 edition = "2024"
 
 [lib]
-name = "canopy"
+name = "hexfish"
 path = "src/lib.rs"
 
 [features]
@@ -40,7 +40,7 @@ tracing-indicatif = "0.3"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 
 [dev-dependencies]
-canopy = { path = ".", features = ["cli", "visualize", "server", "nn"] }
+hexfish = { path = ".", features = ["cli", "visualize", "server", "nn"] }
 futures-util = "0.3"
 tokio-tungstenite = "0.26"
 

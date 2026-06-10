@@ -39,7 +39,7 @@
 //! |                 | RoadBuilding, YOP, Monopoly, MaritimeTrade                 |
 //! | RoadBuilding    | Road (or EndTurn if none legal / no roads left)            |
 
-use canopy::player::Player;
+use hexfish::player::Player;
 
 use super::board::{EdgeId, NodeId, TileId};
 use super::dev_card::DevCardKind;
@@ -820,7 +820,7 @@ mod tests {
     use crate::game::dice::Dice;
     use crate::game::resource::{ROAD_COST, ResourceArray};
     use crate::game::topology::Topology;
-    use canopy::game::Game;
+    use hexfish::game::Game;
     use std::sync::Arc;
 
     fn make_state() -> GameState {

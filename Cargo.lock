@@ -644,29 +644,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "canopy"
-version = "0.1.0"
-dependencies = [
- "axum",
- "burn",
- "canopy",
- "clap",
- "crossbeam-channel",
- "csv",
- "fastrand",
- "futures-util",
- "indicatif",
- "serde",
- "serde_json",
- "tokio",
- "tokio-tungstenite 0.26.2",
- "tower-http",
- "tracing",
- "tracing-indicatif",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "caseless"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2254,6 +2231,29 @@ name = "hexf-parse"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dfa686283ad6dd069f105e5ab091b04c62850d3e4cf5d67debad1933f55023df"
+
+[[package]]
+name = "hexfish"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "burn",
+ "clap",
+ "crossbeam-channel",
+ "csv",
+ "fastrand",
+ "futures-util",
+ "hexfish",
+ "indicatif",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite 0.26.2",
+ "tower-http",
+ "tracing",
+ "tracing-indicatif",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "http"

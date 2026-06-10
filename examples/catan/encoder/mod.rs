@@ -50,7 +50,7 @@
 //! |       3 | max incident roads at a node      |
 //! |       6 | max tile corner nodes / BFS cap   |
 
-use canopy::player::Player;
+use hexfish::player::Player;
 
 use crate::game::board::{Node, Port};
 use crate::game::dice::Dice;

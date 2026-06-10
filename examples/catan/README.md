@@ -6,7 +6,7 @@ Two-player Catan with MCTS search, a web analysis board, and a live
 ## Running against a live colonist.io game
 
 Download the `nexus-v3` model checkpoint from the
-[catan-nexus-v3 release](https://github.com/cullback/canopy/releases/tag/catan-nexus-v3),
+[catan-nexus-v3 release](https://github.com/cullback/hexfish/releases/tag/catan-nexus-v3),
 then:
 
 ```

@@ -22,13 +22,13 @@
         in
         {
           default = pkgs.rustPlatform.buildRustPackage {
-            pname = "canopy";
+            pname = "hexfish";
             version = "0.1.0";
             src = ./.;
             cargoLock.lockFile = ./Cargo.lock;
             meta = {
-              description = "canopy";
-              mainProgram = "canopy";
+              description = "hexfish";
+              mainProgram = "hexfish";
             };
           };
         }

@@ -1,4 +1,4 @@
-use canopy::nn::StateEncoder;
+use hexfish::nn::StateEncoder;
 
 use crate::game::{Board, get_nibble};
 

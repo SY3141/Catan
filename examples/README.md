@@ -2,10 +2,10 @@
 
 Each example is a self-contained directory under `examples/`.
 
-- **`game.rs`** — Standalone game logic. No canopy imports; portable
+- **`game.rs`** — Standalone game logic. No hexfish imports; portable
   code you could drop into another project.
 - **`main.rs`** — Implements the `Game` trait for the game type and
-  wires up the CLI. Where Canopy meets the game.
+  wires up the CLI. Where HexFish meets the game.
 - **`encoder.rs`, `model.rs`** — Tensor encoding and network
   architecture, used when the `nn` feature is enabled for training
   and inference.

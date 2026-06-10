@@ -1,4 +1,4 @@
-use canopy::eval::{Evaluation, Evaluator, Wdl};
+use hexfish::eval::{Evaluation, Evaluator, Wdl};
 
 use crate::game::{self, PigGame};
 

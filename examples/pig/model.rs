@@ -1,7 +1,7 @@
 use burn::nn::{Linear, LinearConfig};
 use burn::prelude::*;
-use canopy::game::Game;
-use canopy::nn::{ForwardOutput, PolicyValueNet};
+use hexfish::game::Game;
+use hexfish::nn::{ForwardOutput, PolicyValueNet};
 
 use crate::encoder::PigEncoder;
 use crate::game::PigGame;

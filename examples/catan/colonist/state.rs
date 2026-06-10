@@ -11,8 +11,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use canopy::game::Game;
-use canopy::player::{PerPlayer, Player};
+use hexfish::game::Game;
+use hexfish::player::{PerPlayer, Player};
 
 use crate::game::board::{EdgeId, NodeId, TileId};
 use crate::game::dev_card::{DevCardDeck, DevCardKind};

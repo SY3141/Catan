@@ -1,7 +1,7 @@
 # Catan optimizations
 
 Catan-specific tricks in this example that go beyond the general
-Canopy framework. Split into state-space optimizations (that shrink
+HexFish framework. Split into state-space optimizations (that shrink
 the tree before search runs) and search-space optimizations (that
 cover hidden information).
 

@@ -12,9 +12,9 @@
 
 use clap::{Arg, Command};
 
-use canopy::cli::GameCli;
-use canopy::game::{Game, Status};
-use canopy::game_log::GameLog;
+use hexfish::cli::GameCli;
+use hexfish::game::{Game, Status};
+use hexfish::game_log::GameLog;
 
 mod encoder;
 mod game;
@@ -74,7 +74,7 @@ impl Game for TenureGame {
 }
 
 fn main() {
-    use canopy::train::TrainConfig;
+    use hexfish::train::TrainConfig;
     use std::sync::Arc;
 
     let mut setup = GameCli::new("tenure", "Spencer's Attacker-Defender (Tenure) Game");

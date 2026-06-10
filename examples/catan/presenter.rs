@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
-use canopy::player::Player;
-use canopy::server::GamePresenter;
+use hexfish::player::Player;
+use hexfish::server::GamePresenter;
 
 use crate::game;
 use crate::game::action::ActionId;

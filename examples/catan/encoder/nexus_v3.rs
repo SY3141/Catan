@@ -29,7 +29,7 @@
 //! | cur_on_longest_road  |     1 | binary  |
 //! | opp_on_longest_road  |     1 | binary  |
 
-use canopy::nn::StateEncoder;
+use hexfish::nn::StateEncoder;
 
 use crate::game::state::GameState;
 
@@ -60,7 +60,7 @@ impl NexusEncoderV3 {
 /// Dev cards (16): dev_playable(5), dev_played(5), dev_bought_turn(5), dev_played_turn(1)
 fn encode_player_nexus_v3(
     state: &GameState,
-    player: canopy::player::Player,
+    player: hexfish::player::Player,
     tile_numbers: &[u8; 19],
     out: &mut Vec<f32>,
 ) {

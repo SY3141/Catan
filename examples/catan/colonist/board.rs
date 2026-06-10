@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use crate::game::board::{EdgeId, NodeId, Terrain as CanopyTerrain};
+use crate::game::board::{EdgeId, NodeId, Terrain as HexFishTerrain};
 use crate::game::hex::{Direction, Hex};
 use crate::game::resource::Resource;
 use crate::game::topology::{
@@ -701,19 +701,19 @@ pub fn parse(json_str: &str) -> Option<BoardData> {
     })
 }
 
-// -- Conversion to canopy topology layout -------------------------------------
+// -- Conversion to hexfish topology layout -------------------------------------
 
 impl Terrain {
-    /// Convert colonist terrain to canopy terrain.
-    pub fn to_canopy(self) -> CanopyTerrain {
+    /// Convert colonist terrain to hexfish terrain.
+    pub fn to_hexfish(self) -> HexFishTerrain {
         match self {
-            Terrain::Desert => CanopyTerrain::Desert,
-            Terrain::Lumber => CanopyTerrain::Forest,
-            Terrain::Brick => CanopyTerrain::Hills,
-            Terrain::Grain => CanopyTerrain::Fields,
-            Terrain::Wool => CanopyTerrain::Pasture,
-            Terrain::Ore => CanopyTerrain::Mountains,
-            Terrain::Unknown(_) => CanopyTerrain::Desert,
+            Terrain::Desert => HexFishTerrain::Desert,
+            Terrain::Lumber => HexFishTerrain::Forest,
+            Terrain::Brick => HexFishTerrain::Hills,
+            Terrain::Grain => HexFishTerrain::Fields,
+            Terrain::Wool => HexFishTerrain::Pasture,
+            Terrain::Ore => HexFishTerrain::Mountains,
+            Terrain::Unknown(_) => HexFishTerrain::Desert,
         }
     }
 }
@@ -740,7 +740,7 @@ pub fn to_layout(
     board: &BoardData,
     mapper: &CoordMapper,
 ) -> (
-    [CanopyTerrain; 19],
+    [HexFishTerrain; 19],
     [Option<u8>; 19],
     [Option<Resource>; 9],
     &'static [(Hex, Direction); 9],
@@ -752,13 +752,13 @@ pub fn to_layout(
         .map(|(i, h)| ((h.q as i32, h.r as i32), i))
         .collect();
 
-    let mut terrains = [CanopyTerrain::Desert; 19];
+    let mut terrains = [HexFishTerrain::Desert; 19];
     let mut numbers = [None; 19];
 
     for tile in &board.tiles {
         let (mx, my) = mapper.map_hex(tile.x, tile.y);
         if let Some(&idx) = hex_to_land.get(&(mx, my)) {
-            terrains[idx] = tile.terrain.to_canopy();
+            terrains[idx] = tile.terrain.to_hexfish();
             if tile.dice_number > 0 {
                 numbers[idx] = Some(tile.dice_number);
             }

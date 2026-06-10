@@ -1,11 +1,11 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use canopy::eval::Evaluator;
-use canopy::mcts::Config;
-use canopy::nn::NeuralEvaluator;
-use canopy::tournament::play_match;
-use canopy::train::{InferBackend, default_device};
+use hexfish::eval::Evaluator;
+use hexfish::mcts::Config;
+use hexfish::nn::NeuralEvaluator;
+use hexfish::tournament::play_match;
+use hexfish::train::{InferBackend, default_device};
 use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::encoder::TenureEncoder;
@@ -107,7 +107,7 @@ pub fn run(dir: &Path, num_games: u32, simulations: u32) {
                 let seed = rng.u64(..);
                 let game_rng = &mut fastrand::Rng::with_seed(seed);
                 let game = TenureGame::random(game_rng);
-                let counters = canopy::tournament::TournamentCounters {
+                let counters = hexfish::tournament::TournamentCounters {
                     evals: std::sync::atomic::AtomicU64::new(0),
                     depth_sum: std::sync::atomic::AtomicU64::new(0),
                     depth_max: std::sync::atomic::AtomicU32::new(0),

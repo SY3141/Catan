@@ -359,7 +359,7 @@ pub fn run(port: u16) {
 fn apply_live_state(
     state: &mut crate::game::state::GameState,
     data: &GameData,
-    color_map: &[(u8, canopy::player::Player)],
+    color_map: &[(u8, hexfish::player::Player)],
     mapper: &board::CoordMapper,
 ) -> bool {
     let mut changed = false;
@@ -432,10 +432,10 @@ fn apply_live_state(
     changed
 }
 
-/// Check if a canopy action index matches a colonist `GameEvent`.
+/// Check if a hexfish action index matches a colonist `GameEvent`.
 ///
 /// Uses the corner_map/edge_map to reverse-lookup coordinates for settlements,
-/// Match a canopy action to a colonist event by type.
+/// Match a hexfish action to a colonist event by type.
 fn match_action_to_event(action: usize, event: &log::GameEvent) -> bool {
     use crate::game::action::*;
     let a = action as u8;
@@ -459,7 +459,7 @@ fn match_action_to_event(action: usize, event: &log::GameEvent) -> bool {
     }
 }
 
-/// Try to match pending canopy actions against new colonist events.
+/// Try to match pending hexfish actions against new colonist events.
 ///
 /// Returns `Ok(matched_count)` if events confirm pending actions in order,
 /// or `Err(())` on the first mismatch.
@@ -496,7 +496,7 @@ fn match_pending_actions(pending: &[usize], new_events: &[log::GameEvent]) -> Re
             matched += 1;
         } else {
             eprintln!(
-                "pending action mismatch: canopy action {} vs event {:?}",
+                "pending action mismatch: hexfish action {} vs event {:?}",
                 action, significant[i]
             );
             return Err(());
@@ -511,7 +511,7 @@ struct ColonistPollState {
     cdp_ws: Option<WsStream>,
     committed_event_count: usize,
     committed_state: crate::game::state::GameState,
-    color_map: Vec<(u8, canopy::player::Player)>,
+    color_map: Vec<(u8, hexfish::player::Player)>,
     corner_map: std::collections::HashMap<(i32, i32, u8), crate::game::board::NodeId>,
     edge_map: std::collections::HashMap<(i32, i32, u8), crate::game::board::EdgeId>,
     mapper: board::CoordMapper,
@@ -524,8 +524,8 @@ impl ColonistPollState {
     /// Returns (messages, state_changed).
     async fn poll(
         &mut self,
-        session: &mut canopy::server::GameSession<crate::game::state::GameState>,
-    ) -> (Vec<canopy::server::ServerMsg>, bool) {
+        session: &mut hexfish::server::GameSession<crate::game::state::GameState>,
+    ) -> (Vec<hexfish::server::ServerMsg>, bool) {
         if let Err(e) = cdp_connect(self.cdp_port, &mut self.cdp_ws).await {
             eprintln!("poll error: {e}");
             return (vec![session.state_msg()], false);
@@ -680,7 +680,7 @@ impl ColonistPollState {
             {
                 if live_pid != self.committed_state.current_player {
                     use crate::game::action::END_TURN;
-                    use canopy::game::Game as _;
+                    use hexfish::game::Game as _;
                     eprintln!("poll: proactive END_TURN → {live_pid:?} (colonist turnState=1)");
                     self.committed_state.apply_action(END_TURN as usize);
                     actions_to_walk.push(END_TURN as usize);
@@ -753,7 +753,7 @@ impl ColonistPollState {
         // Include a snapshot so the tree view refreshes after state changes
         // (otherwise the client keeps displaying the stale search snapshot).
         if let Some((snap, labels)) = session.snapshot_with_labels() {
-            msgs.push(canopy::server::ServerMsg::Snapshot {
+            msgs.push(hexfish::server::ServerMsg::Snapshot {
                 snapshot: snap,
                 action_labels: labels,
             });
@@ -770,9 +770,9 @@ const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 const BATCH_SIZE: u32 = 50;
 
 /// Send all messages, returning Err on disconnect.
-async fn send_all(socket: &mut WebSocket, msgs: &[canopy::server::ServerMsg]) -> Result<(), ()> {
+async fn send_all(socket: &mut WebSocket, msgs: &[hexfish::server::ServerMsg]) -> Result<(), ()> {
     for m in msgs {
-        canopy::server::send_msg(socket, m).await?;
+        hexfish::server::send_msg(socket, m).await?;
     }
     Ok(())
 }
@@ -793,14 +793,14 @@ async fn send_all(socket: &mut WebSocket, msgs: &[canopy::server::ServerMsg]) ->
 ///   the budget so that `target` total sims will be reached.
 async fn handle_colonist_socket(
     mut socket: WebSocket,
-    session: &mut canopy::server::GameSession<crate::game::state::GameState>,
+    session: &mut hexfish::server::GameSession<crate::game::state::GameState>,
     poll_state: &mut ColonistPollState,
 ) {
     let mut sims_budget = 0u32;
     let mut auto_refill = 0u32;
     let mut last_poll = std::time::Instant::now();
 
-    if canopy::server::send_msg(&mut socket, &session.state_msg())
+    if hexfish::server::send_msg(&mut socket, &session.state_msg())
         .await
         .is_err()
     {
@@ -832,8 +832,8 @@ async fn handle_colonist_socket(
 
         // --- Handle client message ---
         if let Some(text) = text {
-            match serde_json::from_str::<canopy::server::ClientMsg>(&text) {
-                Ok(canopy::server::ClientMsg::SetAutoSearch { enabled, target }) => {
+            match serde_json::from_str::<hexfish::server::ClientMsg>(&text) {
+                Ok(hexfish::server::ClientMsg::SetAutoSearch { enabled, target }) => {
                     if enabled {
                         auto_refill = target;
                         // Ensure we reach `target` total sims at this position.
@@ -848,25 +848,25 @@ async fn handle_colonist_socket(
                         "ws: SetAutoSearch enabled={enabled} target={target} budget={sims_budget}"
                     );
                 }
-                Ok(canopy::server::ClientMsg::RunSims { count }) => {
+                Ok(hexfish::server::ClientMsg::RunSims { count }) => {
                     sims_budget += count;
                     eprintln!("ws: RunSims +{count} budget={sims_budget}");
                 }
-                Ok(canopy::server::ClientMsg::PlayAction { action }) => {
+                Ok(hexfish::server::ClientMsg::PlayAction { action }) => {
                     if poll_state.pending_actions.is_empty() {
                         poll_state.pre_pending_cursor = Some(session.cursor());
                     }
                     poll_state.pending_actions.push(action);
                     session.cancel_search();
-                    let msgs = session.handle(canopy::server::ClientMsg::PlayAction { action });
+                    let msgs = session.handle(hexfish::server::ClientMsg::PlayAction { action });
                     if send_all(&mut socket, &msgs).await.is_err() {
                         return;
                     }
                 }
-                Ok(msg @ canopy::server::ClientMsg::BotMove { .. }) => {
+                Ok(msg @ hexfish::server::ClientMsg::BotMove { .. }) => {
                     eprintln!("ws: {msg:?}");
                     session.cancel_search();
-                    match canopy::server::run_search(&mut socket, session, &msg).await {
+                    match hexfish::server::run_search(&mut socket, session, &msg).await {
                         Ok(msgs) => {
                             if send_all(&mut socket, &msgs).await.is_err() {
                                 return;
@@ -875,7 +875,7 @@ async fn handle_colonist_socket(
                         Err(()) => return,
                     }
                 }
-                Ok(canopy::server::ClientMsg::PollState) => {
+                Ok(hexfish::server::ClientMsg::PollState) => {
                     session.cancel_search();
                     let (msgs, state_changed) = poll_state.poll(session).await;
                     last_poll = std::time::Instant::now();
@@ -894,9 +894,9 @@ async fn handle_colonist_socket(
                     }
                 }
                 Err(e) => {
-                    let _ = canopy::server::send_msg(
+                    let _ = hexfish::server::send_msg(
                         &mut socket,
-                        &canopy::server::ServerMsg::Error {
+                        &hexfish::server::ServerMsg::Error {
                             message: format!("Invalid message: {e}"),
                         },
                     )
@@ -939,9 +939,9 @@ async fn handle_colonist_socket(
                 // Between ticks, check for incoming messages so the UI
                 // stays responsive during search.
                 if let Some(Some(Ok(Message::Text(t)))) = socket.recv().now_or_never() {
-                    if let Ok(msg) = serde_json::from_str::<canopy::server::ClientMsg>(&t) {
+                    if let Ok(msg) = serde_json::from_str::<hexfish::server::ClientMsg>(&t) {
                         match &msg {
-                            canopy::server::ClientMsg::SetAutoSearch { enabled, target } => {
+                            hexfish::server::ClientMsg::SetAutoSearch { enabled, target } => {
                                 if *enabled {
                                     auto_refill = *target;
                                     let done = session.root_visits();
@@ -953,7 +953,7 @@ async fn handle_colonist_socket(
                                     break;
                                 }
                             }
-                            canopy::server::ClientMsg::RunSims { count } => {
+                            hexfish::server::ClientMsg::RunSims { count } => {
                                 sims_budget += count;
                             }
                             _ => {
@@ -970,9 +970,9 @@ async fn handle_colonist_socket(
             let sims_ran = after.saturating_sub(before);
             sims_budget = sims_budget.saturating_sub(sims_ran);
             if let Some((snap, labels)) = session.snapshot_with_labels() {
-                let _ = canopy::server::send_msg(
+                let _ = hexfish::server::send_msg(
                     &mut socket,
-                    &canopy::server::ServerMsg::SearchProgress {
+                    &hexfish::server::ServerMsg::SearchProgress {
                         snapshot: snap,
                         action_labels: labels,
                         sims_total: after + sims_budget,
@@ -980,7 +980,7 @@ async fn handle_colonist_socket(
                 )
                 .await;
                 if let Some(subtree_msg) = session.explore_subtree_msg() {
-                    let _ = canopy::server::send_msg(&mut socket, &subtree_msg).await;
+                    let _ = hexfish::server::send_msg(&mut socket, &subtree_msg).await;
                 }
             }
         }
@@ -991,7 +991,7 @@ async fn handle_colonist_socket(
 pub fn run_serve(
     cdp_port: u16,
     serve_port: u16,
-    evaluator: Arc<dyn canopy::eval::Evaluator<crate::game::state::GameState> + Sync>,
+    evaluator: Arc<dyn hexfish::eval::Evaluator<crate::game::state::GameState> + Sync>,
     eval_name: &str,
 ) {
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
@@ -1022,16 +1022,16 @@ pub fn run_serve(
     // If events haven't arrived yet, use the current turn color as P1
     // (colonist shows whose turn it is even before placement events land).
     if color_map.is_empty() && data.current_turn_color != 0 {
-        color_map.push((data.current_turn_color, canopy::player::Player::One));
+        color_map.push((data.current_turn_color, hexfish::player::Player::One));
     }
     for &(color, _) in &data.player_names {
         if color_map.iter().any(|&(c, _)| c == color) {
             continue;
         }
         let pid = if color_map.is_empty() {
-            canopy::player::Player::One
+            hexfish::player::Player::One
         } else {
-            canopy::player::Player::Two
+            hexfish::player::Player::Two
         };
         color_map.push((color, pid));
         if color_map.len() >= 2 {
@@ -1057,8 +1057,8 @@ pub fn run_serve(
     let dice = Dice::Balanced(BalancedDice::new());
     let presenter =
         Arc::new(CatanPresenter::new(static_dir.clone(), dice).with_player_names(names));
-    let mcts_config = canopy::mcts::Config::default();
-    let mut session = canopy::server::GameSession::with_state(
+    let mcts_config = hexfish::mcts::Config::default();
+    let mut session = hexfish::server::GameSession::with_state(
         timeline_pairs[0].1.clone(),
         evaluator,
         eval_name,

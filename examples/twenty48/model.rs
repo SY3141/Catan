@@ -2,8 +2,8 @@ use burn::nn::conv::{Conv2d, Conv2dConfig};
 use burn::nn::{BatchNorm, BatchNormConfig, Linear, LinearConfig, PaddingConfig2d};
 use burn::prelude::*;
 use burn::tensor::activation::{relu, sigmoid};
-use canopy::game::Game;
-use canopy::nn::{ForwardOutput, PolicyValueNet};
+use hexfish::game::Game;
+use hexfish::nn::{ForwardOutput, PolicyValueNet};
 
 use crate::game::Board;
 

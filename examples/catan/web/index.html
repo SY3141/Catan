@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Canopy — Catan Analysis Board</title>
+<title>HexFish — Catan Analysis Board</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script>
 tailwind.config = {
@@ -22,15 +22,63 @@ tailwind.config = {
 }
 </script>
 <link rel="stylesheet" href="style.css">
+<script
+  defer
+  crossorigin="anonymous"
+  src="https://romantic-mollusk-80.clerk.accounts.dev/npm/@clerk/ui@1/dist/ui.browser.js"
+  type="text/javascript"
+></script>
+<script
+  defer
+  crossorigin="anonymous"
+  data-clerk-publishable-key="pk_test_cm9tYW50aWMtbW9sbHVzay04MC5jbGVyay5hY2NvdW50cy5kZXYk"
+  src="https://romantic-mollusk-80.clerk.accounts.dev/npm/@clerk/clerk-js@6/dist/clerk.browser.js"
+  type="text/javascript"
+></script>
 </head>
 <body class="bg-bg text-gray-200 font-sans h-screen flex flex-col">
 
-<div id="app" class="flex flex-col h-full">
+<main id="login-page" class="login-page" aria-labelledby="login-title">
+  <section class="login-shell">
+    <div class="login-copy">
+      <div class="login-brand">
+        <span class="login-mark" aria-hidden="true"></span>
+        <span>HexFish</span>
+      </div>
+      <h1 id="login-title">Access your Catan analysis board</h1>
+      <p>Sign in to continue to the board, search tree, and game controls.</p>
+      <div class="login-preview" aria-hidden="true">
+        <img src="login-preview.png" alt="">
+      </div>
+    </div>
+    <div class="login-panel">
+      <div class="login-panel-header">
+        <p class="login-eyebrow">Secure workspace</p>
+        <h2>Welcome back</h2>
+      </div>
+      <div class="login-tabs" role="tablist" aria-label="Authentication options">
+        <button id="login-tab-sign-in" class="login-tab active" type="button" role="tab" aria-selected="true">Sign in</button>
+        <button id="login-tab-sign-up" class="login-tab" type="button" role="tab" aria-selected="false">Sign up</button>
+      </div>
+      <div id="clerk-auth-mount" class="clerk-auth-mount">
+        <div id="clerk-sign-in-mount" class="clerk-auth-panel"></div>
+        <div id="clerk-sign-up-mount" class="clerk-auth-panel is-hidden"></div>
+      </div>
+      <p id="clerk-login-status" class="login-status" aria-live="polite">Loading secure sign-in...</p>
+    </div>
+  </section>
+</main>
+
+<div id="app" class="app-shell is-hidden flex flex-col h-full" aria-hidden="true">
   <!-- Header -->
   <header class="flex items-center gap-4 px-4 py-2 bg-bg-2 border-b border-gray-700">
-    <h1 class="text-sm font-semibold text-gray-100">Canopy Analysis Board</h1>
+    <h1 class="text-sm font-semibold text-gray-100">HexFish Analysis Board</h1>
     <span id="phase-label" class="bg-bg-3 px-2 py-0.5 rounded text-xs text-gray-300"></span>
     <span id="turn-label" class="text-xs text-gray-500"></span>
+    <div id="auth-controls" class="ml-auto flex items-center gap-2">
+      <div id="clerk-user-button" class="hidden"></div>
+      <span id="clerk-status" class="sr-only" aria-live="polite"></span>
+    </div>
   </header>
 
   <!-- Main 3-column layout -->
@@ -125,6 +173,7 @@ tailwind.config = {
 <script src="board.js?v=screen-rotation-20260606"></script>
 <script src="mcts.js"></script>
 <script src="controls.js"></script>
-<script src="app.js?v=screen-rotation-20260606"></script>
+<script src="auth.js?v=login-gate-20260606-3"></script>
+<script src="app.js?v=login-gate-20260606"></script>
 </body>
 </html>

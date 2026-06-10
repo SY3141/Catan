@@ -6,3 +6,4 @@ perf.*
 logs/
 checkpoints/
 reference/
+tasklist.md

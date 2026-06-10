@@ -42,7 +42,7 @@ impl std::str::FromStr for TenureGame {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let parts: Vec<u8> = s
             .split(',')
-            .map(|p| p.trim().parse().map_err(|e| format!("invalid value: {e}")))
+            .map(|p| p.trim().parse::<u8>().map_err(|e| format!("invalid value: {e}")))
             .collect::<Result<_, _>>()?;
         if parts.len() != K {
             return Err(format!("expected {K} values, got {}", parts.len()));
