@@ -149,6 +149,11 @@ class Board {
     // Overlay for legal actions
     this._g('overlays');
 
+    // Transient hover preview for legal moves
+    const previewG = this._g('move-preview');
+    previewG.setAttribute('pointer-events', 'none');
+    previewG.setAttribute('opacity', '0.6');
+
     this._applyRotation();
   }
 
@@ -183,17 +188,16 @@ class Board {
       const color = p === 0 ? '#4a9eff' : '#ff6b6b';
       for (const nid of frame.buildings[p].settlements) {
         const [x, y] = nodes[nid];
-        buildG.appendChild(this._el('rect', {
+        const settlement = this._el('rect', {
           x: x - 5, y: y - 5, width: 10, height: 10,
           fill: color, stroke: '#111', 'stroke-width': 1
-        }));
+        });
+        buildG.appendChild(this._keepUpright(settlement, x, y));
       }
       for (const nid of frame.buildings[p].cities) {
         const [x, y] = nodes[nid];
-        // House shape: pointed roof on a wider base
-        const pts = `${x},${y-9} ${x+7},${y-3} ${x+7},${y+7} ${x-7},${y+7} ${x-7},${y-3}`;
         buildG.appendChild(this._el('polygon', {
-          points: pts,
+          points: this._cityPoints(x, y),
           fill: color, stroke: '#111', 'stroke-width': 1
         }));
       }
@@ -209,16 +213,18 @@ class Board {
         fill: '#111', stroke: '#e94560', 'stroke-width': 2
       }));
     }
+
+    this._applyRotation();
   }
 
   // Show legal action overlays on the board.
-  showLegalActions(actions, board) {
+  showLegalActions(actions, board, playerIndex = 0) {
     const overlayG = this.svg.querySelector('.overlays');
     overlayG.innerHTML = '';
     if (!board) return;
 
     for (const { action, label } of actions) {
-      const overlay = this._actionOverlay(action, label, board);
+      const overlay = this._actionOverlay(action, label, board, playerIndex);
       if (overlay) overlayG.appendChild(overlay);
     }
   }
@@ -226,7 +232,72 @@ class Board {
   clearOverlays() {
     const overlayG = this.svg.querySelector('.overlays');
     if (overlayG) overlayG.innerHTML = '';
+    this.clearActionPreview();
     this.clearSearchHighlights();
+  }
+
+  showActionPreview(action, board, playerIndex = 0) {
+    const previewG = this.svg.querySelector('.move-preview');
+    if (!previewG) return;
+    previewG.innerHTML = '';
+    if (!board) return;
+
+    const nodes = board.nodes;
+    const color = this._playerColor(playerIndex);
+    let el = null;
+    let uprightAt = null;
+
+    // Settlement: action 0..54 -> node
+    if (action < 54) {
+      const [x, y] = nodes[action];
+      el = this._el('rect', {
+        x: x - 5, y: y - 5, width: 10, height: 10,
+        fill: color, stroke: '#fff', 'stroke-width': 1.5
+      });
+      uprightAt = [x, y];
+    }
+    // Road: 54..126 -> edge
+    else if (action >= 54 && action < 126) {
+      const eid = action - 54;
+      const edge = board.edges[eid];
+      if (edge) {
+        const [x0, y0] = nodes[edge[0]];
+        const [x1, y1] = nodes[edge[1]];
+        el = this._el('line', {
+          x1: x0, y1: y0, x2: x1, y2: y1,
+          stroke: color, 'stroke-width': 6, 'stroke-linecap': 'round'
+        });
+      }
+    }
+    // City: 126..180 -> node
+    else if (action >= 126 && action < 180) {
+      const nid = action - 126;
+      const [x, y] = nodes[nid];
+      el = this._el('polygon', {
+        points: this._cityPoints(x, y),
+        fill: color, stroke: '#fff', 'stroke-width': 1.5
+      });
+    }
+    // Robber: 205..224 -> tile
+    else if (action >= 205 && action < 224) {
+      const tid = action - 205;
+      const tile = board.tiles[tid];
+      if (tile) {
+        el = this._el('circle', {
+          cx: tile.cx, cy: tile.cy - 18, r: 8,
+          fill: '#111', stroke: '#fff', 'stroke-width': 2.5
+        });
+      }
+    }
+
+    if (!el) return;
+    previewG.appendChild(uprightAt ? this._keepUpright(el, uprightAt[0], uprightAt[1]) : el);
+    this._applyRotation();
+  }
+
+  clearActionPreview() {
+    const previewG = this.svg.querySelector('.move-preview');
+    if (previewG) previewG.innerHTML = '';
   }
 
   // Highlight top spatial actions from search on the board.
@@ -367,7 +438,7 @@ class Board {
   }
 
   // Create a clickable overlay element for an action.
-  _actionOverlay(action, label, board) {
+  _actionOverlay(action, label, board, playerIndex = 0) {
     const nodes = board.nodes;
     // Settlement: action 0..54 -> node
     if (action < 54) {
@@ -379,6 +450,8 @@ class Board {
       });
       el.dataset.action = action;
       el.addEventListener('click', () => this.onActionClick?.(action));
+      el.addEventListener('mouseenter', () => this.showActionPreview(action, board, playerIndex));
+      el.addEventListener('mouseleave', () => this.clearActionPreview());
       this._attachTooltip(el, label);
       return el;
     }
@@ -397,6 +470,8 @@ class Board {
       });
       el.dataset.action = action;
       el.addEventListener('click', () => this.onActionClick?.(action));
+      el.addEventListener('mouseenter', () => this.showActionPreview(action, board, playerIndex));
+      el.addEventListener('mouseleave', () => this.clearActionPreview());
       this._attachTooltip(el, label);
       return el;
     }
@@ -411,6 +486,8 @@ class Board {
       });
       el.dataset.action = action;
       el.addEventListener('click', () => this.onActionClick?.(action));
+      el.addEventListener('mouseenter', () => this.showActionPreview(action, board, playerIndex));
+      el.addEventListener('mouseleave', () => this.clearActionPreview());
       this._attachTooltip(el, label);
       return el;
     }
@@ -426,6 +503,8 @@ class Board {
       });
       el.dataset.action = action;
       el.addEventListener('click', () => this.onActionClick?.(action));
+      el.addEventListener('mouseenter', () => this.showActionPreview(action, board, playerIndex));
+      el.addEventListener('mouseleave', () => this.clearActionPreview());
       this._attachTooltip(el, label);
       return el;
     }
@@ -515,6 +594,14 @@ class Board {
     });
     txt.textContent = ratio;
     parent.appendChild(this._keepUpright(txt, lx, ly));
+  }
+
+  _playerColor(playerIndex) {
+    return playerIndex === 0 ? '#4a9eff' : '#ff6b6b';
+  }
+
+  _cityPoints(x, y) {
+    return `${x},${y-9} ${x+7},${y-3} ${x+7},${y+7} ${x-7},${y+7} ${x-7},${y-3}`;
   }
 
   _g(cls) {

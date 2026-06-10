@@ -119,6 +119,7 @@ tailwind.config = {
         <button id="btn-rotate-left" class="absolute top-2 left-2 z-10 w-8 h-8 flex items-center justify-center bg-bg-3/90 border border-gray-700 text-gray-100 rounded cursor-pointer hover:bg-accent transition-colors" title="Rotate board counterclockwise" aria-label="Rotate board counterclockwise">&#8634;</button>
         <button id="btn-mirror-board" class="absolute top-2 left-1/2 -translate-x-1/2 z-10 w-8 h-8 flex items-center justify-center bg-bg-3/90 border border-gray-700 text-gray-100 rounded cursor-pointer hover:bg-accent transition-colors" title="Mirror board" aria-label="Mirror board">&#8644;</button>
         <button id="btn-rotate-right" class="absolute top-2 right-2 z-10 w-8 h-8 flex items-center justify-center bg-bg-3/90 border border-gray-700 text-gray-100 rounded cursor-pointer hover:bg-accent transition-colors" title="Rotate board clockwise" aria-label="Rotate board clockwise">&#8635;</button>
+        <div id="roll-badge" class="roll-badge hidden" aria-live="polite" aria-label="Roll"></div>
         <svg id="board-svg" class="w-full max-h-[60vh]" viewBox="-50 -50 500 500"></svg>
       </div>
       <div id="action-list" class="w-full max-w-lg max-h-48 overflow-y-auto p-1 flex flex-wrap gap-1"></div>
@@ -170,10 +171,10 @@ tailwind.config = {
 <div id="svg-tooltip"></div>
 
 <script src="session.js"></script>
-<script src="board.js?v=screen-rotation-20260606"></script>
+<script src="board.js?v=move-preview-20260610"></script>
 <script src="mcts.js"></script>
 <script src="controls.js"></script>
 <script src="auth.js?v=login-gate-20260606-3"></script>
-<script src="app.js?v=login-gate-20260606"></script>
+<script src="app.js?v=roll-badge-20260610"></script>
 </body>
 </html>

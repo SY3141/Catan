@@ -12,6 +12,8 @@ const DEV_SHORT = ['Kn', 'VP', 'RB', 'YP', 'Mo'];
 
 let currentState = null;
 let currentBoard = null;
+let lastActionLogLength = null;
+let previousFrameHands = null;
 
 // ── Message handlers ─────────────────────────────────────────────────
 
@@ -56,7 +58,7 @@ session.on('GameState', (msg) => {
   if (!msg.is_terminal && !msg.is_chance) {
     // Board overlays for spatial actions
     if (currentBoard) {
-      board.showLegalActions(msg.legal_actions, currentBoard);
+      board.showLegalActions(msg.legal_actions, currentBoard, msg.current_player);
     }
 
     // Button list for all actions
@@ -67,6 +69,10 @@ session.on('GameState', (msg) => {
       btn.addEventListener('click', () => {
         session.send({ type: 'PlayAction', action: a.action });
       });
+      btn.addEventListener('mouseenter', () => showLegalActionPreview(a.action));
+      btn.addEventListener('mouseleave', () => board.clearActionPreview());
+      btn.addEventListener('focus', () => showLegalActionPreview(a.action));
+      btn.addEventListener('blur', () => board.clearActionPreview());
       actionList.appendChild(btn);
     }
   }
@@ -111,6 +117,8 @@ session.on('GameState', (msg) => {
     }
   }
 
+  updateRollBadge(msg, state);
+
   // Undo/Redo button states
   document.getElementById('btn-undo').disabled = !msg.can_undo;
   document.getElementById('btn-redo').disabled = !msg.can_redo;
@@ -127,6 +135,99 @@ session.on('GameState', (msg) => {
 
   controls.onStateUpdate(msg);
 });
+
+function showLegalActionPreview(action) {
+  if (!currentBoard || !currentState) return;
+  board.showActionPreview(action, currentBoard, currentState.current_player);
+}
+
+function updateRollBadge(msg, state) {
+  const entries = msg.action_log || [];
+  const currentLength = entries.length;
+  const currentHands = frameHands(state);
+
+  if (lastActionLogLength == null) {
+    lastActionLogLength = currentLength;
+    previousFrameHands = currentHands;
+    return;
+  }
+
+  if (currentLength < lastActionLogLength) {
+    hideRollBadge();
+    lastActionLogLength = currentLength;
+    previousFrameHands = currentHands;
+    return;
+  }
+
+  if (currentLength === lastActionLogLength) {
+    previousFrameHands = currentHands;
+    return;
+  }
+
+  const newEntries = entries.slice(lastActionLogLength);
+  const handGained = hasPositiveHandGain(previousFrameHands, currentHands);
+  for (let i = newEntries.length - 1; i >= 0; i--) {
+    const total = parseRollTotal(newEntries[i]);
+    if (total == null) continue;
+
+    if (total === 7) {
+      hideRollBadge();
+    } else if (rollLogHasExplicitGain(newEntries[i]) || handGained) {
+      showRollBadge(total);
+    } else {
+      hideRollBadge();
+    }
+    break;
+  }
+
+  lastActionLogLength = currentLength;
+  previousFrameHands = currentHands;
+}
+
+function frameHands(state) {
+  const players = state.frame && state.frame.players;
+  if (!players) return null;
+  return players.map(p => p.hand ? [...p.hand] : [0, 0, 0, 0, 0]);
+}
+
+function hasPositiveHandGain(before, after) {
+  if (!before || !after) return false;
+  for (let p = 0; p < after.length; p++) {
+    for (let r = 0; r < after[p].length; r++) {
+      if (after[p][r] > (before[p]?.[r] ?? 0)) return true;
+    }
+  }
+  return false;
+}
+
+function parseRollTotal(entry) {
+  const firstLine = String(entry).split('\n')[0];
+  const match = firstLine.match(/\b(?:Rolled|rolls)\s+(\d{1,2})\b/i);
+  if (!match) return null;
+  const total = Number(match[1]);
+  return total >= 2 && total <= 12 ? total : null;
+}
+
+function rollLogHasExplicitGain(entry) {
+  return String(entry)
+    .split('\n')
+    .slice(1)
+    .some(line => /^\s*P[12]:\s*\S/.test(line));
+}
+
+function showRollBadge(total) {
+  const badge = document.getElementById('roll-badge');
+  if (!badge) return;
+  badge.textContent = total;
+  badge.setAttribute('aria-label', `Roll ${total}`);
+  badge.classList.remove('hidden');
+}
+
+function hideRollBadge() {
+  const badge = document.getElementById('roll-badge');
+  if (!badge) return;
+  badge.classList.add('hidden');
+}
 
 function updateSearchHighlights(snapshot, labels) {
   if (!currentBoard || !snapshot.edges) return;

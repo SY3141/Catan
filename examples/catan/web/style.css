@@ -253,6 +253,30 @@
   display: none;
 }
 
+.roll-badge {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  height: 42px;
+  border: 1px solid rgba(255, 255, 255, 0.55);
+  border-radius: 8px;
+  background: rgba(15, 52, 96, 0.88);
+  color: #ffffff;
+  font-size: 1.35rem;
+  font-weight: 800;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+  pointer-events: none;
+}
+
+.roll-badge.hidden {
+  display: none;
+}
+
 /* Tree explorer toggle */
 .tree-children { display: none; }
 .tree-children.open { display: block; }
