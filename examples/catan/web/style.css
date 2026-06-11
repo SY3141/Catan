@@ -194,6 +194,11 @@
   border-color: #e94560 !important;
 }
 
+.ad-card {
+  min-height: 110px;
+  overflow: hidden;
+}
+
 /* Resource cards — always-visible colored rectangles with count */
 .resource-card {
   display: inline-flex;

@@ -376,6 +376,11 @@ impl<G: Game + 'static> GameSession<G> {
     /// Process a client message and return response messages.
     pub fn handle(&mut self, msg: ClientMsg) -> Vec<ServerMsg> {
         match msg {
+            ClientMsg::Authenticate { .. } => {
+                vec![ServerMsg::Error {
+                    message: "Already authenticated".into(),
+                }]
+            }
             ClientMsg::NewGame { seed } => {
                 self.seed = seed.unwrap_or_else(|| fastrand::u64(..));
                 let state = self.presenter.new_game(self.seed);
@@ -636,6 +641,14 @@ impl<G: Game + 'static> GameSession<G> {
     pub fn current_is_human(&self) -> bool {
         let idx = self.current_player_idx();
         self.configs[idx].human
+    }
+
+    pub fn seed(&self) -> u64 {
+        self.seed
+    }
+
+    pub fn board_fingerprint(&self) -> Option<u64> {
+        self.presenter.board_fingerprint(self.search.state())
     }
 
     fn apply_action(&mut self, action: usize) {

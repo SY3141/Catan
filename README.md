@@ -65,10 +65,16 @@ The Docker image serves the 1v1 Catan web analysis board described
 below, using the built-in `rollout` evaluator and exposing the board on
 port 3000:
 
+Rebuild the image so the Rust server changes are included:
+
 ```
-docker build -t hexfish-catan-ui .
-docker run --rm -p 3000:3000 hexfish-catan-ui
+docker compose up --build
 ```
+
+By default, when `CLERK_JWT_KEY` is not set, each WebSocket connection
+gets a fresh isolated game. To share one in-memory game across tabs and
+refreshes for the same Clerk account, create a local `.env` file from
+`.env.example` and set `CLERK_JWT_KEY` to your Clerk JWT public key.
 
 Then open <http://localhost:3000>.
 

@@ -40,6 +40,8 @@ pub struct TreeNodeSnapshot {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 pub enum ClientMsg {
+    /// Authenticate the WebSocket before any game state is sent.
+    Authenticate { token: String },
     /// Start a new game (optionally with a seed).
     NewGame { seed: Option<u64> },
     /// Human plays an action.

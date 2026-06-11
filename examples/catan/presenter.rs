@@ -163,6 +163,10 @@ impl GamePresenter<GameState> for CatanPresenter {
         visualize::format_phase(&state.phase)
     }
 
+    fn board_fingerprint(&self, state: &GameState) -> Option<u64> {
+        Some(state.topology.board_code())
+    }
+
     fn static_dir(&self) -> &Path {
         &self.static_dir
     }

@@ -1,4 +1,12 @@
 (function () {
+  window.hexfishGetClerkToken = async () => {
+    const clerk = window.Clerk;
+    if (!clerk || !clerk.session || typeof clerk.session.getToken !== 'function') {
+      return null;
+    }
+    return clerk.session.getToken();
+  };
+
   const loginPage = document.getElementById('login-page');
   const appShell = document.getElementById('app');
   const authMount = document.getElementById('clerk-auth-mount');

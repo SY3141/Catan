@@ -833,6 +833,7 @@ async fn handle_colonist_socket(
         // --- Handle client message ---
         if let Some(text) = text {
             match serde_json::from_str::<hexfish::server::ClientMsg>(&text) {
+                Ok(hexfish::server::ClientMsg::Authenticate { .. }) => {}
                 Ok(hexfish::server::ClientMsg::SetAutoSearch { enabled, target }) => {
                     if enabled {
                         auto_refill = target;
@@ -941,6 +942,7 @@ async fn handle_colonist_socket(
                 if let Some(Some(Ok(Message::Text(t)))) = socket.recv().now_or_never() {
                     if let Ok(msg) = serde_json::from_str::<hexfish::server::ClientMsg>(&t) {
                         match &msg {
+                            hexfish::server::ClientMsg::Authenticate { .. } => {}
                             hexfish::server::ClientMsg::SetAutoSearch { enabled, target } => {
                                 if *enabled {
                                     auto_refill = *target;
@@ -1057,14 +1059,13 @@ pub fn run_serve(
     let dice = Dice::Balanced(BalancedDice::new());
     let presenter =
         Arc::new(CatanPresenter::new(static_dir.clone(), dice).with_player_names(names));
-    let mcts_config = hexfish::mcts::Config::default();
     let mut session = hexfish::server::GameSession::with_state(
         timeline_pairs[0].1.clone(),
         evaluator,
         eval_name,
         presenter,
         [true, true],
-        mcts_config,
+        hexfish::mcts::Config::default(),
     );
     session.load_timeline(timeline_pairs);
     session.seek_to_end();
@@ -1093,7 +1094,8 @@ pub fn run_serve(
         pre_pending_cursor: None,
     };
 
-    // Wrap in Mutex for the axum handler (single client, no real contention).
+    // Colonist/CDP mode intentionally mirrors one external Chrome/Colonist game.
+    // The normal HexFish `serve` path owns per-Clerk-account game sessions.
     let session = Arc::new(tokio::sync::Mutex::new(session));
     let poll_state = Arc::new(tokio::sync::Mutex::new(poll_state));
 
@@ -1101,11 +1103,11 @@ pub fn run_serve(
         .route(
             "/ws",
             axum::routing::get({
-                let session = session.clone();
-                let poll_state = poll_state.clone();
+                let session = Arc::clone(&session);
+                let poll_state = Arc::clone(&poll_state);
                 move |ws: axum::extract::ws::WebSocketUpgrade| {
-                    let session = session.clone();
-                    let poll_state = poll_state.clone();
+                    let session = Arc::clone(&session);
+                    let poll_state = Arc::clone(&poll_state);
                     async move {
                         ws.on_upgrade(move |socket| async move {
                             let mut session = session.lock().await;

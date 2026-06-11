@@ -1,6 +1,8 @@
 // Entry point: wires components together.
 
-const session = new Session();
+const session = new Session({
+  getAuthToken: () => window.hexfishGetClerkToken ? window.hexfishGetClerkToken() : null,
+});
 const board = new Board(document.getElementById('board-svg'));
 window.hexfishBoard = board;
 const mctsPanel = new MCTSPanel();

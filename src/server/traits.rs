@@ -29,6 +29,11 @@ pub trait GamePresenter<G: Game>: Send + Sync {
     /// Human-readable label for the current phase.
     fn phase_label(&self, state: &G) -> String;
 
+    /// Stable fingerprint for the initial board layout, if the game has one.
+    fn board_fingerprint(&self, _state: &G) -> Option<u64> {
+        None
+    }
+
     /// Directory containing static web assets (index.html, JS, CSS).
     fn static_dir(&self) -> &Path;
 

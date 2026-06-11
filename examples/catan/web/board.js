@@ -14,6 +14,10 @@ const TERRAIN_COLORS = {
 const HEX_SIZE = 50;
 const SQRT3 = Math.sqrt(3);
 
+function catanPips(number) {
+  return number === 7 ? 0 : Math.max(0, 6 - Math.abs(7 - number));
+}
+
 class Board {
   constructor(svgEl) {
     this.svg = svgEl;
@@ -528,21 +532,34 @@ class Board {
       fill: color, stroke: '#111', 'stroke-width': 1
     }));
 
-    // Number token (shifted down so robber doesn't fully obscure it)
+    // Number token
     if (number) {
       const isRed = number === 6 || number === 8;
-      parent.appendChild(this._el('circle', {
+      const tokenG = this._el('g', {});
+      tokenG.appendChild(this._el('circle', {
         cx, cy, r: 12,
         fill: '#f5f0e1', stroke: '#333', 'stroke-width': 0.5
       }));
       const txt = this._el('text', {
-        x: cx, y: cy + 4.5,
+        x: cx, y: cy + 1.5,
         'text-anchor': 'middle', 'font-size': '12',
         'font-weight': isRed ? 'bold' : 'normal',
         fill: isRed ? '#c00' : '#333'
       });
       txt.textContent = number;
-      parent.appendChild(this._keepUpright(txt, cx, cy));
+      tokenG.appendChild(txt);
+
+      const pipCount = catanPips(number);
+      const pipSpacing = 3.2;
+      const pipStart = cx - ((pipCount - 1) * pipSpacing) / 2;
+      for (let i = 0; i < pipCount; i++) {
+        tokenG.appendChild(this._el('circle', {
+          cx: pipStart + i * pipSpacing, cy: cy + 7.5, r: 1.05,
+          fill: isRed ? '#c00' : '#333'
+        }));
+      }
+
+      parent.appendChild(this._keepUpright(tokenG, cx, cy));
     }
   }
 
@@ -577,6 +594,17 @@ class Board {
     const offset = 18;
     const lx = mx + nx / nlen * offset;
     const ly = my + ny / nlen * offset;
+
+    parent.appendChild(this._el('path', {
+      d: `M ${x0} ${y0} L ${lx} ${ly} L ${x1} ${y1}`,
+      fill: 'none',
+      stroke: '#d2b48c',
+      'stroke-width': 2,
+      'stroke-linecap': 'round',
+      'stroke-linejoin': 'round',
+      opacity: 0.85,
+      'pointer-events': 'none',
+    }));
 
     // Circle label with ratio
     const isGeneric = port.kind === 'generic';

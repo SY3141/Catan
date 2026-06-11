@@ -4,6 +4,10 @@ services:
       context: .
       dockerfile: Dockerfile
     init: true
+    environment:
+      CLERK_JWT_KEY: ${CLERK_JWT_KEY:-}
+      CLERK_ISSUER: ${CLERK_ISSUER:-}
+      CLERK_AUTHORIZED_PARTIES: ${CLERK_AUTHORIZED_PARTIES:-http://localhost:3000}
     ports:
       - "3000:3000"
     volumes:
