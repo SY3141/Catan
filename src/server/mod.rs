@@ -271,6 +271,7 @@ enum SocketAuth {
 struct SocketSessionKey {
     user_id: String,
     ephemeral: bool,
+    scope: &'static str,
 }
 
 impl<G: Game + 'static> UserSessionStore<G> {
@@ -300,9 +301,9 @@ fn log_socket_auth_mode(auth: &SocketAuth) {
             tracing::info!("per-account HexFish sessions enabled");
         }
         SocketAuth::Anonymous => {
-            println!("Anonymous isolated HexFish sessions enabled (CLERK_JWT_KEY not set)");
+            println!("Anonymous HexFish sessions enabled (CLERK_JWT_KEY not set)");
             tracing::warn!(
-                "CLERK_JWT_KEY not set; each WebSocket gets a fresh isolated HexFish game"
+                "CLERK_JWT_KEY not set; browser reconnects reuse a local anonymous session token"
             );
         }
     }
@@ -481,11 +482,7 @@ async fn handle_socket<G: Game + 'static>(
         Err(()) => return,
     };
     let user_id = session_key.user_id;
-    let session_scope = if session_key.ephemeral {
-        "anonymous"
-    } else {
-        "clerk"
-    };
+    let session_scope = session_key.scope;
     let account_key = redacted_account_key(&user_id);
     let (user_session, created) = store.get_or_create(&user_id);
     let board_code = format_board_fingerprint(user_session.board_fingerprint);
@@ -577,17 +574,40 @@ async fn authenticate_socket(
             Ok(user_id) => Ok(SocketSessionKey {
                 user_id,
                 ephemeral: false,
+                scope: "clerk",
             }),
             Err(_) => {
                 send_unauthorized(socket).await;
                 Err(())
             }
         },
-        SocketAuth::Anonymous => Ok(SocketSessionKey {
-            user_id: format!("anonymous:{}", fastrand::u64(..)),
-            ephemeral: true,
-        }),
+        SocketAuth::Anonymous => {
+            if let Some(user_id) = anonymous_user_id_from_token(&token) {
+                Ok(SocketSessionKey {
+                    user_id,
+                    ephemeral: false,
+                    scope: "anonymous",
+                })
+            } else {
+                Ok(SocketSessionKey {
+                    user_id: format!("anonymous:{}", fastrand::u64(..)),
+                    ephemeral: true,
+                    scope: "anonymous-ephemeral",
+                })
+            }
+        }
     }
+}
+
+fn anonymous_user_id_from_token(token: &str) -> Option<String> {
+    let id = token.strip_prefix("anon:")?;
+    if id.is_empty() || id.len() > 128 {
+        return None;
+    }
+    let safe = id
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+    safe.then(|| format!("anonymous:{id}"))
 }
 
 async fn handle_authenticated_socket<G: Game + 'static>(
@@ -740,7 +760,7 @@ mod tests {
         game::{Game, Status},
     };
 
-    use super::{GamePresenter, SessionFactory, UserSessionStore};
+    use super::{GamePresenter, SessionFactory, UserSessionStore, anonymous_user_id_from_token};
 
     #[derive(Clone)]
     struct TestGame {
@@ -815,6 +835,17 @@ mod tests {
             SessionFactory::new_game(evaluator, "test", presenter.clone(), [true, true], None);
 
         (UserSessionStore::new(factory), presenter)
+    }
+
+    #[test]
+    fn anonymous_tokens_are_stable_when_safe() {
+        assert_eq!(
+            anonymous_user_id_from_token("anon:local-session_123"),
+            Some("anonymous:local-session_123".to_string())
+        );
+        assert_eq!(anonymous_user_id_from_token(""), None);
+        assert_eq!(anonymous_user_id_from_token("anon:"), None);
+        assert_eq!(anonymous_user_id_from_token("anon:not safe"), None);
     }
 
     #[test]

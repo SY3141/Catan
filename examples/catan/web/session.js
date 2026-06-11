@@ -11,6 +11,7 @@ class Session {
     this.queue = [];
     this.shouldReconnect = false;
     this.getAuthToken = options.getAuthToken || null;
+    this.anonymousSessionId = options.anonymousSessionId || this._loadAnonymousSessionId();
   }
 
   setAuthTokenProvider(provider) {
@@ -37,6 +38,9 @@ class Session {
         token = await this._getAuthToken() || '';
       } catch (error) {
         console.warn('Could not read Clerk session token; trying anonymous WebSocket session.', error);
+      }
+      if (!token) {
+        token = `anon:${this.anonymousSessionId}`;
       }
       ws.send(JSON.stringify({ type: 'Authenticate', token }));
     };
@@ -109,5 +113,21 @@ class Session {
   async _getAuthToken() {
     if (typeof this.getAuthToken !== 'function') return null;
     return this.getAuthToken();
+  }
+
+  _loadAnonymousSessionId() {
+    const key = 'hexfish-anonymous-session-id';
+    try {
+      let id = window.localStorage && window.localStorage.getItem(key);
+      if (!id) {
+        id = window.crypto && typeof window.crypto.randomUUID === 'function'
+          ? window.crypto.randomUUID()
+          : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+        window.localStorage && window.localStorage.setItem(key, id);
+      }
+      return id;
+    } catch (_error) {
+      return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    }
   }
 }

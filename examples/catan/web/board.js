@@ -200,10 +200,11 @@ class Board {
       }
       for (const nid of frame.buildings[p].cities) {
         const [x, y] = nodes[nid];
-        buildG.appendChild(this._el('polygon', {
+        const city = this._el('polygon', {
           points: this._cityPoints(x, y),
           fill: color, stroke: '#111', 'stroke-width': 1
-        }));
+        });
+        buildG.appendChild(this._keepUpright(city, x, y));
       }
     }
 
@@ -281,6 +282,7 @@ class Board {
         points: this._cityPoints(x, y),
         fill: color, stroke: '#fff', 'stroke-width': 1.5
       });
+      uprightAt = [x, y];
     }
     // Robber: 205..224 -> tile
     else if (action >= 205 && action < 224) {
