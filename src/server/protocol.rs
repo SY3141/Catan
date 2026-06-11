@@ -41,7 +41,10 @@ pub struct TreeNodeSnapshot {
 #[serde(tag = "type")]
 pub enum ClientMsg {
     /// Authenticate the WebSocket before any game state is sent.
-    Authenticate { token: String },
+    Authenticate {
+        token: String,
+        anonymous_session: Option<String>,
+    },
     /// Start a new game (optionally with a seed).
     NewGame { seed: Option<u64> },
     /// Human plays an action.

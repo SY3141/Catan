@@ -564,7 +564,11 @@ async fn authenticate_socket(
             return Err(());
         }
     };
-    let ClientMsg::Authenticate { token } = client_msg else {
+    let ClientMsg::Authenticate {
+        token,
+        anonymous_session,
+    } = client_msg
+    else {
         send_unauthorized(socket).await;
         return Err(());
     };
@@ -582,7 +586,15 @@ async fn authenticate_socket(
             }
         },
         SocketAuth::Anonymous => {
-            if let Some(user_id) = anonymous_user_id_from_token(&token) {
+            if let Some(user_id) =
+                anonymous_session.as_deref().and_then(anonymous_user_id_from_id)
+            {
+                Ok(SocketSessionKey {
+                    user_id,
+                    ephemeral: false,
+                    scope: "anonymous",
+                })
+            } else if let Some(user_id) = anonymous_user_id_from_token(&token) {
                 Ok(SocketSessionKey {
                     user_id,
                     ephemeral: false,
@@ -601,6 +613,10 @@ async fn authenticate_socket(
 
 fn anonymous_user_id_from_token(token: &str) -> Option<String> {
     let id = token.strip_prefix("anon:")?;
+    anonymous_user_id_from_id(id)
+}
+
+fn anonymous_user_id_from_id(id: &str) -> Option<String> {
     if id.is_empty() || id.len() > 128 {
         return None;
     }
@@ -760,7 +776,10 @@ mod tests {
         game::{Game, Status},
     };
 
-    use super::{GamePresenter, SessionFactory, UserSessionStore, anonymous_user_id_from_token};
+    use super::{
+        GamePresenter, SessionFactory, UserSessionStore, anonymous_user_id_from_id,
+        anonymous_user_id_from_token,
+    };
 
     #[derive(Clone)]
     struct TestGame {
@@ -843,9 +862,14 @@ mod tests {
             anonymous_user_id_from_token("anon:local-session_123"),
             Some("anonymous:local-session_123".to_string())
         );
+        assert_eq!(
+            anonymous_user_id_from_id("local-session_123"),
+            Some("anonymous:local-session_123".to_string())
+        );
         assert_eq!(anonymous_user_id_from_token(""), None);
         assert_eq!(anonymous_user_id_from_token("anon:"), None);
         assert_eq!(anonymous_user_id_from_token("anon:not safe"), None);
+        assert_eq!(anonymous_user_id_from_id("not safe"), None);
     }
 
     #[test]

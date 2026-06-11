@@ -39,10 +39,11 @@ class Session {
       } catch (error) {
         console.warn('Could not read Clerk session token; trying anonymous WebSocket session.', error);
       }
-      if (!token) {
-        token = `anon:${this.anonymousSessionId}`;
-      }
-      ws.send(JSON.stringify({ type: 'Authenticate', token }));
+      ws.send(JSON.stringify({
+        type: 'Authenticate',
+        token,
+        anonymous_session: this.anonymousSessionId,
+      }));
     };
 
     ws.onmessage = (event) => {
