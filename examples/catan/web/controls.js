@@ -8,6 +8,8 @@ class Controls {
   constructor(session) {
     this.session = session;
     this.autoplay = false;
+    this.pendingAutoplay = false;
+    this.lastState = null;
     this.autoSearch = document.getElementById('autosearch-toggle').checked;
     this._bind();
     // Tell the server our initial auto-search state.
@@ -28,10 +30,17 @@ class Controls {
 
   /// Called on every GameState update.
   onStateUpdate(msg) {
-    if (this.pendingAutoplay && !msg.is_terminal) {
+    this.lastState = msg;
+    if (!this.autoplay || msg.is_terminal) {
       this.pendingAutoplay = false;
-      const count = parseInt(document.getElementById('sims-input').value);
-      this.session.send({ type: 'RunSims', count });
+      return;
+    }
+    if (this._playForcedMove(msg)) {
+      return;
+    }
+    if (this.pendingAutoplay) {
+      this.pendingAutoplay = false;
+      this._runSims();
       return;
     }
   }
@@ -55,6 +64,25 @@ class Controls {
 
   onGameOver() {
     this.stopAutoplay();
+  }
+
+  _runSims() {
+    const count = parseInt(document.getElementById('sims-input').value);
+    this.session.send({ type: 'RunSims', count });
+  }
+
+  _forcedAction(msg) {
+    if (!msg || msg.is_terminal || msg.is_chance) return null;
+    if (!Array.isArray(msg.legal_actions) || msg.legal_actions.length !== 1) return null;
+    return msg.legal_actions[0];
+  }
+
+  _playForcedMove(msg) {
+    const forced = this._forcedAction(msg);
+    if (!forced) return false;
+    this.pendingAutoplay = true;
+    this.session.send({ type: 'PlayAction', action: forced.action });
+    return true;
   }
 
   _bind() {
@@ -120,12 +148,14 @@ class Controls {
 
   startAutoplay() {
     this.autoplay = true;
-    const count = parseInt(document.getElementById('sims-input').value);
-    this.session.send({ type: 'RunSims', count });
+    this.pendingAutoplay = false;
+    if (this._playForcedMove(this.lastState)) return;
+    this._runSims();
   }
 
   stopAutoplay() {
     this.autoplay = false;
+    this.pendingAutoplay = false;
     document.getElementById('autoplay-toggle').checked = false;
   }
 }

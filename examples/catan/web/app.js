@@ -11,6 +11,11 @@ const controls = new Controls(session);
 const RESOURCE_NAMES = ['lumber', 'brick', 'wool', 'grain', 'ore'];
 const DEV_CARD_NAMES = ['Knight', 'VP', 'Road Building', 'Year of Plenty', 'Monopoly'];
 const DEV_SHORT = ['Kn', 'VP', 'RB', 'YP', 'Mo'];
+const PLAYER_COLORS = ['#4a9eff', '#ff6b6b'];
+
+function playerColor(playerIndex) {
+  return playerIndex === 0 || playerIndex === 1 ? PLAYER_COLORS[playerIndex] : '';
+}
 
 let currentState = null;
 let currentBoard = null;
@@ -89,9 +94,9 @@ session.on('GameState', (msg) => {
       line.className = 'py-0.5';
       const text = msg.action_log[i];
       if (text.startsWith('P1:')) {
-        line.style.color = '#4a9eff';
+        line.style.color = PLAYER_COLORS[0];
       } else if (text.startsWith('P2:')) {
-        line.style.color = '#ff6b6b';
+        line.style.color = PLAYER_COLORS[1];
       } else {
         line.style.color = '#a0a0a0';
         line.style.fontStyle = 'italic';
@@ -128,11 +133,14 @@ session.on('GameState', (msg) => {
   // Result banner
   const banner = document.getElementById('result-banner');
   if (msg.is_terminal && msg.result) {
+    const winner = parseResultWinner(msg.result);
     banner.textContent = msg.result;
+    banner.style.background = playerColor(winner) || '';
     banner.classList.remove('hidden');
     controls.onGameOver();
   } else {
     banner.classList.add('hidden');
+    banner.style.background = '';
   }
 
   controls.onStateUpdate(msg);
@@ -172,10 +180,15 @@ function updateRollBadge(msg, state) {
     const total = parseRollTotal(newEntries[i]);
     if (total == null) continue;
 
+    const entryIndex = lastActionLogLength + i;
+    const roller = parseRoller(newEntries[i]) ??
+      findRecentRoller(entries, entryIndex - 1) ??
+      msg.current_player;
+
     if (total === 7) {
       hideRollBadge();
     } else if (rollLogHasExplicitGain(newEntries[i]) || handGained) {
-      showRollBadge(total);
+      showRollBadge(total, roller);
     } else {
       hideRollBadge();
     }
@@ -210,6 +223,30 @@ function parseRollTotal(entry) {
   return total >= 2 && total <= 12 ? total : null;
 }
 
+function parseRoller(entry) {
+  const firstLine = String(entry).split('\n')[0];
+  if (!/\broll(?:ed|s)?\b/i.test(firstLine)) return null;
+
+  const match = firstLine.match(/\bP([12])\b/i);
+  if (!match) return null;
+  return Number(match[1]) - 1;
+}
+
+function findRecentRoller(entries, startIndex) {
+  for (let i = startIndex; i >= 0; i--) {
+    const roller = parseRoller(entries[i]);
+    if (roller != null) return roller;
+    if (parseRollTotal(entries[i]) != null) break;
+  }
+  return null;
+}
+
+function parseResultWinner(result) {
+  const match = String(result).match(/\bP([12])\s+wins\b/i);
+  if (!match) return null;
+  return Number(match[1]) - 1;
+}
+
 function rollLogHasExplicitGain(entry) {
   return String(entry)
     .split('\n')
@@ -217,11 +254,15 @@ function rollLogHasExplicitGain(entry) {
     .some(line => /^\s*P[12]:\s*\S/.test(line));
 }
 
-function showRollBadge(total) {
+function showRollBadge(total, roller) {
   const badge = document.getElementById('roll-badge');
   if (!badge) return;
+  const playerIndex = roller === 0 || roller === 1 ? roller : null;
   badge.textContent = total;
-  badge.setAttribute('aria-label', `Roll ${total}`);
+  badge.style.background = playerColor(playerIndex);
+  badge.setAttribute('aria-label', playerIndex == null
+    ? `Roll ${total}`
+    : `P${playerIndex + 1} rolled ${total}`);
   badge.classList.remove('hidden');
 }
 

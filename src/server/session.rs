@@ -630,6 +630,15 @@ impl<G: Game + 'static> GameSession<G> {
         !self.is_terminal() && !self.is_chance()
     }
 
+    /// Returns true when automatic background search is useful.
+    ///
+    /// Forced decision states such as Roll or End Turn have only one legal
+    /// action, so auto-search should let autoplay advance them instead of
+    /// spending the whole simulation budget on a non-choice.
+    pub fn should_auto_search(&self) -> bool {
+        self.can_search() && self.legal_actions().len() > 1
+    }
+
     fn current_player_idx(&self) -> usize {
         match self.search.state().status() {
             Status::Decision(sign) if sign > 0.0 => 0,

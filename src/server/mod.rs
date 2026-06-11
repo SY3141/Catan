@@ -723,7 +723,7 @@ async fn handle_authenticated_message<G: Game + 'static>(
     // Auto-search: trigger RunSims after state changes (e.g. PlayAction, BotMove).
     if has_state_update {
         if let Some(target) = *auto_search {
-            if session.can_search() {
+            if session.should_auto_search() {
                 let auto_msg = ClientMsg::RunSims { count: target };
                 let msgs = run_search(socket, &mut session, &auto_msg).await?;
                 for msg in msgs {
