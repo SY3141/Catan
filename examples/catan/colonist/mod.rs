@@ -849,7 +849,7 @@ async fn handle_colonist_socket(
                         "ws: SetAutoSearch enabled={enabled} target={target} budget={sims_budget}"
                     );
                 }
-                Ok(hexfish::server::ClientMsg::RunSims { count }) => {
+                Ok(hexfish::server::ClientMsg::RunSims { count, .. }) => {
                     sims_budget += count;
                     eprintln!("ws: RunSims +{count} budget={sims_budget}");
                 }
@@ -955,7 +955,7 @@ async fn handle_colonist_socket(
                                     break;
                                 }
                             }
-                            hexfish::server::ClientMsg::RunSims { count } => {
+                            hexfish::server::ClientMsg::RunSims { count, .. } => {
                                 sims_budget += count;
                             }
                             _ => {

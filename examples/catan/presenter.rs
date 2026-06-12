@@ -167,6 +167,16 @@ impl GamePresenter<GameState> for CatanPresenter {
         Some(state.topology.board_code())
     }
 
+    fn serialize_log_state(&self, state: &GameState) -> Option<String> {
+        Some(state.to_string())
+    }
+
+    fn deserialize_log_state(&self, text: &str) -> Result<GameState, String> {
+        let mut state: GameState = text.parse()?;
+        state.dice = self.dice;
+        Ok(state)
+    }
+
     fn static_dir(&self) -> &Path {
         &self.static_dir
     }

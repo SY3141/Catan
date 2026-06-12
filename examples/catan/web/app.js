@@ -18,15 +18,29 @@ function playerColor(playerIndex) {
 }
 
 let currentState = null;
+let analysisState = null;
+let replayState = null;
 let currentBoard = null;
-let lastActionLogLength = null;
-let previousFrameHands = null;
+let lastActionLogLength = { analysis: null, replay: null };
+let previousFrameHands = { analysis: null, replay: null };
+let activeView = 'analysis';
 
 // ── Message handlers ─────────────────────────────────────────────────
 
 session.on('GameState', (msg) => {
+  if (msg.replay) {
+    replayState = msg;
+    if (activeView === 'replay-board') renderGameState(msg);
+  } else {
+    analysisState = msg;
+    if (activeView === 'analysis') renderGameState(msg);
+  }
+});
+
+function renderGameState(msg) {
   currentState = msg;
   const state = msg.state;
+  const viewKey = msg.replay ? 'replay' : 'analysis';
 
   // Initialize board on first state (or after new game).
   if (state.board) {
@@ -62,7 +76,7 @@ session.on('GameState', (msg) => {
   actionList.innerHTML = '';
   board.clearOverlays();
 
-  if (!msg.is_terminal && !msg.is_chance) {
+  if (!msg.replay && !msg.is_terminal && !msg.is_chance) {
     // Board overlays for spatial actions
     if (currentBoard) {
       board.showLegalActions(msg.legal_actions, currentBoard, msg.current_player);
@@ -107,7 +121,11 @@ session.on('GameState', (msg) => {
       line.addEventListener('click', () => {
         controls.stopAutoplay();
         controls._disableAutoSearch();
-        session.send({ type: 'SetLogCursor', index: i });
+        if (msg.replay) {
+          session.send({ type: 'SetReplayCursor', cursor: i + 1 });
+        } else {
+          session.send({ type: 'SetLogCursor', index: i });
+        }
       });
       logView.appendChild(line);
       for (let p = 1; p < parts.length; p++) {
@@ -124,7 +142,7 @@ session.on('GameState', (msg) => {
     }
   }
 
-  updateRollBadge(msg, state);
+  updateRollBadge(msg, state, viewKey);
 
   // Undo/Redo button states
   document.getElementById('btn-undo').disabled = !msg.can_undo;
@@ -144,43 +162,44 @@ session.on('GameState', (msg) => {
   }
 
   controls.onStateUpdate(msg);
-});
+}
 
 function showLegalActionPreview(action) {
   if (!currentBoard || !currentState) return;
   board.showActionPreview(action, currentBoard, currentState.current_player);
 }
 
-function updateRollBadge(msg, state) {
+function updateRollBadge(msg, state, viewKey) {
   const entries = msg.action_log || [];
   const currentLength = entries.length;
   const currentHands = frameHands(state);
+  const previousLength = lastActionLogLength[viewKey];
 
-  if (lastActionLogLength == null) {
-    lastActionLogLength = currentLength;
-    previousFrameHands = currentHands;
+  if (previousLength == null) {
+    lastActionLogLength[viewKey] = currentLength;
+    previousFrameHands[viewKey] = currentHands;
     return;
   }
 
-  if (currentLength < lastActionLogLength) {
+  if (currentLength < previousLength) {
     hideRollBadge();
-    lastActionLogLength = currentLength;
-    previousFrameHands = currentHands;
+    lastActionLogLength[viewKey] = currentLength;
+    previousFrameHands[viewKey] = currentHands;
     return;
   }
 
-  if (currentLength === lastActionLogLength) {
-    previousFrameHands = currentHands;
+  if (currentLength === previousLength) {
+    previousFrameHands[viewKey] = currentHands;
     return;
   }
 
-  const newEntries = entries.slice(lastActionLogLength);
-  const handGained = hasPositiveHandGain(previousFrameHands, currentHands);
+  const newEntries = entries.slice(previousLength);
+  const handGained = hasPositiveHandGain(previousFrameHands[viewKey], currentHands);
   for (let i = newEntries.length - 1; i >= 0; i--) {
     const total = parseRollTotal(newEntries[i]);
     if (total == null) continue;
 
-    const entryIndex = lastActionLogLength + i;
+    const entryIndex = previousLength + i;
     const roller = parseRoller(newEntries[i]) ??
       findRecentRoller(entries, entryIndex - 1) ??
       msg.current_player;
@@ -195,8 +214,8 @@ function updateRollBadge(msg, state) {
     break;
   }
 
-  lastActionLogLength = currentLength;
-  previousFrameHands = currentHands;
+  lastActionLogLength[viewKey] = currentLength;
+  previousFrameHands[viewKey] = currentHands;
 }
 
 function frameHands(state) {
@@ -289,6 +308,10 @@ session.on('Snapshot', (msg) => {
   controls.onSimsDone(msg.snapshot);
 });
 
+session.on('ReplayList', (msg) => {
+  renderReplayList(msg.entries || []);
+});
+
 session.on('Subtree', (msg) => {
   mctsPanel.showSubtree(msg.tree);
 });
@@ -309,12 +332,161 @@ session.on('BotAction', (msg) => {
 
 session.on('Error', (msg) => {
   controls.onSearchError();
+  setReplayStatus(msg.message);
   console.error('Server error:', msg.message);
 });
 
+// ── View tabs / replay list ────────────────────────────────────────────────
+
+function setTabState(tab) {
+  const boardTab = document.getElementById('tab-board');
+  const replayTab = document.getElementById('tab-replay');
+  const isAnalysis = tab === 'analysis';
+
+  boardTab.className = isAnalysis
+    ? 'view-tab active px-2 py-1 rounded text-gray-100 bg-bg-3'
+    : 'view-tab px-2 py-1 rounded text-gray-400 hover:text-gray-100 hover:bg-bg-3';
+  replayTab.className = !isAnalysis
+    ? 'view-tab active px-2 py-1 rounded text-gray-100 bg-bg-3'
+    : 'view-tab px-2 py-1 rounded text-gray-400 hover:text-gray-100 hover:bg-bg-3';
+  boardTab.setAttribute('aria-selected', String(isAnalysis));
+  replayTab.setAttribute('aria-selected', String(!isAnalysis));
+}
+
+function showAnalysisView() {
+  activeView = 'analysis';
+  setTabState('analysis');
+  document.getElementById('main-layout').classList.remove('hidden');
+  document.getElementById('replay-view').classList.add('hidden');
+  document.getElementById('controls').classList.remove('hidden');
+  if (analysisState) renderGameState(analysisState);
+}
+
+function showReplayView() {
+  activeView = 'replay-list';
+  setTabState('replay');
+  document.getElementById('main-layout').classList.add('hidden');
+  document.getElementById('replay-view').classList.remove('hidden');
+  document.getElementById('controls').classList.add('hidden');
+  requestReplayList();
+}
+
+function showReplayBoardView() {
+  activeView = 'replay-board';
+  setTabState('replay');
+  document.getElementById('main-layout').classList.remove('hidden');
+  document.getElementById('replay-view').classList.add('hidden');
+  document.getElementById('controls').classList.remove('hidden');
+  if (replayState) renderGameState(replayState);
+}
+
+function requestReplayList() {
+  setReplayStatus('Loading...');
+  session.send({ type: 'ListReplays' });
+}
+
+function setReplayStatus(text) {
+  const status = document.getElementById('replay-status');
+  if (!status) return;
+  status.textContent = text || '';
+  status.classList.toggle('hidden', !text);
+}
+
+function renderReplayList(entries) {
+  const favoriteList = document.getElementById('favorite-replay-list');
+  const list = document.getElementById('replay-list');
+  const favorites = entries.filter(entry => entry.favorite);
+  const replays = entries.filter(entry => !entry.favorite);
+  favoriteList.innerHTML = '';
+  setReplayStatus('');
+
+  renderReplaySection(favoriteList, favorites, 'No favourited replays');
+  renderReplaySection(list, replays, entries.length ? 'No other replays' : 'No replays');
+}
+
+function renderReplaySection(list, entries, emptyText) {
+  list.innerHTML = '';
+
+  if (!entries.length) {
+    const empty = document.createElement('div');
+    empty.className = 'px-3 py-4 text-xs text-gray-500';
+    empty.textContent = emptyText;
+    list.appendChild(empty);
+    return;
+  }
+
+  for (const entry of entries) {
+    const row = document.createElement('div');
+    row.className = 'w-full flex items-center gap-2 px-2 py-2 border-b border-gray-700 last:border-b-0 hover:bg-bg-3 transition-colors';
+
+    const star = document.createElement('button');
+    star.type = 'button';
+    star.className = 'w-7 h-7 flex items-center justify-center text-base text-yellow-300 rounded hover:bg-bg cursor-pointer';
+    star.textContent = entry.favorite ? '\u2605' : '\u2606';
+    star.title = entry.favorite ? 'Remove favourite' : 'Favourite replay';
+    star.setAttribute('aria-label', star.title);
+    star.addEventListener('click', (event) => {
+      event.stopPropagation();
+      session.send({
+        type: 'SetReplayFavorite',
+        id: entry.id,
+        favorite: !entry.favorite,
+      });
+    });
+
+    const load = document.createElement('button');
+    load.type = 'button';
+    load.className = 'flex min-w-0 flex-1 items-center justify-between gap-3 text-left rounded px-1 py-1 hover:text-gray-100 cursor-pointer';
+    const saved = document.createElement('span');
+    saved.className = 'min-w-0 truncate text-xs text-gray-100';
+    saved.textContent = formatReplayTime(entry.saved_at_ms);
+
+    const actions = document.createElement('span');
+    actions.className = 'text-[11px] text-gray-400 whitespace-nowrap';
+    actions.textContent = `${entry.action_count} actions`;
+
+    load.appendChild(saved);
+    load.appendChild(actions);
+    load.addEventListener('click', () => {
+      controls.stopAutoplay();
+      controls._disableAutoSearch();
+      session.send({ type: 'LoadReplay', id: entry.id });
+      showReplayBoardView();
+    });
+
+    const trash = document.createElement('button');
+    trash.type = 'button';
+    trash.className = 'w-7 h-7 flex items-center justify-center text-sm text-gray-400 rounded hover:bg-accent hover:text-white cursor-pointer';
+    trash.textContent = '\u{1F5D1}';
+    trash.title = 'Delete replay';
+    trash.setAttribute('aria-label', 'Delete replay');
+    trash.addEventListener('click', (event) => {
+      event.stopPropagation();
+      if (!window.confirm('Delete this replay?')) return;
+      session.send({ type: 'DeleteReplay', id: entry.id });
+    });
+
+    row.appendChild(star);
+    row.appendChild(load);
+    row.appendChild(trash);
+    list.appendChild(row);
+  }
+}
+
+function formatReplayTime(ms) {
+  const date = new Date(Number(ms));
+  if (Number.isNaN(date.getTime())) return 'Saved replay';
+  return date.toLocaleString();
+}
+
 // ── Board action clicks ──────────────────────────────────────────────
 
+document.getElementById('tab-board').addEventListener('click', showAnalysisView);
+document.getElementById('tab-replay').addEventListener('click', showReplayView);
+document.getElementById('btn-refresh-replays').addEventListener('click', requestReplayList);
+
 board.onActionClick = (action) => {
+  if (currentState?.replay) return;
   session.send({ type: 'PlayAction', action });
 };
 
@@ -333,7 +505,12 @@ document.getElementById('btn-rotate-right').addEventListener('click', () => {
 // ── MCTS explore ─────────────────────────────────────────────────────
 
 mctsPanel.onExplore = (actionPath) => {
-  session.send({ type: 'ExploreSubtree', action_path: actionPath, depth: 20 });
+  session.send({
+    type: 'ExploreSubtree',
+    action_path: actionPath,
+    depth: 20,
+    target: currentState?.replay ? 'replay' : 'analysis',
+  });
 };
 
 // ── Player panel helpers ─────────────────────────────────────────────
@@ -537,6 +714,15 @@ function updateDice(state) {
 
 document.addEventListener('keydown', (e) => {
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+  if (activeView === 'replay-list') return;
+  if (currentState?.replay && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+    e.preventDefault();
+    const replay = currentState.replay;
+    const delta = e.key === 'ArrowLeft' ? -1 : 1;
+    const cursor = Math.max(0, Math.min(replay.len, replay.cursor + delta));
+    session.send({ type: 'SetReplayCursor', cursor });
+    return;
+  }
   if (e.key === 'ArrowLeft' && currentState?.can_undo) {
     e.preventDefault();
     controls.stopAutoplay();

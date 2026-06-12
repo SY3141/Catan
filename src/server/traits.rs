@@ -34,6 +34,16 @@ pub trait GamePresenter<G: Game>: Send + Sync {
         None
     }
 
+    /// String form to place in the first line of a replay log.
+    fn serialize_log_state(&self, _state: &G) -> Option<String> {
+        None
+    }
+
+    /// Parse the first line of a replay log into an initial state.
+    fn deserialize_log_state(&self, _text: &str) -> Result<G, String> {
+        Err("this game presenter does not support web replay logs".into())
+    }
+
     /// Directory containing static web assets (index.html, JS, CSS).
     fn static_dir(&self) -> &Path;
 

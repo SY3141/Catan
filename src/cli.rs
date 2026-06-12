@@ -137,6 +137,12 @@ pub fn serve_command() -> Command {
                 .long("replay")
                 .help("Game log file to replay (seed + actions)"),
         )
+        .arg(
+            Arg::new("web-log-dir")
+                .long("web-log-dir")
+                .default_value("web-game-logs")
+                .help("Directory for per-user web replay logs"),
+        )
 }
 
 /// Parsed serve options.
@@ -146,6 +152,7 @@ pub struct ServeOptions {
     pub eval_name: String,
     pub human_players: [bool; 2],
     pub replay: Option<PathBuf>,
+    pub web_log_dir: PathBuf,
 }
 
 /// Parse serve subcommand options.
@@ -165,11 +172,16 @@ pub fn parse_serve(matches: &ArgMatches) -> ServeOptions {
         _ => [false, false],
     };
     let replay = matches.get_one::<String>("replay").map(PathBuf::from);
+    let web_log_dir = matches
+        .get_one::<String>("web-log-dir")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("web-game-logs"));
     ServeOptions {
         port,
         eval_name,
         human_players,
         replay,
+        web_log_dir,
     }
 }
 
@@ -671,6 +683,7 @@ where
             presenter,
             opts.human_players,
             replay,
+            Some(opts.web_log_dir),
         ));
     }
 

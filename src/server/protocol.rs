@@ -35,6 +35,31 @@ pub struct TreeNodeSnapshot {
     pub children: Vec<TreeNodeSnapshot>,
 }
 
+/// A saved replay available to the current web user.
+#[derive(Debug, Serialize)]
+pub struct ReplayEntry {
+    pub id: String,
+    pub saved_at_ms: u64,
+    pub action_count: usize,
+    pub favorite: bool,
+}
+
+/// Replay metadata for the currently loaded game state.
+#[derive(Clone, Debug, Serialize)]
+pub struct ReplayState {
+    pub id: String,
+    pub cursor: usize,
+    pub len: usize,
+}
+
+/// Which board state a read-only analysis request should run against.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ViewTarget {
+    Analysis,
+    Replay,
+}
+
 // ── Client → Server ──────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -47,18 +72,32 @@ pub enum ClientMsg {
     },
     /// Start a new game (optionally with a seed).
     NewGame { seed: Option<u64> },
+    /// List saved game logs for this authenticated web session.
+    ListReplays,
+    /// Load a saved replay by id.
+    LoadReplay { id: String },
+    /// Delete a saved replay by id.
+    DeleteReplay { id: String },
+    /// Toggle whether a saved replay is favourited.
+    SetReplayFavorite { id: String, favorite: bool },
+    /// Jump to a replay cursor (0..=len).
+    SetReplayCursor { cursor: usize },
     /// Human plays an action.
     PlayAction { action: usize },
     /// Request the bot to play an action.
     BotMove { simulations: Option<u32> },
     /// Run N additional simulations on current state (step debugger).
-    RunSims { count: u32 },
+    RunSims {
+        count: u32,
+        target: Option<ViewTarget>,
+    },
     /// Request current search snapshot.
     GetSnapshot,
     /// Explore a subtree by following an action path.
     ExploreSubtree {
         action_path: Vec<usize>,
         depth: usize,
+        target: Option<ViewTarget>,
     },
     /// Take over control of a player (human overrides bot).
     TakeOver { player: u8 },
@@ -102,7 +141,10 @@ pub enum ServerMsg {
         action_log: Vec<String>,
         can_undo: bool,
         can_redo: bool,
+        replay: Option<ReplayState>,
     },
+    /// Saved replays for the current web user.
+    ReplayList { entries: Vec<ReplayEntry> },
     /// MCTS search snapshot.
     Snapshot {
         snapshot: SearchSnapshot,

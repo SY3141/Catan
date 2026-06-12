@@ -6,7 +6,7 @@ use crate::game_log::GameLog;
 use crate::mcts::{Config, NodeId, NodeKind, Search, SearchResult, Select, Tree};
 
 use super::protocol::{
-    ActionInfo, ClientMsg, EdgeSnapshot, SearchSnapshot, ServerMsg, TreeNodeSnapshot,
+    ActionInfo, ClientMsg, EdgeSnapshot, ReplayState, SearchSnapshot, ServerMsg, TreeNodeSnapshot,
 };
 use super::traits::GamePresenter;
 
@@ -28,6 +28,10 @@ struct HistoryEntry<G> {
     next_state: Option<G>,
 }
 
+struct ReplayMode {
+    id: String,
+}
+
 /// Owns the game state, search tree, evaluator, and presenter.
 /// Processes client messages and produces server responses.
 pub struct GameSession<G: Game> {
@@ -43,6 +47,7 @@ pub struct GameSession<G: Game> {
     seed: u64,
     /// Last ExploreSubtree path, used to proactively send tree updates during search.
     last_explore: Option<(Vec<usize>, usize)>,
+    replay: Option<ReplayMode>,
 }
 
 impl<G: Game + 'static> GameSession<G> {
@@ -92,6 +97,7 @@ impl<G: Game + 'static> GameSession<G> {
             cursor: 0,
             seed,
             last_explore: None,
+            replay: None,
         }
     }
 
@@ -126,6 +132,7 @@ impl<G: Game + 'static> GameSession<G> {
             cursor: 0,
             seed: 0,
             last_explore: None,
+            replay: None,
         }
     }
 
@@ -138,6 +145,7 @@ impl<G: Game + 'static> GameSession<G> {
         self.search.reset(initial_state.clone());
         self.history.clear();
         self.cursor = 0;
+        self.replay = None;
 
         // Replay all actions into history.
         for &action in &log.actions {
@@ -147,6 +155,41 @@ impl<G: Game + 'static> GameSession<G> {
         // Rewind: reset to initial state, keep history for redo.
         self.cursor = 0;
         self.search.reset(initial_state);
+    }
+
+    /// Load a saved replay and mark the session as replay-mode.
+    pub fn load_saved_replay(&mut self, id: impl Into<String>, initial_state: G, log: &GameLog) {
+        self.load_replay(initial_state, log);
+        self.replay = Some(ReplayMode { id: id.into() });
+    }
+
+    /// Parse and load a saved replay log through the presenter codec.
+    pub fn load_saved_replay_log(
+        &mut self,
+        id: impl Into<String>,
+        log: &GameLog,
+    ) -> Result<(), String> {
+        let initial_state = self.presenter.deserialize_log_state(&log.initial_state)?;
+        validate_replay_log(initial_state.clone(), log)?;
+        self.load_saved_replay(id, initial_state, log);
+        Ok(())
+    }
+
+    /// Export the currently visible live game prefix as a persistent game log.
+    pub fn export_current_log(&self) -> Option<GameLog> {
+        if self.replay.is_some() || self.cursor == 0 {
+            return None;
+        }
+        let first = self.history.first()?;
+        let initial_state = self.presenter.serialize_log_state(&first.state)?;
+        let actions = self.history[..self.cursor]
+            .iter()
+            .map(|entry| entry.action)
+            .collect();
+        Some(GameLog {
+            initial_state,
+            actions,
+        })
     }
 
     /// Load an externally-built timeline (e.g. from colonist.io replay).
@@ -370,6 +413,11 @@ impl<G: Game + 'static> GameSession<G> {
             action_log,
             can_undo: self.cursor > 0,
             can_redo: self.cursor < self.history.len(),
+            replay: self.replay.as_ref().map(|replay| ReplayState {
+                id: replay.id.clone(),
+                cursor: self.cursor,
+                len: self.history.len(),
+            }),
         }
     }
 
@@ -381,12 +429,19 @@ impl<G: Game + 'static> GameSession<G> {
                     message: "Already authenticated".into(),
                 }]
             }
+            ClientMsg::ListReplays
+            | ClientMsg::LoadReplay { .. }
+            | ClientMsg::DeleteReplay { .. }
+            | ClientMsg::SetReplayFavorite { .. } => vec![ServerMsg::Error {
+                message: "Replay storage is not available in this session".into(),
+            }],
             ClientMsg::NewGame { seed } => {
                 self.seed = seed.unwrap_or_else(|| fastrand::u64(..));
                 let state = self.presenter.new_game(self.seed);
                 self.search.reset(state);
                 self.history.clear();
                 self.cursor = 0;
+                self.replay = None;
                 self.auto_resolve_chance();
                 vec![self.state_msg()]
             }
@@ -394,6 +449,11 @@ impl<G: Game + 'static> GameSession<G> {
                 vec![self.state_msg()]
             }
             ClientMsg::PlayAction { action } => {
+                if self.replay.is_some() {
+                    return vec![ServerMsg::Error {
+                        message: "Cannot play actions while viewing a replay".into(),
+                    }];
+                }
                 if self.is_terminal() {
                     return vec![ServerMsg::Error {
                         message: "Game is over".into(),
@@ -410,6 +470,11 @@ impl<G: Game + 'static> GameSession<G> {
                 vec![self.state_msg()]
             }
             ClientMsg::BotMove { simulations } => {
+                if self.replay.is_some() {
+                    return vec![ServerMsg::Error {
+                        message: "Cannot apply bot moves while viewing a replay".into(),
+                    }];
+                }
                 if self.is_terminal() {
                     return vec![ServerMsg::Error {
                         message: "Game is over".into(),
@@ -446,7 +511,7 @@ impl<G: Game + 'static> GameSession<G> {
                     self.state_msg(),
                 ]
             }
-            ClientMsg::RunSims { count } => {
+            ClientMsg::RunSims { count, .. } => {
                 if self.is_terminal() || self.is_chance() {
                     return vec![ServerMsg::Error {
                         message: "Cannot run sims on chance/terminal state".into(),
@@ -479,7 +544,9 @@ impl<G: Game + 'static> GameSession<G> {
                     message: "No snapshot available".into(),
                 }],
             },
-            ClientMsg::ExploreSubtree { action_path, depth } => {
+            ClientMsg::ExploreSubtree {
+                action_path, depth, ..
+            } => {
                 self.last_explore = Some((action_path.clone(), depth));
                 let tree = self.search.tree();
                 if tree.is_empty() {
@@ -603,6 +670,17 @@ impl<G: Game + 'static> GameSession<G> {
                     self.search.reset(state);
                 }
                 vec![self.state_msg()]
+            }
+            ClientMsg::SetReplayCursor { cursor } => {
+                if self.replay.is_none() {
+                    return vec![ServerMsg::Error {
+                        message: "No replay is loaded".into(),
+                    }];
+                }
+                match self.set_cursor(cursor) {
+                    Ok(()) => vec![self.state_msg()],
+                    Err(message) => vec![ServerMsg::Error { message }],
+                }
             }
             ClientMsg::SetAutoSearch { .. } => {
                 // Handled by connection-level loop; respond with current state.
@@ -741,6 +819,11 @@ impl<G: Game + 'static> GameSession<G> {
         self.search.cancel_search();
         match msg {
             ClientMsg::BotMove { simulations } => {
+                if self.replay.is_some() {
+                    return Err(vec![ServerMsg::Error {
+                        message: "Cannot apply bot moves while viewing a replay".into(),
+                    }]);
+                }
                 if self.is_terminal() {
                     return Err(vec![ServerMsg::Error {
                         message: "Game is over".into(),
@@ -756,7 +839,7 @@ impl<G: Game + 'static> GameSession<G> {
                 self.search.set_num_simulations(sims);
                 Ok(sims)
             }
-            ClientMsg::RunSims { count } => {
+            ClientMsg::RunSims { count, .. } => {
                 if self.is_terminal() || self.is_chance() {
                     return Err(vec![ServerMsg::Error {
                         message: "Cannot run sims on chance/terminal state".into(),
@@ -792,6 +875,11 @@ impl<G: Game + 'static> GameSession<G> {
     pub fn finish_search(&mut self, msg: &ClientMsg, result: SearchResult) -> Vec<ServerMsg> {
         match msg {
             ClientMsg::BotMove { .. } => {
+                if self.replay.is_some() {
+                    return vec![ServerMsg::Error {
+                        message: "Cannot apply bot moves while viewing a replay".into(),
+                    }];
+                }
                 let action = result.selected_action;
                 let label = self.presenter.action_label(self.search.state(), action);
                 let (snapshot, action_labels) = match self.build_snapshot() {
@@ -911,6 +999,31 @@ impl<G: Game + 'static> GameSession<G> {
         self.search.root_visits()
     }
 
+    fn set_cursor(&mut self, cursor: usize) -> Result<(), String> {
+        if cursor > self.history.len() {
+            return Err(format!(
+                "Replay cursor {cursor} is past the end of the game ({})",
+                self.history.len()
+            ));
+        }
+        self.cursor = cursor;
+        if cursor == 0 {
+            if let Some(first) = self.history.first() {
+                self.search.reset(first.state.clone());
+            }
+            return Ok(());
+        }
+        let entry = &self.history[cursor - 1];
+        if let Some(ref next) = entry.next_state {
+            self.search.reset(next.clone());
+        } else {
+            let mut state = entry.state.clone();
+            state.apply_action(entry.action);
+            self.search.reset(state);
+        }
+        Ok(())
+    }
+
     /// Label all nodes in a subtree by simulating actions from the root state.
     /// Label a subtree whose root is at `path` from the search root.
     /// Advances the search state by the path so the label walker starts
@@ -941,6 +1054,40 @@ impl<G: Game + 'static> GameSession<G> {
         }
         label_subtree_walk(tree, state, &*self.presenter, parent_is_chance);
     }
+}
+
+fn validate_replay_log<G: Game>(mut state: G, log: &GameLog) -> Result<(), String> {
+    let mut legal = Vec::new();
+    let mut chance = Vec::new();
+    for (i, &action) in log.actions.iter().enumerate() {
+        match state.status() {
+            Status::Terminal(_) => {
+                return Err(format!(
+                    "action {} appears after the game is terminal",
+                    i + 1
+                ));
+            }
+            Status::Decision(_) => {
+                legal.clear();
+                state.legal_actions(&mut legal);
+                if !legal.contains(&action) {
+                    return Err(format!("illegal replay action {action} at line {}", i + 2));
+                }
+            }
+            Status::Chance => {
+                chance.clear();
+                state.chance_outcomes(&mut chance);
+                if !chance.is_empty() && !chance.iter().any(|&(outcome, _)| outcome == action) {
+                    return Err(format!(
+                        "illegal replay chance outcome {action} at line {}",
+                        i + 2
+                    ));
+                }
+            }
+        }
+        state.apply_action(action);
+    }
+    Ok(())
 }
 
 /// Walk the tree along an action path, returning the final node if reachable.
@@ -1059,5 +1206,186 @@ fn label_subtree_walk<G: Game + Clone>(
     };
     for child in &mut node.children {
         label_subtree_walk(child, next.clone(), presenter, is_chance);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{path::Path, sync::Arc};
+
+    use crate::{
+        eval::{Evaluation, Evaluator},
+        game::{Game, Status},
+    };
+
+    use super::{ClientMsg, GameLog, GamePresenter, GameSession, ServerMsg};
+
+    #[derive(Clone)]
+    struct TestGame {
+        id: u64,
+        moves: u8,
+    }
+
+    impl Game for TestGame {
+        const NUM_ACTIONS: usize = 1;
+
+        fn status(&self) -> Status {
+            if self.moves >= 2 {
+                Status::Terminal(1.0)
+            } else {
+                Status::Decision(1.0)
+            }
+        }
+
+        fn legal_actions(&self, buf: &mut Vec<usize>) {
+            if !matches!(self.status(), Status::Terminal(_)) {
+                buf.push(0);
+            }
+        }
+
+        fn apply_action(&mut self, action: usize) {
+            assert_eq!(action, 0);
+            self.moves += 1;
+        }
+    }
+
+    struct TestEvaluator;
+
+    impl Evaluator<TestGame> for TestEvaluator {
+        fn evaluate(&self, _state: &TestGame, _rng: &mut fastrand::Rng) -> Evaluation {
+            Evaluation::uniform(TestGame::NUM_ACTIONS, 0.0)
+        }
+    }
+
+    struct TestPresenter;
+
+    impl GamePresenter<TestGame> for TestPresenter {
+        fn serialize_state(&self, state: &TestGame) -> serde_json::Value {
+            serde_json::json!({
+                "id": state.id,
+                "moves": state.moves,
+            })
+        }
+
+        fn action_label(&self, _state: &TestGame, action: usize) -> String {
+            format!("Action {action}")
+        }
+
+        fn phase_label(&self, _state: &TestGame) -> String {
+            "test".into()
+        }
+
+        fn serialize_log_state(&self, state: &TestGame) -> Option<String> {
+            Some(state.id.to_string())
+        }
+
+        fn deserialize_log_state(&self, text: &str) -> Result<TestGame, String> {
+            Ok(TestGame {
+                id: text.parse().map_err(|e| format!("bad id: {e}"))?,
+                moves: 0,
+            })
+        }
+
+        fn static_dir(&self) -> &Path {
+            Path::new(".")
+        }
+
+        fn new_game(&self, seed: u64) -> TestGame {
+            TestGame { id: seed, moves: 0 }
+        }
+    }
+
+    fn test_session() -> GameSession<TestGame> {
+        GameSession::with_state(
+            TestGame { id: 7, moves: 0 },
+            Arc::new(TestEvaluator),
+            "test",
+            Arc::new(TestPresenter),
+            [true, true],
+            crate::mcts::Config::default(),
+        )
+    }
+
+    #[test]
+    fn export_current_log_skips_empty_and_uses_visible_prefix() {
+        let mut session = test_session();
+        assert!(session.export_current_log().is_none());
+
+        session.handle(ClientMsg::PlayAction { action: 0 });
+        session.handle(ClientMsg::PlayAction { action: 0 });
+        session.handle(ClientMsg::Undo);
+
+        let log = session
+            .export_current_log()
+            .expect("expected non-empty log");
+        assert_eq!(log.initial_state, "7");
+        assert_eq!(log.actions, vec![0]);
+    }
+
+    #[test]
+    fn loaded_replay_reports_metadata_and_rejects_play_actions() {
+        let mut session = test_session();
+        let log = GameLog {
+            initial_state: "9".into(),
+            actions: vec![0, 0],
+        };
+        session
+            .load_saved_replay_log("saved.log", &log)
+            .expect("valid replay");
+
+        match session.state_msg() {
+            ServerMsg::GameState { replay, .. } => {
+                let replay = replay.expect("replay metadata");
+                assert_eq!(replay.id, "saved.log");
+                assert_eq!(replay.cursor, 0);
+                assert_eq!(replay.len, 2);
+            }
+            _ => panic!("expected GameState"),
+        }
+
+        assert!(
+            session
+                .begin_search(&ClientMsg::RunSims {
+                    count: 1,
+                    target: None,
+                })
+                .is_ok()
+        );
+
+        match session
+            .handle(ClientMsg::PlayAction { action: 0 })
+            .as_slice()
+        {
+            [ServerMsg::Error { message }] => assert!(message.contains("replay")),
+            other => panic!("expected replay error, got {other:?}"),
+        }
+
+        session.handle(ClientMsg::SetReplayCursor { cursor: 2 });
+        match session.state_msg() {
+            ServerMsg::GameState { replay, state, .. } => {
+                assert_eq!(replay.expect("replay metadata").cursor, 2);
+                assert_eq!(state["moves"], serde_json::json!(2));
+            }
+            _ => panic!("expected GameState"),
+        }
+    }
+
+    #[test]
+    fn corrupt_replay_does_not_replace_current_session() {
+        let mut session = test_session();
+        let log = GameLog {
+            initial_state: "9".into(),
+            actions: vec![99],
+        };
+        assert!(session.load_saved_replay_log("bad.log", &log).is_err());
+
+        match session.state_msg() {
+            ServerMsg::GameState { replay, state, .. } => {
+                assert!(replay.is_none());
+                assert_eq!(state["id"], serde_json::json!(7));
+                assert_eq!(state["moves"], serde_json::json!(0));
+            }
+            _ => panic!("expected GameState"),
+        }
     }
 }

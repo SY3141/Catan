@@ -73,6 +73,10 @@ tailwind.config = {
   <!-- Header -->
   <header class="flex items-center gap-4 px-4 py-2 bg-bg-2 border-b border-gray-700">
     <h1 class="text-sm font-semibold text-gray-100">HexFish Analysis Board</h1>
+    <div class="flex items-center gap-1 text-xs" role="tablist" aria-label="Main views">
+      <button id="tab-board" class="view-tab active px-2 py-1 rounded text-gray-100 bg-bg-3" type="button" role="tab" aria-selected="true">Analysis</button>
+      <button id="tab-replay" class="view-tab px-2 py-1 rounded text-gray-400 hover:text-gray-100 hover:bg-bg-3" type="button" role="tab" aria-selected="false">Replay</button>
+    </div>
     <span id="phase-label" class="bg-bg-3 px-2 py-0.5 rounded text-xs text-gray-300"></span>
     <span id="turn-label" class="text-xs text-gray-500"></span>
     <div id="auth-controls" class="ml-auto flex items-center gap-2">
@@ -148,9 +152,34 @@ tailwind.config = {
     </div>
   </div>
 
+  <section id="replay-view" class="hidden flex-1 overflow-auto bg-bg p-3">
+    <div class="mx-auto w-full max-w-3xl">
+      <div class="flex items-center justify-between gap-2 mb-3">
+        <h2 class="text-sm font-semibold text-gray-100">Replays</h2>
+        <button id="btn-refresh-replays" class="py-1 px-2 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors">Refresh</button>
+      </div>
+      <div id="replay-status" class="hidden mb-2 text-xs text-gray-400"></div>
+      <section class="mb-4">
+        <h3 class="mb-1.5 text-xs font-medium text-gray-300">Favourited</h3>
+        <div id="favorite-replay-list" class="border border-gray-700 rounded bg-bg-2 overflow-hidden"></div>
+      </section>
+      <section>
+        <h3 class="mb-1.5 text-xs font-medium text-gray-300">Replays</h3>
+        <div id="replay-list" class="border border-gray-700 rounded bg-bg-2 overflow-hidden"></div>
+      </section>
+    </div>
+  </section>
+
   <!-- Bottom: Controls -->
   <div id="controls" class="flex items-center gap-2 px-4 py-2 bg-bg-2 border-t border-gray-700 flex-wrap">
     <button id="btn-new-game" class="py-1.5 px-3 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors">New Game</button>
+    <div id="replay-controls" class="hidden flex items-center gap-1.5 text-xs text-gray-300">
+      <button id="btn-replay-first" class="py-1.5 px-2 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-default" title="First position" aria-label="First replay position">&#124;&lt;</button>
+      <button id="btn-replay-prev" class="py-1.5 px-2 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-default" title="Previous position" aria-label="Previous replay position">&lt;</button>
+      <span id="replay-counter" class="min-w-16 text-center text-gray-300">0 / 0</span>
+      <button id="btn-replay-next" class="py-1.5 px-2 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-default" title="Next position" aria-label="Next replay position">&gt;</button>
+      <button id="btn-replay-last" class="py-1.5 px-2 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-default" title="Last position" aria-label="Last replay position">&gt;&#124;</button>
+    </div>
     <button id="btn-undo" class="py-1.5 px-3 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-default" disabled>Undo</button>
     <button id="btn-redo" class="py-1.5 px-3 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-default" disabled>Redo</button>
     <button id="btn-bot-move" class="py-1.5 px-3 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-default">Bot Move</button>
@@ -160,13 +189,13 @@ tailwind.config = {
       </label>
     </div>
     <button id="btn-run-sims" class="py-1.5 px-3 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-default">Run Sims</button>
-    <label class="flex items-center gap-1 text-xs text-gray-300 cursor-pointer">
+    <label id="apply-control" class="flex items-center gap-1 text-xs text-gray-300 cursor-pointer">
       <input type="checkbox" id="apply-toggle" class="accent-accent"> Apply
     </label>
-    <label class="flex items-center gap-1 text-xs text-gray-300 cursor-pointer">
+    <label id="autoplay-control" class="flex items-center gap-1 text-xs text-gray-300 cursor-pointer">
       <input type="checkbox" id="autoplay-toggle" class="accent-accent"> Auto-play
     </label>
-    <label class="flex items-center gap-1 text-xs text-gray-300 cursor-pointer">
+    <label id="autosearch-control" class="flex items-center gap-1 text-xs text-gray-300 cursor-pointer">
       <input type="checkbox" id="autosearch-toggle" class="accent-accent"> Auto-search
     </label>
     <div id="result-banner" class="hidden px-3 py-1 bg-accent rounded font-semibold text-sm text-white"></div>
@@ -177,8 +206,8 @@ tailwind.config = {
 <script src="session.js?v=anon-session-field-20260611"></script>
 <script src="board.js?v=tile-pips-20260610"></script>
 <script src="mcts.js"></script>
-<script src="controls.js?v=autoplay-forced-move-20260611"></script>
+<script src="controls.js?v=split-replay-state-20260611"></script>
 <script src="auth.js?v=user-sessions-20260610"></script>
-<script src="app.js?v=player-result-colors-20260611"></script>
+<script src="app.js?v=replay-actions-20260611"></script>
 </body>
 </html>

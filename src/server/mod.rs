@@ -10,6 +10,7 @@ pub use traits::GamePresenter;
 use std::{
     collections::{HashMap, hash_map::DefaultHasher},
     hash::{Hash, Hasher},
+    path::PathBuf,
     sync::{
         Arc, Mutex as StdMutex,
         atomic::{AtomicU64, Ordering},
@@ -27,12 +28,170 @@ use crate::eval::Evaluator;
 use crate::game::Game;
 use crate::game_log::GameLog;
 use crate::mcts::Config;
+use protocol::{ReplayEntry, ViewTarget};
 
 pub use auth::ClerkAuth;
 
 /// Send a progress snapshot every N simulations.
 const PROGRESS_INTERVAL: u32 = 100;
 const BOARD_FINGERPRINT_RETRIES: usize = 64;
+
+#[derive(Clone)]
+struct ReplayStore {
+    root: PathBuf,
+}
+
+impl ReplayStore {
+    fn new(root: PathBuf) -> Self {
+        Self { root }
+    }
+
+    fn save(
+        &self,
+        account_key: &str,
+        session_id: u64,
+        counter: u64,
+        log: &GameLog,
+    ) -> Result<ReplayEntry, String> {
+        let saved_at_ms = current_unix_ms();
+        let id = format!("{saved_at_ms}-{session_id}-{counter}.log");
+        let dir = self.user_dir(account_key);
+        std::fs::create_dir_all(&dir).map_err(|e| format!("failed to create replay dir: {e}"))?;
+        let path = dir.join(&id);
+        log.write_result(&path)
+            .map_err(|e| format!("failed to write replay log: {e}"))?;
+        Ok(ReplayEntry {
+            id,
+            saved_at_ms,
+            action_count: log.actions.len(),
+            favorite: false,
+        })
+    }
+
+    fn list(&self, account_key: &str) -> Result<Vec<ReplayEntry>, String> {
+        let dir = self.user_dir(account_key);
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(format!("failed to list replays: {e}")),
+        };
+
+        let mut out = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|e| format!("failed to read replay entry: {e}"))?;
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(id) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if !safe_replay_id(id) {
+                continue;
+            }
+            let saved_at_ms = replay_timestamp_from_id(id).unwrap_or_else(current_unix_ms);
+            let action_count = count_log_actions(&path).unwrap_or(0);
+            out.push(ReplayEntry {
+                id: id.to_string(),
+                saved_at_ms,
+                action_count,
+                favorite: self.is_favorite(account_key, id),
+            });
+        }
+        out.sort_by(|a, b| {
+            b.saved_at_ms
+                .cmp(&a.saved_at_ms)
+                .then_with(|| b.id.cmp(&a.id))
+        });
+        Ok(out)
+    }
+
+    fn delete(&self, account_key: &str, id: &str) -> Result<(), String> {
+        if !safe_replay_id(id) {
+            return Err("invalid replay id".into());
+        }
+        let path = self.user_dir(account_key).join(id);
+        std::fs::remove_file(&path).map_err(|e| format!("failed to delete replay log: {e}"))?;
+        match std::fs::remove_file(self.favorite_path(account_key, id)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("failed to delete replay favourite marker: {e}")),
+        }
+        Ok(())
+    }
+
+    fn set_favorite(&self, account_key: &str, id: &str, favorite: bool) -> Result<(), String> {
+        if !safe_replay_id(id) {
+            return Err("invalid replay id".into());
+        }
+        let path = self.user_dir(account_key).join(id);
+        if !path.is_file() {
+            return Err("replay log not found".into());
+        }
+        let marker = self.favorite_path(account_key, id);
+        if favorite {
+            let dir = self.user_dir(account_key);
+            std::fs::create_dir_all(&dir)
+                .map_err(|e| format!("failed to create replay dir: {e}"))?;
+            std::fs::write(&marker, b"favorite")
+                .map_err(|e| format!("failed to save replay favourite: {e}"))?;
+        } else {
+            match std::fs::remove_file(marker) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(format!("failed to remove replay favourite: {e}")),
+            }
+        }
+        Ok(())
+    }
+
+    fn load(&self, account_key: &str, id: &str) -> Result<GameLog, String> {
+        if !safe_replay_id(id) {
+            return Err("invalid replay id".into());
+        }
+        let path = self.user_dir(account_key).join(id);
+        GameLog::read_result(&path)
+    }
+
+    fn is_favorite(&self, account_key: &str, id: &str) -> bool {
+        self.favorite_path(account_key, id).is_file()
+    }
+
+    fn favorite_path(&self, account_key: &str, id: &str) -> PathBuf {
+        self.user_dir(account_key).join(format!("{id}.favorite"))
+    }
+
+    fn user_dir(&self, account_key: &str) -> PathBuf {
+        self.root.join(account_key)
+    }
+}
+
+fn current_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn safe_replay_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.ends_with(".log")
+        && !id.starts_with('.')
+        && !id.contains("..")
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+}
+
+fn replay_timestamp_from_id(id: &str) -> Option<u64> {
+    id.split('-').next()?.parse().ok()
+}
+
+fn count_log_actions(path: &std::path::Path) -> Result<usize, String> {
+    let data =
+        std::fs::read_to_string(path).map_err(|e| format!("failed to read replay log: {e}"))?;
+    Ok(data.lines().skip(1).filter(|line| !line.is_empty()).count())
+}
 
 enum SessionTemplate<G: Game> {
     New { replay: Option<(G, Arc<GameLog>)> },
@@ -142,20 +301,36 @@ struct UserSession<G: Game + 'static> {
     session_id: u64,
     seed: u64,
     board_fingerprint: Option<u64>,
+    account_key: String,
+    factory: Arc<SessionFactory<G>>,
+    replay_store: Option<Arc<ReplayStore>>,
+    next_replay_counter: AtomicU64,
     session: Arc<Mutex<GameSession<G>>>,
+    replay_session: Arc<Mutex<Option<GameSession<G>>>>,
     sockets: StdMutex<HashMap<u64, mpsc::UnboundedSender<String>>>,
     next_socket_id: AtomicU64,
 }
 
 impl<G: Game + 'static> UserSession<G> {
-    fn new(session: GameSession<G>, session_id: u64) -> Self {
+    fn new(
+        session: GameSession<G>,
+        session_id: u64,
+        account_key: String,
+        factory: Arc<SessionFactory<G>>,
+        replay_store: Option<Arc<ReplayStore>>,
+    ) -> Self {
         let seed = session.seed();
         let board_fingerprint = session.board_fingerprint();
         Self {
             session_id,
             seed,
             board_fingerprint,
+            account_key,
+            factory,
+            replay_store,
+            next_replay_counter: AtomicU64::new(1),
             session: Arc::new(Mutex::new(session)),
+            replay_session: Arc::new(Mutex::new(None)),
             sockets: StdMutex::new(HashMap::new()),
             next_socket_id: AtomicU64::new(1),
         }
@@ -199,17 +374,19 @@ impl<G: Game + 'static> UserSession<G> {
 }
 
 struct UserSessionStore<G: Game + 'static> {
-    factory: SessionFactory<G>,
+    factory: Arc<SessionFactory<G>>,
     sessions: StdMutex<HashMap<String, Arc<UserSession<G>>>>,
     next_session_id: AtomicU64,
+    replay_store: Option<Arc<ReplayStore>>,
 }
 
 impl<G: Game + 'static> UserSessionStore<G> {
-    fn new(factory: SessionFactory<G>) -> Self {
+    fn new(factory: SessionFactory<G>, replay_store: Option<Arc<ReplayStore>>) -> Self {
         Self {
-            factory,
+            factory: Arc::new(factory),
             sessions: StdMutex::new(HashMap::new()),
             next_session_id: AtomicU64::new(1),
+            replay_store,
         }
     }
 
@@ -221,7 +398,14 @@ impl<G: Game + 'static> UserSessionStore<G> {
 
         let session_id = self.next_session_id.fetch_add(1, Ordering::Relaxed);
         let game_session = self.create_unique_session(&sessions);
-        let session = Arc::new(UserSession::new(game_session, session_id));
+        let account_key = redacted_account_key(user_id);
+        let session = Arc::new(UserSession::new(
+            game_session,
+            session_id,
+            account_key,
+            Arc::clone(&self.factory),
+            self.replay_store.clone(),
+        ));
         sessions.insert(user_id.to_string(), Arc::clone(&session));
         (session, true)
     }
@@ -320,16 +504,15 @@ pub async fn serve<G: Game + 'static>(
     presenter: Arc<dyn GamePresenter<G>>,
     human_players: [bool; 2],
     replay: Option<(G, GameLog)>,
+    web_log_dir: Option<PathBuf>,
 ) {
     let static_dir = presenter.static_dir().to_path_buf();
     let replay = replay.map(|(s, l)| (s, Arc::new(l)));
-    let store = Arc::new(UserSessionStore::new(SessionFactory::new_game(
-        evaluator,
-        eval_name,
-        presenter,
-        human_players,
-        replay,
-    )));
+    let replay_store = web_log_dir.map(|dir| Arc::new(ReplayStore::new(dir)));
+    let store = Arc::new(UserSessionStore::new(
+        SessionFactory::new_game(evaluator, eval_name, presenter, human_players, replay),
+        replay_store,
+    ));
     let auth = Arc::new(socket_auth_from_env());
     log_socket_auth_mode(auth.as_ref());
 
@@ -364,13 +547,10 @@ pub async fn serve_with_state<G: Game + 'static>(
     human_players: [bool; 2],
 ) {
     let static_dir = presenter.static_dir().to_path_buf();
-    let store = Arc::new(UserSessionStore::new(SessionFactory::with_state(
-        state,
-        evaluator,
-        eval_name,
-        presenter,
-        human_players,
-    )));
+    let store = Arc::new(UserSessionStore::new(
+        SessionFactory::with_state(state, evaluator, eval_name, presenter, human_players),
+        None,
+    ));
     let auth = Arc::new(socket_auth_from_env());
 
     let app = Router::new()
@@ -403,12 +583,10 @@ pub async fn serve_with_timeline<G: Game + 'static>(
     human_players: [bool; 2],
 ) {
     let static_dir = presenter.static_dir().to_path_buf();
-    let store = Arc::new(UserSessionStore::new(SessionFactory::with_timeline(
-        timeline,
-        evaluator,
-        presenter,
-        human_players,
-    )));
+    let store = Arc::new(UserSessionStore::new(
+        SessionFactory::with_timeline(timeline, evaluator, presenter, human_players),
+        None,
+    ));
     let auth = Arc::new(socket_auth_from_env());
 
     let app = Router::new()
@@ -586,8 +764,9 @@ async fn authenticate_socket(
             }
         },
         SocketAuth::Anonymous => {
-            if let Some(user_id) =
-                anonymous_session.as_deref().and_then(anonymous_user_id_from_id)
+            if let Some(user_id) = anonymous_session
+                .as_deref()
+                .and_then(anonymous_user_id_from_id)
             {
                 Ok(SocketSessionKey {
                     user_id,
@@ -695,17 +874,80 @@ async fn handle_authenticated_message<G: Game + 'static>(
         }
     };
 
+    let message_target = client_msg_target(&client_msg);
+
     // Track auto-search state at the connection level.
     if let ClientMsg::SetAutoSearch { enabled, target } = &client_msg {
         *auto_search = if *enabled { Some(*target) } else { None };
     }
 
-    let mut session = user_session.session.lock().await;
-    let responses = match &client_msg {
-        ClientMsg::BotMove { .. } | ClientMsg::RunSims { .. } => {
-            run_search(socket, &mut session, &client_msg).await?
+    let responses = if message_target == ViewTarget::Replay {
+        handle_replay_message(socket, user_session, client_msg).await?
+    } else {
+        let mut session = user_session.session.lock().await;
+        match client_msg {
+            ClientMsg::ListReplays => match &user_session.replay_store {
+                Some(store) => match store.list(&user_session.account_key) {
+                    Ok(entries) => vec![ServerMsg::ReplayList { entries }],
+                    Err(message) => vec![ServerMsg::Error { message }],
+                },
+                None => vec![ServerMsg::Error {
+                    message: "Replay storage is not configured".into(),
+                }],
+            },
+            ClientMsg::DeleteReplay { id } => match &user_session.replay_store {
+                Some(store) => match store
+                    .delete(&user_session.account_key, &id)
+                    .and_then(|()| store.list(&user_session.account_key))
+                {
+                    Ok(entries) => vec![ServerMsg::ReplayList { entries }],
+                    Err(message) => vec![ServerMsg::Error { message }],
+                },
+                None => vec![ServerMsg::Error {
+                    message: "Replay storage is not configured".into(),
+                }],
+            },
+            ClientMsg::SetReplayFavorite { id, favorite } => match &user_session.replay_store {
+                Some(store) => match store
+                    .set_favorite(&user_session.account_key, &id, favorite)
+                    .and_then(|()| store.list(&user_session.account_key))
+                {
+                    Ok(entries) => vec![ServerMsg::ReplayList { entries }],
+                    Err(message) => vec![ServerMsg::Error { message }],
+                },
+                None => vec![ServerMsg::Error {
+                    message: "Replay storage is not configured".into(),
+                }],
+            },
+            msg @ ClientMsg::NewGame { .. } => {
+                let save_error = match &user_session.replay_store {
+                    Some(store) => session.export_current_log().and_then(|log| {
+                        let counter = user_session
+                            .next_replay_counter
+                            .fetch_add(1, Ordering::Relaxed);
+                        store
+                            .save(
+                                &user_session.account_key,
+                                user_session.session_id,
+                                counter,
+                                &log,
+                            )
+                            .err()
+                            .map(|message| ServerMsg::Error { message })
+                    }),
+                    None => None,
+                };
+                let mut msgs = session.handle(msg);
+                if let Some(error) = save_error {
+                    msgs.insert(0, error);
+                }
+                msgs
+            }
+            msg @ (ClientMsg::BotMove { .. } | ClientMsg::RunSims { .. }) => {
+                run_search(socket, &mut session, &msg).await?
+            }
+            msg => session.handle(msg),
         }
-        _ => session.handle(client_msg),
     };
 
     // Check if any response is a state update that should trigger auto-search.
@@ -716,15 +958,19 @@ async fn handle_authenticated_message<G: Game + 'static>(
     for msg in &responses {
         send_msg(socket, msg).await?;
     }
-    if has_state_update {
+    if has_state_update && message_target == ViewTarget::Analysis {
         user_session.broadcast_game_states_to_others(socket_id, &responses);
     }
 
     // Auto-search: trigger RunSims after state changes (e.g. PlayAction, BotMove).
-    if has_state_update {
+    if has_state_update && message_target == ViewTarget::Analysis {
         if let Some(target) = *auto_search {
+            let mut session = user_session.session.lock().await;
             if session.should_auto_search() {
-                let auto_msg = ClientMsg::RunSims { count: target };
+                let auto_msg = ClientMsg::RunSims {
+                    count: target,
+                    target: Some(ViewTarget::Analysis),
+                };
                 let msgs = run_search(socket, &mut session, &auto_msg).await?;
                 for msg in msgs {
                     send_msg(socket, &msg).await?;
@@ -734,6 +980,65 @@ async fn handle_authenticated_message<G: Game + 'static>(
     }
 
     Ok(())
+}
+
+fn client_msg_target(msg: &ClientMsg) -> ViewTarget {
+    match msg {
+        ClientMsg::LoadReplay { .. } | ClientMsg::SetReplayCursor { .. } => ViewTarget::Replay,
+        ClientMsg::RunSims { target, .. } | ClientMsg::ExploreSubtree { target, .. } => {
+            target.unwrap_or(ViewTarget::Analysis)
+        }
+        _ => ViewTarget::Analysis,
+    }
+}
+
+async fn handle_replay_message<G: Game + 'static>(
+    socket: &mut WebSocket,
+    user_session: &Arc<UserSession<G>>,
+    client_msg: ClientMsg,
+) -> Result<Vec<ServerMsg>, ()> {
+    match client_msg {
+        ClientMsg::LoadReplay { id } => match &user_session.replay_store {
+            Some(store) => match store.load(&user_session.account_key, &id) {
+                Ok(log) => {
+                    let mut replay_session = user_session.factory.create_session();
+                    match replay_session.load_saved_replay_log(id.clone(), &log) {
+                        Ok(()) => {
+                            let state_msg = replay_session.state_msg();
+                            *user_session.replay_session.lock().await = Some(replay_session);
+                            Ok(vec![state_msg])
+                        }
+                        Err(message) => Ok(vec![ServerMsg::Error { message }]),
+                    }
+                }
+                Err(message) => Ok(vec![ServerMsg::Error { message }]),
+            },
+            None => Ok(vec![ServerMsg::Error {
+                message: "Replay storage is not configured".into(),
+            }]),
+        },
+        msg @ ClientMsg::RunSims { .. } => {
+            let mut replay_session = user_session.replay_session.lock().await;
+            match replay_session.as_mut() {
+                Some(session) => run_search(socket, session, &msg).await,
+                None => Ok(vec![ServerMsg::Error {
+                    message: "No replay is loaded".into(),
+                }]),
+            }
+        }
+        msg @ (ClientMsg::SetReplayCursor { .. } | ClientMsg::ExploreSubtree { .. }) => {
+            let mut replay_session = user_session.replay_session.lock().await;
+            match replay_session.as_mut() {
+                Some(session) => Ok(session.handle(msg)),
+                None => Ok(vec![ServerMsg::Error {
+                    message: "No replay is loaded".into(),
+                }]),
+            }
+        }
+        msg => Ok(vec![ServerMsg::Error {
+            message: format!("Message is not supported in replay view: {msg:?}"),
+        }]),
+    }
 }
 
 async fn send_unauthorized(socket: &mut WebSocket) {
@@ -764,7 +1069,7 @@ pub async fn send_msg(socket: &mut WebSocket, msg: &ServerMsg) -> Result<(), ()>
 #[cfg(test)]
 mod tests {
     use std::{
-        path::Path,
+        path::{Path, PathBuf},
         sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},
@@ -774,11 +1079,13 @@ mod tests {
     use crate::{
         eval::{Evaluation, Evaluator},
         game::{Game, Status},
+        game_log::GameLog,
     };
 
     use super::{
-        GamePresenter, SessionFactory, UserSessionStore, anonymous_user_id_from_id,
-        anonymous_user_id_from_token,
+        GamePresenter, ReplayStore, SessionFactory, UserSessionStore, ViewTarget,
+        anonymous_user_id_from_id, anonymous_user_id_from_token, client_msg_target,
+        current_unix_ms, safe_replay_id,
     };
 
     #[derive(Clone)]
@@ -853,7 +1160,15 @@ mod tests {
         let factory =
             SessionFactory::new_game(evaluator, "test", presenter.clone(), [true, true], None);
 
-        (UserSessionStore::new(factory), presenter)
+        (UserSessionStore::new(factory, None), presenter)
+    }
+
+    fn temp_replay_dir(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "hexfish-{name}-{}-{}",
+            current_unix_ms(),
+            fastrand::u64(..)
+        ))
     }
 
     #[test]
@@ -900,5 +1215,105 @@ mod tests {
         assert_ne!(first.session_id, second.session_id);
         assert_ne!(first.board_fingerprint, second.board_fingerprint);
         assert_eq!(presenter.created_games.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn replay_store_lists_only_the_current_account() {
+        let dir = temp_replay_dir("replay-scope");
+        let store = ReplayStore::new(dir.clone());
+        let log = GameLog {
+            initial_state: "1".into(),
+            actions: vec![0, 0],
+        };
+
+        let saved_a = store.save("account_a", 11, 1, &log).unwrap();
+        store.save("account_b", 22, 1, &log).unwrap();
+
+        let entries_a = store.list("account_a").unwrap();
+        let entries_b = store.list("account_b").unwrap();
+
+        assert_eq!(entries_a.len(), 1);
+        assert_eq!(entries_a[0].id, saved_a.id);
+        assert_eq!(entries_a[0].action_count, 2);
+        assert_eq!(entries_b.len(), 1);
+        assert_ne!(entries_a[0].id, entries_b[0].id);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn replay_store_favorites_and_deletes_logs() {
+        let dir = temp_replay_dir("replay-favorite-delete");
+        let store = ReplayStore::new(dir.clone());
+        let log = GameLog {
+            initial_state: "1".into(),
+            actions: vec![0],
+        };
+
+        let saved = store.save("account_a", 11, 1, &log).unwrap();
+        assert!(!store.list("account_a").unwrap()[0].favorite);
+
+        store
+            .set_favorite("account_a", &saved.id, true)
+            .expect("favorite saved replay");
+        let entries = store.list("account_a").unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].favorite);
+
+        store
+            .set_favorite("account_a", &saved.id, false)
+            .expect("unfavorite saved replay");
+        assert!(!store.list("account_a").unwrap()[0].favorite);
+
+        store.delete("account_a", &saved.id).expect("delete replay");
+        assert!(store.list("account_a").unwrap().is_empty());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn replay_store_rejects_unsafe_ids() {
+        assert!(!safe_replay_id("../game.log"));
+        assert!(!safe_replay_id("..game.log"));
+        assert!(!safe_replay_id(".hidden.log"));
+        assert!(!safe_replay_id("nested/game.log"));
+        assert!(!safe_replay_id("nested\\game.log"));
+        assert!(!safe_replay_id("game.txt"));
+        assert!(safe_replay_id("123-1-1.log"));
+
+        let store = ReplayStore::new(temp_replay_dir("unsafe-replay-id"));
+        let err = store.load("account_a", "../game.log").unwrap_err();
+        assert!(err.contains("invalid replay id"));
+    }
+
+    #[test]
+    fn replay_messages_route_to_replay_session() {
+        assert_eq!(
+            client_msg_target(&super::ClientMsg::LoadReplay { id: "1.log".into() }),
+            ViewTarget::Replay
+        );
+        assert_eq!(
+            client_msg_target(&super::ClientMsg::SetReplayCursor { cursor: 0 }),
+            ViewTarget::Replay
+        );
+        assert_eq!(
+            client_msg_target(&super::ClientMsg::RunSims {
+                count: 1,
+                target: Some(ViewTarget::Replay),
+            }),
+            ViewTarget::Replay
+        );
+        assert_eq!(
+            client_msg_target(&super::ClientMsg::ExploreSubtree {
+                action_path: Vec::new(),
+                depth: 1,
+                target: Some(ViewTarget::Replay),
+            }),
+            ViewTarget::Replay
+        );
+        assert_eq!(
+            client_msg_target(&super::ClientMsg::PlayAction { action: 0 }),
+            ViewTarget::Analysis
+        );
     }
 }
