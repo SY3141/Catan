@@ -8,6 +8,8 @@ class MCTSPanel {
     this.netValEl = document.getElementById('net-value');
     this.treeViewEl = document.getElementById('tree-view');
     this.onExplore = null;
+    this.onPreview = null;
+    this.onPreviewClear = null;
     this.expandedPaths = new Set();
   }
 
@@ -72,15 +74,29 @@ class MCTSPanel {
         row.addEventListener('click', () => {
           this.onExplore?.([edge.action]);
         });
+        row.addEventListener('mouseenter', () => {
+          this.onPreview?.(edge.action);
+        });
+        row.addEventListener('mouseleave', () => {
+          this.onPreviewClear?.();
+        });
+        row.addEventListener('focus', () => {
+          this.onPreview?.(edge.action);
+        });
+        row.addEventListener('blur', () => {
+          this.onPreviewClear?.();
+        });
+        row.tabIndex = 0;
 
         row.innerHTML = `
-          <span class="w-36 shrink-0 overflow-hidden text-ellipsis whitespace-nowrap" title="${edge.label}">${edge.label}</span>
+          <span data-role="rank" class="w-5 shrink-0 text-right text-gray-500 text-[10px]">${idx + 1}</span>
+          <span data-role="label" class="w-32 shrink-0 overflow-hidden text-ellipsis whitespace-nowrap" title="${edge.label}">${edge.label}</span>
           <div class="flex-1 h-3.5 bg-bar rounded-sm relative">
             <div class="h-full rounded-sm transition-[width] duration-150" style="width:${pct}%;background:${qColor}"></div>
           </div>
-          <span class="w-10 text-right text-gray-500 shrink-0 text-[10px]">${edge.visits}</span>
-          <span class="w-11 text-right shrink-0 text-[10px]" style="color:${qColor}">${q != null ? ((q + 1) / 2 * 100).toFixed(0) + '%' : '—'}</span>
-          <span class="w-6 text-right text-gray-500 shrink-0 text-[10px]">${edge.depth || ''}</span>
+          <span data-role="visits" class="w-10 text-right text-gray-500 shrink-0 text-[10px]">${edge.visits}</span>
+          <span data-role="q" class="w-11 text-right shrink-0 text-[10px]" style="color:${qColor}">${q != null ? ((q + 1) / 2 * 100).toFixed(0) + '%' : '—'}</span>
+          <span data-role="depth" class="w-6 text-right text-gray-500 shrink-0 text-[10px]">${edge.depth || ''}</span>
         `;
 
         this.barsEl.appendChild(row);
@@ -93,13 +109,17 @@ class MCTSPanel {
           bar.style.width = `${pct}%`;
           bar.style.background = qColor;
         }
-        const spans = row.querySelectorAll('span');
-        if (spans[1]) spans[1].textContent = `${edge.visits}`;
-        if (spans[2]) {
-          spans[2].textContent = q != null ? ((q + 1) / 2 * 100).toFixed(0) + '%' : '—';
-          spans[2].style.color = qColor;
+        const rank = row.querySelector('[data-role="rank"]');
+        const visits = row.querySelector('[data-role="visits"]');
+        const qEl = row.querySelector('[data-role="q"]');
+        const depth = row.querySelector('[data-role="depth"]');
+        if (rank) rank.textContent = `${idx + 1}`;
+        if (visits) visits.textContent = `${edge.visits}`;
+        if (qEl) {
+          qEl.textContent = q != null ? ((q + 1) / 2 * 100).toFixed(0) + '%' : '—';
+          qEl.style.color = qColor;
         }
-        if (spans[3]) spans[3].textContent = `${edge.depth || ''}`;
+        if (depth) depth.textContent = `${edge.depth || ''}`;
       }
     }
   }

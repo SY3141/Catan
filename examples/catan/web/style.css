@@ -260,8 +260,8 @@
 
 .roll-badge {
   position: absolute;
-  right: 10px;
-  bottom: 10px;
+  right: 0;
+  bottom: 0;
   z-index: 10;
   display: flex;
   align-items: center;
@@ -280,6 +280,114 @@
 
 .roll-badge.hidden {
   display: none;
+}
+
+#board-shell {
+  --board-content-left: 0px;
+  --board-content-top: 0px;
+  --board-content-right: 0px;
+  --board-content-bottom: 0px;
+  --board-content-center-x: 50%;
+}
+
+#btn-rotate-left {
+  left: var(--board-content-left);
+  top: var(--board-content-top);
+}
+
+#btn-rotate-right {
+  right: var(--board-content-right);
+  top: var(--board-content-top);
+}
+
+#btn-mirror-board {
+  left: var(--board-content-center-x);
+  top: var(--board-content-top);
+}
+
+#roll-badge {
+  right: var(--board-content-right);
+  bottom: var(--board-content-bottom);
+}
+
+.editor-terrain-btn,
+.editor-number-btn {
+  display: flex;
+  min-height: 34px;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid #374151;
+  border-radius: 5px;
+  background: #0f3460;
+  color: #e5e7eb;
+  padding: 6px 8px;
+  font-size: 0.72rem;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, opacity 0.15s ease;
+}
+
+.editor-terrain-btn:hover,
+.editor-number-btn:hover,
+.editor-terrain-btn.active,
+.editor-number-btn.active {
+  border-color: #e94560;
+  background: #223b68;
+}
+
+.editor-terrain-btn:disabled,
+.editor-number-btn:disabled {
+  cursor: default;
+  opacity: 0.42;
+}
+
+.editor-swatch {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  border-radius: 3px;
+}
+
+.editor-number-btn {
+  justify-content: space-between;
+}
+
+.editor-number-label {
+  min-width: 18px;
+  font-weight: 700;
+}
+
+.editor-number-pips {
+  display: inline-flex;
+  min-width: 34px;
+  justify-content: flex-end;
+  gap: 2px;
+}
+
+.editor-number-pips span {
+  width: 4px;
+  height: 4px;
+  border-radius: 999px;
+  background: currentColor;
+}
+
+.editor-random-btn {
+  min-height: 34px;
+  border: 1px solid #374151;
+  border-radius: 5px;
+  background: #0f3460;
+  color: #e5e7eb;
+  padding: 7px 10px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.editor-random-btn:hover {
+  border-color: #e94560;
+  background: #223b68;
 }
 
 /* Tree explorer toggle */

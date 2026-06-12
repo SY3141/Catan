@@ -919,27 +919,29 @@ async fn handle_authenticated_message<G: Game + 'static>(
                     message: "Replay storage is not configured".into(),
                 }],
             },
-            msg @ ClientMsg::NewGame { .. } => {
-                let save_error = match &user_session.replay_store {
-                    Some(store) => session.export_current_log().and_then(|log| {
-                        let counter = user_session
-                            .next_replay_counter
-                            .fetch_add(1, Ordering::Relaxed);
-                        store
-                            .save(
-                                &user_session.account_key,
-                                user_session.session_id,
-                                counter,
-                                &log,
-                            )
-                            .err()
-                            .map(|message| ServerMsg::Error { message })
-                    }),
+            msg @ (ClientMsg::NewGame { .. } | ClientMsg::StartEditedGame { .. }) => {
+                let pending_log = match &user_session.replay_store {
+                    Some(_) => session.export_current_log(),
                     None => None,
                 };
                 let mut msgs = session.handle(msg);
-                if let Some(error) = save_error {
-                    msgs.insert(0, error);
+                let started_game = msgs
+                    .iter()
+                    .any(|msg| matches!(msg, ServerMsg::GameState { .. }));
+                if started_game {
+                    if let (Some(store), Some(log)) = (&user_session.replay_store, pending_log) {
+                        let counter = user_session
+                            .next_replay_counter
+                            .fetch_add(1, Ordering::Relaxed);
+                        if let Err(message) = store.save(
+                            &user_session.account_key,
+                            user_session.session_id,
+                            counter,
+                            &log,
+                        ) {
+                            msgs.insert(0, ServerMsg::Error { message });
+                        }
+                    }
                 }
                 msgs
             }

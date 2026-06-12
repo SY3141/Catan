@@ -49,4 +49,13 @@ pub trait GamePresenter<G: Game>: Send + Sync {
 
     /// Create a new game from a seed.
     fn new_game(&self, seed: u64) -> G;
+
+    /// Create a new game from a browser-edited board layout.
+    fn new_game_from_editor(
+        &self,
+        _terrains: &[String],
+        _numbers: &[Option<u8>],
+    ) -> Result<G, String> {
+        Err("this game presenter does not support edited boards".into())
+    }
 }

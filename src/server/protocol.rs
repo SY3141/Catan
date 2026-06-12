@@ -72,6 +72,11 @@ pub enum ClientMsg {
     },
     /// Start a new game (optionally with a seed).
     NewGame { seed: Option<u64> },
+    /// Start a game from a browser-edited board layout.
+    StartEditedGame {
+        terrains: Vec<String>,
+        numbers: Vec<Option<u8>>,
+    },
     /// List saved game logs for this authenticated web session.
     ListReplays,
     /// Load a saved replay by id.

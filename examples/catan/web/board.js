@@ -23,6 +23,7 @@ class Board {
     this.svg = svgEl;
     this.boardData = null;
     this.onActionClick = null;
+    this.onTileClick = null;
     this.rotationStep = 0;
     this.mirrored = false;
     this.boardCenter = [0, 0];
@@ -119,35 +120,46 @@ class Board {
     for (let tid = 0; tid < board.tiles.length; tid++) {
       const tile = board.tiles[tid];
       if (!tile) continue;
-      const el = this._el('circle', {
-        cx: tile.cx, cy: tile.cy, r: 18,
-        fill: 'transparent', 'pointer-events': 'all'
-      });
+      const el = this.onTileClick
+        ? this._el('polygon', {
+          points: this._hexPoints(tile.cx, tile.cy, HEX_SIZE),
+          fill: 'transparent', 'pointer-events': 'all'
+        })
+        : this._el('circle', {
+          cx: tile.cx, cy: tile.cy, r: 18,
+          fill: 'transparent', 'pointer-events': 'all'
+        });
       this._attachTooltip(el, `T${tid}`);
+      if (this.onTileClick) {
+        el.setAttribute('cursor', 'pointer');
+        el.addEventListener('click', () => this.onTileClick?.(tid));
+      }
       hitsG.appendChild(el);
     }
-    for (let eid = 0; eid < board.edges.length; eid++) {
-      const edge = board.edges[eid];
-      if (!edge) continue;
-      const [n0, n1] = edge;
-      const [x0, y0] = board.nodes[n0];
-      const [x1, y1] = board.nodes[n1];
-      const el = this._el('line', {
-        x1: x0, y1: y0, x2: x1, y2: y1,
-        stroke: 'transparent', 'stroke-width': 6,
-        'stroke-linecap': 'round', 'pointer-events': 'stroke'
-      });
-      this._attachTooltip(el, `E${eid}`);
-      hitsG.appendChild(el);
-    }
-    for (let nid = 0; nid < board.nodes.length; nid++) {
-      const [x, y] = board.nodes[nid];
-      const el = this._el('circle', {
-        cx: x, cy: y, r: 7,
-        fill: 'transparent', 'pointer-events': 'all'
-      });
-      this._attachTooltip(el, `N${nid}`);
-      hitsG.appendChild(el);
+    if (!this.onTileClick) {
+      for (let eid = 0; eid < board.edges.length; eid++) {
+        const edge = board.edges[eid];
+        if (!edge) continue;
+        const [n0, n1] = edge;
+        const [x0, y0] = board.nodes[n0];
+        const [x1, y1] = board.nodes[n1];
+        const el = this._el('line', {
+          x1: x0, y1: y0, x2: x1, y2: y1,
+          stroke: 'transparent', 'stroke-width': 6,
+          'stroke-linecap': 'round', 'pointer-events': 'stroke'
+        });
+        this._attachTooltip(el, `E${eid}`);
+        hitsG.appendChild(el);
+      }
+      for (let nid = 0; nid < board.nodes.length; nid++) {
+        const [x, y] = board.nodes[nid];
+        const el = this._el('circle', {
+          cx: x, cy: y, r: 7,
+          fill: 'transparent', 'pointer-events': 'all'
+        });
+        this._attachTooltip(el, `N${nid}`);
+        hitsG.appendChild(el);
+      }
     }
 
     // Overlay for legal actions
@@ -159,6 +171,12 @@ class Board {
     previewG.setAttribute('opacity', '0.6');
 
     this._applyRotation();
+  }
+
+  // Render a local editor draft using normal board geometry.
+  renderEditorBoard(board) {
+    this.initBoard(board);
+    this.clearOverlays();
   }
 
   // Update dynamic elements from a frame.
@@ -518,21 +536,17 @@ class Board {
   }
 
   _drawTile(parent, tile) {
-    const { cx, cy, terrain, number, nodes: tileNodes } = tile;
-    const color = TERRAIN_COLORS[terrain] || '#444';
+    const { cx, cy, terrain, number } = tile;
+    const color = TERRAIN_COLORS[terrain] || '#263044';
 
-    // Hex path
-    let points = '';
-    for (let i = 0; i < 6; i++) {
-      const angle = (Math.PI / 3) * i - Math.PI / 6;
-      const px = cx + HEX_SIZE * Math.cos(angle);
-      const py = cy + HEX_SIZE * Math.sin(angle);
-      points += `${px},${py} `;
-    }
-    parent.appendChild(this._el('polygon', {
-      points: points.trim(),
-      fill: color, stroke: '#111', 'stroke-width': 1
-    }));
+    const attrs = {
+      points: this._hexPoints(cx, cy, HEX_SIZE),
+      fill: color,
+      stroke: tile.selected ? '#e94560' : (terrain ? '#111' : '#637089'),
+      'stroke-width': tile.selected ? 3 : 1
+    };
+    if (!terrain) attrs['stroke-dasharray'] = '5 4';
+    parent.appendChild(this._el('polygon', attrs));
 
     // Number token
     if (number) {
@@ -632,6 +646,17 @@ class Board {
 
   _cityPoints(x, y) {
     return `${x},${y-9} ${x+7},${y-3} ${x+7},${y+7} ${x-7},${y+7} ${x-7},${y-3}`;
+  }
+
+  _hexPoints(cx, cy, size) {
+    let points = '';
+    for (let i = 0; i < 6; i++) {
+      const angle = (Math.PI / 3) * i - Math.PI / 6;
+      const px = cx + size * Math.cos(angle);
+      const py = cy + size * Math.sin(angle);
+      points += `${px},${py} `;
+    }
+    return points.trim();
   }
 
   _g(cls) {

@@ -12,27 +12,111 @@ const RESOURCE_NAMES = ['lumber', 'brick', 'wool', 'grain', 'ore'];
 const DEV_CARD_NAMES = ['Knight', 'VP', 'Road Building', 'Year of Plenty', 'Monopoly'];
 const DEV_SHORT = ['Kn', 'VP', 'RB', 'YP', 'Mo'];
 const PLAYER_COLORS = ['#4a9eff', '#ff6b6b'];
+const EDITOR_TERRAINS = ['forest', 'hills', 'pasture', 'fields', 'mountains', 'desert'];
+const EDITOR_NUMBERS = [2, 3, 4, 5, 6, 8, 9, 10, 11, 12];
+const EDITOR_TERRAIN_BAG = [
+  'forest', 'forest', 'forest', 'forest',
+  'hills', 'hills', 'hills',
+  'pasture', 'pasture', 'pasture', 'pasture',
+  'fields', 'fields', 'fields', 'fields',
+  'mountains', 'mountains', 'mountains',
+  'desert',
+];
+const EDITOR_NUMBER_BAG = [2, 3, 3, 4, 4, 5, 5, 6, 6, 8, 8, 9, 9, 10, 10, 11, 11, 12];
 
 function playerColor(playerIndex) {
   return playerIndex === 0 || playerIndex === 1 ? PLAYER_COLORS[playerIndex] : '';
+}
+
+function createBlankEditorTiles() {
+  return Array.from({ length: 19 }, () => ({ terrain: null, number: null }));
+}
+
+function shuffled(values) {
+  const out = [...values];
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [out[i], out[j]] = [out[j], out[i]];
+  }
+  return out;
 }
 
 let currentState = null;
 let analysisState = null;
 let replayState = null;
 let currentBoard = null;
+let editorBaseBoard = null;
+let editorTiles = createBlankEditorTiles();
+let selectedEditorTile = null;
+let pendingEditorStart = false;
 let lastActionLogLength = { analysis: null, replay: null };
 let previousFrameHands = { analysis: null, replay: null };
 let activeView = 'analysis';
 
+function updateBoardChromePlacement() {
+  const shell = document.getElementById('board-shell');
+  const svg = document.getElementById('board-svg');
+  if (!shell || !svg) return;
+
+  const shellRect = shell.getBoundingClientRect();
+  const svgRect = svg.getBoundingClientRect();
+  const viewBox = svg.viewBox?.baseVal;
+  if (!shellRect.width || !shellRect.height || !svgRect.width || !svgRect.height || !viewBox?.width || !viewBox?.height) {
+    return;
+  }
+
+  const svgAspect = svgRect.width / svgRect.height;
+  const viewAspect = viewBox.width / viewBox.height;
+  let contentWidth = svgRect.width;
+  let contentHeight = svgRect.height;
+  let insetX = 0;
+  let insetY = 0;
+
+  if (svgAspect > viewAspect) {
+    contentWidth = svgRect.height * viewAspect;
+    insetX = (svgRect.width - contentWidth) / 2;
+  } else {
+    contentHeight = svgRect.width / viewAspect;
+    insetY = (svgRect.height - contentHeight) / 2;
+  }
+
+  const left = Math.max(0, svgRect.left - shellRect.left + insetX);
+  const top = Math.max(0, svgRect.top - shellRect.top + insetY);
+  const right = Math.max(0, shellRect.right - svgRect.right + insetX);
+  const bottom = Math.max(0, shellRect.bottom - svgRect.bottom + insetY);
+
+  shell.style.setProperty('--board-content-left', `${left}px`);
+  shell.style.setProperty('--board-content-top', `${top}px`);
+  shell.style.setProperty('--board-content-right', `${right}px`);
+  shell.style.setProperty('--board-content-bottom', `${bottom}px`);
+  shell.style.setProperty('--board-content-center-x', `${left + contentWidth / 2}px`);
+}
+
+function scheduleBoardChromePlacement() {
+  requestAnimationFrame(updateBoardChromePlacement);
+}
+
 // ── Message handlers ─────────────────────────────────────────────────
 
 session.on('GameState', (msg) => {
+  if (!msg.replay && msg.state?.board) {
+    editorBaseBoard = msg.state.board;
+  }
   if (msg.replay) {
     replayState = msg;
     if (activeView === 'replay-board') renderGameState(msg);
   } else {
     analysisState = msg;
+    if (pendingEditorStart) {
+      pendingEditorStart = false;
+      setEditorStatus('');
+      showAnalysisView();
+      return;
+    }
+    if (activeView === 'editor') {
+      renderEditorBoard();
+      return;
+    }
     if (activeView === 'analysis') renderGameState(msg);
   }
 });
@@ -162,6 +246,7 @@ function renderGameState(msg) {
   }
 
   controls.onStateUpdate(msg);
+  scheduleBoardChromePlacement();
 }
 
 function showLegalActionPreview(action) {
@@ -331,6 +416,10 @@ session.on('BotAction', (msg) => {
 });
 
 session.on('Error', (msg) => {
+  if (pendingEditorStart) {
+    pendingEditorStart = false;
+    setEditorStatus(msg.message);
+  }
   controls.onSearchError();
   setReplayStatus(msg.message);
   console.error('Server error:', msg.message);
@@ -341,30 +430,36 @@ session.on('Error', (msg) => {
 function setTabState(tab) {
   const boardTab = document.getElementById('tab-board');
   const replayTab = document.getElementById('tab-replay');
+  const editorTab = document.getElementById('tab-editor');
   const isAnalysis = tab === 'analysis';
+  const isReplay = tab === 'replay';
+  const isEditor = tab === 'editor';
+  const activeClasses = 'view-tab active px-2 py-1 rounded text-gray-100 bg-bg-3';
+  const idleClasses = 'view-tab px-2 py-1 rounded text-gray-400 hover:text-gray-100 hover:bg-bg-3';
 
-  boardTab.className = isAnalysis
-    ? 'view-tab active px-2 py-1 rounded text-gray-100 bg-bg-3'
-    : 'view-tab px-2 py-1 rounded text-gray-400 hover:text-gray-100 hover:bg-bg-3';
-  replayTab.className = !isAnalysis
-    ? 'view-tab active px-2 py-1 rounded text-gray-100 bg-bg-3'
-    : 'view-tab px-2 py-1 rounded text-gray-400 hover:text-gray-100 hover:bg-bg-3';
+  boardTab.className = isAnalysis ? activeClasses : idleClasses;
+  replayTab.className = isReplay ? activeClasses : idleClasses;
+  editorTab.className = isEditor ? activeClasses : idleClasses;
   boardTab.setAttribute('aria-selected', String(isAnalysis));
-  replayTab.setAttribute('aria-selected', String(!isAnalysis));
+  replayTab.setAttribute('aria-selected', String(isReplay));
+  editorTab.setAttribute('aria-selected', String(isEditor));
 }
 
 function showAnalysisView() {
   activeView = 'analysis';
   setTabState('analysis');
+  setEditorChrome(false);
   document.getElementById('main-layout').classList.remove('hidden');
   document.getElementById('replay-view').classList.add('hidden');
   document.getElementById('controls').classList.remove('hidden');
   if (analysisState) renderGameState(analysisState);
+  scheduleBoardChromePlacement();
 }
 
 function showReplayView() {
   activeView = 'replay-list';
   setTabState('replay');
+  setEditorChrome(false);
   document.getElementById('main-layout').classList.add('hidden');
   document.getElementById('replay-view').classList.remove('hidden');
   document.getElementById('controls').classList.add('hidden');
@@ -374,10 +469,48 @@ function showReplayView() {
 function showReplayBoardView() {
   activeView = 'replay-board';
   setTabState('replay');
+  setEditorChrome(false);
   document.getElementById('main-layout').classList.remove('hidden');
   document.getElementById('replay-view').classList.add('hidden');
   document.getElementById('controls').classList.remove('hidden');
   if (replayState) renderGameState(replayState);
+  scheduleBoardChromePlacement();
+}
+
+function showEditorView() {
+  activeView = 'editor';
+  setTabState('editor');
+  controls.stopAutoplay();
+  controls._disableAutoSearch();
+  document.getElementById('main-layout').classList.remove('hidden');
+  document.getElementById('replay-view').classList.add('hidden');
+  document.getElementById('controls').classList.remove('hidden');
+  if (!editorBaseBoard && analysisState?.state?.board) {
+    editorBaseBoard = analysisState.state.board;
+  }
+  setEditorChrome(true);
+  renderEditorBoard();
+  scheduleBoardChromePlacement();
+}
+
+function setEditorChrome(enabled) {
+  if (enabled) hideRollBadge();
+  document.getElementById('players-panel').classList.toggle('hidden', enabled);
+  document.getElementById('analysis-panel').classList.toggle('hidden', enabled);
+  document.getElementById('editor-panel').classList.toggle('hidden', !enabled);
+  document.getElementById('action-list').classList.toggle('hidden', enabled);
+  document.getElementById('phase-label').classList.toggle('hidden', enabled);
+  document.getElementById('turn-label').classList.toggle('hidden', enabled);
+  board.onTileClick = enabled ? handleEditorTileClick : null;
+
+  const controlsEl = document.getElementById('controls');
+  for (const child of controlsEl.children) {
+    if (child.id === 'btn-start-edited-game') {
+      child.classList.toggle('hidden', !enabled);
+    } else {
+      child.classList.toggle('hidden', enabled);
+    }
+  }
 }
 
 function requestReplayList() {
@@ -479,13 +612,217 @@ function formatReplayTime(ms) {
   return date.toLocaleString();
 }
 
+// Board editor
+
+function initEditorControls() {
+  const terrainList = document.getElementById('editor-terrain-buttons');
+  for (const terrain of EDITOR_TERRAINS) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'editor-terrain-btn';
+    btn.dataset.terrain = terrain;
+
+    const swatch = document.createElement('span');
+    swatch.className = 'editor-swatch';
+    swatch.style.background = TERRAIN_COLORS[terrain];
+    btn.appendChild(swatch);
+
+    const label = document.createElement('span');
+    label.textContent = terrain.charAt(0).toUpperCase() + terrain.slice(1);
+    btn.appendChild(label);
+
+    btn.addEventListener('click', () => applyEditorTerrain(terrain));
+    terrainList.appendChild(btn);
+  }
+
+  const numberList = document.getElementById('editor-number-buttons');
+  for (const number of EDITOR_NUMBERS) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'editor-number-btn';
+    btn.dataset.number = String(number);
+
+    const label = document.createElement('span');
+    label.className = 'editor-number-label';
+    label.textContent = number;
+    btn.appendChild(label);
+
+    const pips = document.createElement('span');
+    pips.className = 'editor-number-pips';
+    for (let i = 0; i < catanPips(number); i++) {
+      pips.appendChild(document.createElement('span'));
+    }
+    btn.appendChild(pips);
+
+    btn.addEventListener('click', () => applyEditorNumber(number));
+    numberList.appendChild(btn);
+  }
+
+  updateEditorPanel();
+}
+
+function renderEditorBoard() {
+  if (!editorBaseBoard) {
+    currentBoard = null;
+    board.svg.innerHTML = '';
+    setEditorStatus('Loading board');
+    updateEditorPanel();
+    scheduleBoardChromePlacement();
+    return;
+  }
+
+  const draftBoard = {
+    ...editorBaseBoard,
+    ports: [],
+    tiles: editorBaseBoard.tiles.map((tile, i) => ({
+      ...tile,
+      terrain: editorTiles[i]?.terrain || null,
+      number: editorTiles[i]?.number || null,
+      selected: i === selectedEditorTile,
+    })),
+  };
+
+  currentBoard = null;
+  board.renderEditorBoard(draftBoard);
+  updateEditorPanel();
+  scheduleBoardChromePlacement();
+}
+
+function handleEditorTileClick(tileIndex) {
+  selectedEditorTile = tileIndex;
+  setEditorStatus('');
+  renderEditorBoard();
+}
+
+function applyEditorTerrain(terrain) {
+  if (selectedEditorTile == null) {
+    setEditorStatus('No tile selected');
+    return;
+  }
+  const tile = editorTiles[selectedEditorTile];
+  tile.terrain = terrain;
+  if (terrain === 'desert') {
+    tile.number = null;
+  }
+  setEditorStatus('');
+  renderEditorBoard();
+}
+
+function applyEditorNumber(number) {
+  if (selectedEditorTile == null) {
+    setEditorStatus('No tile selected');
+    return;
+  }
+  const tile = editorTiles[selectedEditorTile];
+  if (!tile.terrain) {
+    setEditorStatus('Terrain required');
+    return;
+  }
+  if (tile.terrain === 'desert') {
+    tile.number = null;
+    setEditorStatus('Desert has no number');
+    renderEditorBoard();
+    return;
+  }
+  tile.number = number;
+  setEditorStatus('');
+  renderEditorBoard();
+}
+
+function randomizeEditorBoard() {
+  const terrains = shuffled(EDITOR_TERRAIN_BAG);
+  const numbers = shuffled(EDITOR_NUMBER_BAG);
+  let numberIndex = 0;
+
+  editorTiles = terrains.map((terrain) => ({
+    terrain,
+    number: terrain === 'desert' ? null : numbers[numberIndex++],
+  }));
+  setEditorStatus('Random board ready');
+  renderEditorBoard();
+}
+
+function updateEditorPanel() {
+  const selection = document.getElementById('editor-selection');
+  const tile = selectedEditorTile == null ? null : editorTiles[selectedEditorTile];
+  if (!tile) {
+    selection.textContent = '';
+  } else {
+    const parts = [`Tile ${selectedEditorTile + 1}`];
+    if (tile.terrain) parts.push(tile.terrain);
+    if (tile.number) parts.push(String(tile.number));
+    selection.textContent = parts.join(' - ');
+  }
+
+  for (const btn of document.querySelectorAll('.editor-terrain-btn')) {
+    const active = tile?.terrain === btn.dataset.terrain;
+    btn.disabled = selectedEditorTile == null;
+    btn.classList.toggle('active', active);
+  }
+
+  const numbersEnabled = !!tile?.terrain && tile.terrain !== 'desert';
+  for (const btn of document.querySelectorAll('.editor-number-btn')) {
+    const number = Number(btn.dataset.number);
+    btn.disabled = !numbersEnabled;
+    btn.classList.toggle('active', tile?.number === number);
+  }
+}
+
+function setEditorStatus(text) {
+  const status = document.getElementById('editor-status');
+  if (!status) return;
+  status.textContent = text || '';
+  document.getElementById('btn-start-edited-game').disabled = pendingEditorStart;
+}
+
+function validateEditorDraft() {
+  for (let i = 0; i < editorTiles.length; i++) {
+    const tile = editorTiles[i];
+    if (!tile.terrain) return `Tile ${i + 1} needs terrain`;
+    if (tile.terrain === 'desert' && tile.number != null) {
+      return `Tile ${i + 1} is desert`;
+    }
+    if (tile.terrain !== 'desert' && !EDITOR_NUMBERS.includes(tile.number)) {
+      return `Tile ${i + 1} needs a number`;
+    }
+  }
+  return '';
+}
+
+function startEditedGame() {
+  const error = validateEditorDraft();
+  if (error) {
+    setEditorStatus(error);
+    return;
+  }
+  pendingEditorStart = true;
+  setEditorStatus('Starting');
+  session.send({
+    type: 'StartEditedGame',
+    terrains: editorTiles.map(tile => tile.terrain),
+    numbers: editorTiles.map(tile => tile.terrain === 'desert' ? null : tile.number),
+  });
+}
+
 // ── Board action clicks ──────────────────────────────────────────────
 
 document.getElementById('tab-board').addEventListener('click', showAnalysisView);
 document.getElementById('tab-replay').addEventListener('click', showReplayView);
+document.getElementById('tab-editor').addEventListener('click', showEditorView);
 document.getElementById('btn-refresh-replays').addEventListener('click', requestReplayList);
+document.getElementById('btn-start-edited-game').addEventListener('click', startEditedGame);
+document.getElementById('btn-random-editor-board').addEventListener('click', randomizeEditorBoard);
+initEditorControls();
+
+const boardShellEl = document.getElementById('board-shell');
+if (boardShellEl && window.ResizeObserver) {
+  new ResizeObserver(updateBoardChromePlacement).observe(boardShellEl);
+}
+window.addEventListener('resize', scheduleBoardChromePlacement);
+scheduleBoardChromePlacement();
 
 board.onActionClick = (action) => {
+  if (activeView === 'editor') return;
   if (currentState?.replay) return;
   session.send({ type: 'PlayAction', action });
 };
@@ -511,6 +848,14 @@ mctsPanel.onExplore = (actionPath) => {
     depth: 20,
     target: currentState?.replay ? 'replay' : 'analysis',
   });
+};
+
+mctsPanel.onPreview = (action) => {
+  showLegalActionPreview(action);
+};
+
+mctsPanel.onPreviewClear = () => {
+  board.clearActionPreview();
 };
 
 // ── Player panel helpers ─────────────────────────────────────────────
@@ -714,7 +1059,7 @@ function updateDice(state) {
 
 document.addEventListener('keydown', (e) => {
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
-  if (activeView === 'replay-list') return;
+  if (activeView === 'replay-list' || activeView === 'editor') return;
   if (currentState?.replay && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
     e.preventDefault();
     const replay = currentState.replay;

@@ -445,6 +445,19 @@ impl<G: Game + 'static> GameSession<G> {
                 self.auto_resolve_chance();
                 vec![self.state_msg()]
             }
+            ClientMsg::StartEditedGame { terrains, numbers } => {
+                let state = match self.presenter.new_game_from_editor(&terrains, &numbers) {
+                    Ok(state) => state,
+                    Err(message) => return vec![ServerMsg::Error { message }],
+                };
+                self.seed = fastrand::u64(..);
+                self.search.reset(state);
+                self.history.clear();
+                self.cursor = 0;
+                self.replay = None;
+                self.auto_resolve_chance();
+                vec![self.state_msg()]
+            }
             ClientMsg::PollState | ClientMsg::GetState => {
                 vec![self.state_msg()]
             }
@@ -1293,6 +1306,18 @@ mod tests {
         fn new_game(&self, seed: u64) -> TestGame {
             TestGame { id: seed, moves: 0 }
         }
+
+        fn new_game_from_editor(
+            &self,
+            terrains: &[String],
+            _numbers: &[Option<u8>],
+        ) -> Result<TestGame, String> {
+            if terrains.first().map(|terrain| terrain.as_str()) == Some("bad") {
+                Err("bad edited board".into())
+            } else {
+                Ok(TestGame { id: 99, moves: 0 })
+            }
+        }
     }
 
     fn test_session() -> GameSession<TestGame> {
@@ -1365,6 +1390,50 @@ mod tests {
             ServerMsg::GameState { replay, state, .. } => {
                 assert_eq!(replay.expect("replay metadata").cursor, 2);
                 assert_eq!(state["moves"], serde_json::json!(2));
+            }
+            _ => panic!("expected GameState"),
+        }
+    }
+
+    #[test]
+    fn start_edited_game_replaces_state_and_invalid_keeps_current_state() {
+        let mut session = test_session();
+        session.handle(ClientMsg::PlayAction { action: 0 });
+
+        let msgs = session.handle(ClientMsg::StartEditedGame {
+            terrains: vec!["forest".into()],
+            numbers: vec![Some(5)],
+        });
+        match msgs.as_slice() {
+            [
+                ServerMsg::GameState {
+                    replay,
+                    state,
+                    action_log,
+                    ..
+                },
+            ] => {
+                assert!(replay.is_none());
+                assert_eq!(state["id"], serde_json::json!(99));
+                assert_eq!(state["moves"], serde_json::json!(0));
+                assert!(action_log.is_empty());
+            }
+            other => panic!("expected edited GameState, got {other:?}"),
+        }
+
+        let msgs = session.handle(ClientMsg::StartEditedGame {
+            terrains: vec!["bad".into()],
+            numbers: vec![Some(5)],
+        });
+        match msgs.as_slice() {
+            [ServerMsg::Error { message }] => assert!(message.contains("bad edited board")),
+            other => panic!("expected edited board error, got {other:?}"),
+        }
+
+        match session.state_msg() {
+            ServerMsg::GameState { state, .. } => {
+                assert_eq!(state["id"], serde_json::json!(99));
+                assert_eq!(state["moves"], serde_json::json!(0));
             }
             _ => panic!("expected GameState"),
         }

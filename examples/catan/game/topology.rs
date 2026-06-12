@@ -285,6 +285,12 @@ impl Topology {
         Self::build(&mut rng)
     }
 
+    /// Build a topology from an explicit terrain/number layout using the
+    /// default port positions and port resources.
+    pub fn from_layout(terrains: [Terrain; 19], numbers: [Option<u8>; 19]) -> Self {
+        Self::from_layout_with_ports(terrains, numbers, PORT_POOL, &PORT_SPECS)
+    }
+
     fn build(rng: &mut fastrand::Rng) -> Self {
         let mut terrains = TERRAIN_POOL;
         rng.shuffle(&mut terrains);

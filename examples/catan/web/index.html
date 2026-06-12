@@ -21,7 +21,7 @@ tailwind.config = {
   }
 }
 </script>
-<link rel="stylesheet" href="style.css?v=roll-badge-20260611">
+<link rel="stylesheet" href="style.css?v=inner-board-controls-20260612">
 <script
   defer
   crossorigin="anonymous"
@@ -72,10 +72,11 @@ tailwind.config = {
 <div id="app" class="app-shell is-hidden flex flex-col h-full" aria-hidden="true">
   <!-- Header -->
   <header class="flex items-center gap-4 px-4 py-2 bg-bg-2 border-b border-gray-700">
-    <h1 class="text-sm font-semibold text-gray-100">HexFish Analysis Board</h1>
+    <h1 class="text-sm font-semibold text-gray-100">HexFish</h1>
     <div class="flex items-center gap-1 text-xs" role="tablist" aria-label="Main views">
       <button id="tab-board" class="view-tab active px-2 py-1 rounded text-gray-100 bg-bg-3" type="button" role="tab" aria-selected="true">Analysis</button>
       <button id="tab-replay" class="view-tab px-2 py-1 rounded text-gray-400 hover:text-gray-100 hover:bg-bg-3" type="button" role="tab" aria-selected="false">Replay</button>
+      <button id="tab-editor" class="view-tab px-2 py-1 rounded text-gray-400 hover:text-gray-100 hover:bg-bg-3" type="button" role="tab" aria-selected="false">Editor</button>
     </div>
     <span id="phase-label" class="bg-bg-3 px-2 py-0.5 rounded text-xs text-gray-300"></span>
     <span id="turn-label" class="text-xs text-gray-500"></span>
@@ -87,8 +88,42 @@ tailwind.config = {
 
   <!-- Main 3-column layout -->
   <div id="main-layout" class="flex flex-1 overflow-hidden">
-    <!-- Left: Player panels -->
-    <div id="players-panel" class="w-52 min-w-52 flex flex-col gap-2 p-2 bg-bg-2 border-r border-gray-700 overflow-y-auto">
+    <!-- Center: SVG Board + action buttons -->
+    <div id="board-container" class="flex-1 min-w-0 flex flex-col items-stretch p-2 overflow-hidden">
+      <div id="board-shell" class="relative flex-1 min-h-0 w-full">
+        <button id="btn-rotate-left" class="absolute top-0 left-0 z-10 w-8 h-8 flex items-center justify-center bg-bg-3/90 border border-gray-700 text-gray-100 rounded cursor-pointer hover:bg-accent transition-colors" title="Rotate board counterclockwise" aria-label="Rotate board counterclockwise">&#8634;</button>
+        <button id="btn-mirror-board" class="absolute top-0 left-1/2 -translate-x-1/2 z-10 w-8 h-8 flex items-center justify-center bg-bg-3/90 border border-gray-700 text-gray-100 rounded cursor-pointer hover:bg-accent transition-colors" title="Mirror board" aria-label="Mirror board">&#8644;</button>
+        <button id="btn-rotate-right" class="absolute top-0 right-0 z-10 w-8 h-8 flex items-center justify-center bg-bg-3/90 border border-gray-700 text-gray-100 rounded cursor-pointer hover:bg-accent transition-colors" title="Rotate board clockwise" aria-label="Rotate board clockwise">&#8635;</button>
+        <div id="roll-badge" class="roll-badge hidden absolute right-0 bottom-0 z-10 flex w-[42px] h-[42px] items-center justify-center rounded-lg border border-white/50 bg-bg-3/90 text-white text-xl font-extrabold shadow-lg pointer-events-none" aria-live="polite" aria-label="Roll"></div>
+        <svg id="board-svg" class="w-full h-full min-h-0" viewBox="-50 -50 500 500"></svg>
+      </div>
+      <div id="action-list" class="w-full shrink-0 max-h-40 overflow-y-auto p-1 flex flex-wrap gap-1"></div>
+    </div>
+
+    <!-- Right: Board Editor -->
+    <div id="editor-panel" class="hidden w-60 min-w-60 flex flex-col gap-3 p-2 bg-bg-2 border-l border-gray-700 overflow-y-auto">
+      <div class="bg-bg rounded-md p-2.5 border border-gray-700">
+        <h2 class="text-sm font-medium text-gray-200 mb-2">Editor</h2>
+        <div id="editor-selection" class="text-xs text-gray-400"></div>
+        <div id="editor-status" class="mt-2 min-h-4 text-xs text-accent" aria-live="polite"></div>
+        <button id="btn-random-editor-board" type="button" class="editor-random-btn mt-2 w-full">Random Board</button>
+      </div>
+      <div class="bg-bg rounded-md p-2.5 border border-gray-700">
+        <h3 class="text-xs font-medium text-gray-400 mb-2">Terrain</h3>
+        <div id="editor-terrain-buttons" class="grid grid-cols-2 gap-1.5"></div>
+      </div>
+      <div class="bg-bg rounded-md p-2.5 border border-gray-700">
+        <h3 class="text-xs font-medium text-gray-400 mb-2">Number</h3>
+        <div id="editor-number-buttons" class="grid grid-cols-2 gap-1.5"></div>
+      </div>
+    </div>
+
+    <!-- Side: Bank, players, dice -->
+    <div id="players-panel" class="w-52 min-w-52 flex flex-col gap-2 p-2 bg-bg-2 border-l border-gray-700 overflow-y-auto">
+      <div class="bg-bg rounded-md p-2.5 border border-gray-700">
+        <h3 class="text-sm font-medium text-gray-400 mb-1">Bank</h3>
+        <div class="flex flex-wrap gap-1 text-xs" id="bank-dev"></div>
+      </div>
       <div class="bg-bg rounded-md p-2.5 border border-gray-700 player-card" id="player-0">
         <h3 class="text-sm font-medium text-p1 flex items-center gap-1.5 mb-1">
           <span id="p0-name">P1</span> <span class="bg-bg-3 px-1.5 py-0.5 rounded text-xs" id="p0-vp">0</span>
@@ -107,10 +142,6 @@ tailwind.config = {
         <div class="text-xs text-gray-400 mt-1" id="p1-stats"></div>
         <button class="takeover-btn mt-2 w-full py-1 text-xs bg-bg-3 border border-gray-700 text-gray-300 rounded hover:bg-accent transition-colors cursor-pointer" data-player="1">Take Over</button>
       </div>
-      <div class="bg-bg rounded-md p-2.5 border border-gray-700">
-        <h3 class="text-sm font-medium text-gray-400 mb-1">Bank</h3>
-        <div class="flex flex-wrap gap-1 text-xs" id="bank-dev"></div>
-      </div>
       <div class="bg-bg rounded-md p-2.5 border border-gray-700" id="dice-panel" style="display:none">
         <h3 class="text-sm font-medium text-gray-400 mb-1">Dice <span id="dice-cards" class="text-gray-500 font-normal"></span></h3>
         <div id="dice-chart" class="flex items-end gap-px" style="height:64px"></div>
@@ -119,18 +150,6 @@ tailwind.config = {
         <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-2316784145315206"
      crossorigin="anonymous"></script>
       </div>
-    </div>
-
-    <!-- Center: SVG Board + action buttons -->
-    <div id="board-container" class="flex-1 flex flex-col items-center p-2 overflow-auto">
-      <div id="board-shell" class="relative w-full max-w-lg">
-        <button id="btn-rotate-left" class="absolute top-2 left-2 z-10 w-8 h-8 flex items-center justify-center bg-bg-3/90 border border-gray-700 text-gray-100 rounded cursor-pointer hover:bg-accent transition-colors" title="Rotate board counterclockwise" aria-label="Rotate board counterclockwise">&#8634;</button>
-        <button id="btn-mirror-board" class="absolute top-2 left-1/2 -translate-x-1/2 z-10 w-8 h-8 flex items-center justify-center bg-bg-3/90 border border-gray-700 text-gray-100 rounded cursor-pointer hover:bg-accent transition-colors" title="Mirror board" aria-label="Mirror board">&#8644;</button>
-        <button id="btn-rotate-right" class="absolute top-2 right-2 z-10 w-8 h-8 flex items-center justify-center bg-bg-3/90 border border-gray-700 text-gray-100 rounded cursor-pointer hover:bg-accent transition-colors" title="Rotate board clockwise" aria-label="Rotate board clockwise">&#8635;</button>
-        <div id="roll-badge" class="roll-badge hidden absolute right-2.5 bottom-2.5 z-10 flex w-[42px] h-[42px] items-center justify-center rounded-lg border border-white/50 bg-bg-3/90 text-white text-xl font-extrabold shadow-lg pointer-events-none" aria-live="polite" aria-label="Roll"></div>
-        <svg id="board-svg" class="w-full max-h-[60vh]" viewBox="-50 -50 500 500"></svg>
-      </div>
-      <div id="action-list" class="w-full max-w-lg max-h-48 overflow-y-auto p-1 flex flex-wrap gap-1"></div>
     </div>
 
     <!-- Right: MCTS Analysis -->
@@ -173,6 +192,7 @@ tailwind.config = {
   <!-- Bottom: Controls -->
   <div id="controls" class="flex items-center gap-2 px-4 py-2 bg-bg-2 border-t border-gray-700 flex-wrap">
     <button id="btn-new-game" class="py-1.5 px-3 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors">New Game</button>
+    <button id="btn-start-edited-game" class="hidden py-1.5 px-3 text-xs bg-accent border border-accent text-white rounded cursor-pointer hover:bg-red-600 transition-colors">Start Game</button>
     <div id="replay-controls" class="hidden flex items-center gap-1.5 text-xs text-gray-300">
       <button id="btn-replay-first" class="py-1.5 px-2 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-default" title="First position" aria-label="First replay position">&#124;&lt;</button>
       <button id="btn-replay-prev" class="py-1.5 px-2 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-default" title="Previous position" aria-label="Previous replay position">&lt;</button>
@@ -204,10 +224,10 @@ tailwind.config = {
 <div id="svg-tooltip"></div>
 
 <script src="session.js?v=anon-session-field-20260611"></script>
-<script src="board.js?v=tile-pips-20260610"></script>
-<script src="mcts.js"></script>
+<script src="board.js?v=board-editor-random-20260612"></script>
+<script src="mcts.js?v=mcts-hover-preview-20260612"></script>
 <script src="controls.js?v=split-replay-state-20260611"></script>
 <script src="auth.js?v=user-sessions-20260610"></script>
-<script src="app.js?v=replay-actions-20260611"></script>
+<script src="app.js?v=inner-board-controls-20260612"></script>
 </body>
 </html>
