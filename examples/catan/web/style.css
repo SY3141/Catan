@@ -195,8 +195,24 @@
 }
 
 .ad-card {
+  width: 100%;
   min-height: 110px;
   overflow: hidden;
+}
+
+#left-ad-panel {
+  width: 11rem;
+  min-width: 11rem;
+}
+
+#board-play-area {
+  min-width: 0;
+  min-height: 0;
+}
+
+#action-panel,
+#action-list {
+  min-height: 0;
 }
 
 /* Resource cards — always-visible colored rectangles with count */
@@ -307,6 +323,11 @@
 
 #roll-badge {
   right: var(--board-content-right);
+  bottom: var(--board-content-bottom);
+}
+
+#board-history-controls {
+  left: var(--board-content-left);
   bottom: var(--board-content-bottom);
 }
 

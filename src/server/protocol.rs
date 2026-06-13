@@ -60,6 +60,23 @@ pub enum ViewTarget {
     Replay,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum SearchBudget {
+    Simulations { value: u32 },
+    PvDepth { value: u32 },
+}
+
+impl SearchBudget {
+    pub fn simulations(value: u32) -> Self {
+        Self::Simulations { value }
+    }
+
+    pub fn pv_depth(value: u32) -> Self {
+        Self::PvDepth { value }
+    }
+}
+
 // ── Client → Server ──────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -90,10 +107,18 @@ pub enum ClientMsg {
     /// Human plays an action.
     PlayAction { action: usize },
     /// Request the bot to play an action.
-    BotMove { simulations: Option<u32> },
+    BotMove {
+        simulations: Option<u32>,
+        budget: Option<SearchBudget>,
+    },
     /// Run N additional simulations on current state (step debugger).
     RunSims {
         count: u32,
+        target: Option<ViewTarget>,
+    },
+    /// Run a search with an explicit budget mode.
+    RunSearch {
+        budget: SearchBudget,
         target: Option<ViewTarget>,
     },
     /// Request current search snapshot.
@@ -125,8 +150,12 @@ pub enum ClientMsg {
     SetLogCursor { index: usize },
     /// Configure per-player settings.
     SetConfig { player: u8, simulations: u32 },
-    /// Enable/disable continuous background search with a sim target.
-    SetAutoSearch { enabled: bool, target: u32 },
+    /// Enable/disable continuous background search with a search budget.
+    SetAutoSearch {
+        enabled: bool,
+        target: Option<u32>,
+        budget: Option<SearchBudget>,
+    },
 }
 
 // ── Server → Client ──────────────────────────────────────────────────
@@ -169,6 +198,7 @@ pub enum ServerMsg {
         snapshot: SearchSnapshot,
         action_labels: Vec<String>,
         sims_total: u32,
+        budget: SearchBudget,
     },
     /// Error message.
     Error { message: String },

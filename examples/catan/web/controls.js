@@ -12,21 +12,84 @@ class Controls {
     this.lastState = null;
     this.replayMode = false;
     this.autoSearch = document.getElementById('autosearch-toggle').checked;
+    this.budgetMode = 'simulations';
+    this.budgetValues = {
+      simulations: parseInt(document.getElementById('sims-input').value) || 50,
+      pv_depth: 8,
+    };
+    this.onNewGame = null;
+    this._setBudgetMode(this.budgetMode);
     this._bind();
     // Tell the server our initial auto-search state.
     if (this.autoSearch) this._syncAutoSearch();
   }
 
+  _budgetInput() {
+    return document.getElementById('sims-input');
+  }
+
+  _saveBudgetValue() {
+    const input = this._budgetInput();
+    let value = parseInt(input.value);
+    if (!Number.isFinite(value)) value = this.budgetValues[this.budgetMode];
+    const min = parseInt(input.min);
+    const max = parseInt(input.max);
+    value = Math.max(min, Math.min(max, value));
+    this.budgetValues[this.budgetMode] = value;
+    input.value = value;
+    return value;
+  }
+
+  _currentBudget() {
+    return {
+      mode: this.budgetMode,
+      value: this._saveBudgetValue(),
+    };
+  }
+
+  _setBudgetMode(mode) {
+    this.budgetMode = mode;
+    const input = this._budgetInput();
+    const label = document.getElementById('budget-value-label');
+    if (mode === 'pv_depth') {
+      label.firstChild.textContent = 'Depth:';
+      input.min = '1';
+      input.max = '30';
+      input.step = '1';
+      input.value = this.budgetValues.pv_depth;
+    } else {
+      label.firstChild.textContent = 'Sims:';
+      input.min = '0';
+      input.max = '10000';
+      input.step = '50';
+      input.value = this.budgetValues.simulations;
+    }
+    for (const btn of document.querySelectorAll('.budget-mode-btn')) {
+      const active = btn.dataset.budgetMode === mode;
+      btn.classList.toggle('bg-accent', active);
+      btn.classList.toggle('text-white', active);
+      btn.classList.toggle('bg-bg-3', !active);
+      btn.classList.toggle('text-gray-300', !active);
+      btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+    }
+  }
+
   _syncAutoSearch() {
-    const target = parseInt(document.getElementById('sims-input').value);
-    this.session.send({ type: 'SetAutoSearch', enabled: this.autoSearch, target });
+    const budget = this._currentBudget();
+    const target = budget.mode === 'simulations' ? budget.value : 0;
+    this.session.send({ type: 'SetAutoSearch', enabled: this.autoSearch, target, budget });
   }
 
   _disableAutoSearch() {
     if (!this.autoSearch) return;
     this.autoSearch = false;
     document.getElementById('autosearch-toggle').checked = false;
-    this.session.send({ type: 'SetAutoSearch', enabled: false, target: 0 });
+    this.session.send({
+      type: 'SetAutoSearch',
+      enabled: false,
+      target: 0,
+      budget: { mode: 'simulations', value: 0 },
+    });
   }
 
   /// Called on every GameState update.
@@ -54,7 +117,7 @@ class Controls {
     }
   }
 
-  /// Called when a Snapshot arrives (manual RunSims completed).
+  /// Called when a Snapshot arrives (manual search completed).
   onSimsDone(snapshot) {
     if (this.replayMode) return;
     if (document.getElementById('apply-toggle').checked || this.autoplay) {
@@ -76,9 +139,16 @@ class Controls {
     this.stopAutoplay();
   }
 
+  runSearch() {
+    this._runSims();
+  }
+
   _runSims() {
-    const count = parseInt(document.getElementById('sims-input').value);
-    this.session.send({ type: 'RunSims', count, target: this._searchTarget() });
+    this.session.send({
+      type: 'RunSearch',
+      budget: this._currentBudget(),
+      target: this._searchTarget(),
+    });
   }
 
   _searchTarget() {
@@ -102,6 +172,7 @@ class Controls {
   _bind() {
     document.getElementById('btn-new-game').addEventListener('click', () => {
       this.stopAutoplay();
+      this.onNewGame?.();
       this.session.send({ type: 'NewGame', seed: null });
     });
 
@@ -119,8 +190,10 @@ class Controls {
 
     document.getElementById('btn-bot-move').addEventListener('click', () => {
       if (this.replayMode) return;
-      const sims = parseInt(document.getElementById('sims-input').value);
-      this.session.send({ type: 'BotMove', simulations: sims });
+      const budget = this._currentBudget();
+      const msg = { type: 'BotMove', budget };
+      if (budget.mode === 'simulations') msg.simulations = budget.value;
+      this.session.send(msg);
     });
 
     document.getElementById('btn-run-sims').addEventListener('click', () => {
@@ -149,8 +222,17 @@ class Controls {
       this._syncAutoSearch();
     });
 
-    // Re-sync target when the sims input changes.
+    for (const btn of document.querySelectorAll('.budget-mode-btn')) {
+      btn.addEventListener('click', () => {
+        this._saveBudgetValue();
+        this._setBudgetMode(btn.dataset.budgetMode);
+        if (this.autoSearch) this._syncAutoSearch();
+      });
+    }
+
+    // Re-sync target when the budget input changes.
     document.getElementById('sims-input').addEventListener('change', () => {
+      this._saveBudgetValue();
       if (this.autoSearch) this._syncAutoSearch();
     });
 
@@ -186,6 +268,13 @@ class Controls {
       if (!replay) return;
       this._setReplayCursor(replay.len);
     });
+    document.getElementById('replay-slider').addEventListener('input', (e) => {
+      const replay = this.lastState?.replay;
+      if (!replay) return;
+      const cursor = Math.max(0, Math.min(replay.len, parseInt(e.target.value) || 0));
+      document.getElementById('replay-counter').textContent = `${cursor} / ${replay.len}`;
+      this._setReplayCursor(cursor);
+    });
   }
 
   _setReplayCursor(cursor) {
@@ -197,10 +286,9 @@ class Controls {
     const replay = msg.replay;
     const replayControls = document.getElementById('replay-controls');
     replayControls.classList.toggle('hidden', !replay);
+    document.getElementById('board-history-controls')?.classList.toggle('hidden', !!replay);
 
     document.getElementById('btn-new-game').classList.toggle('hidden', !!replay);
-    document.getElementById('btn-undo').classList.toggle('hidden', !!replay);
-    document.getElementById('btn-redo').classList.toggle('hidden', !!replay);
 
     const botMove = document.getElementById('btn-bot-move');
     botMove.disabled = !!replay;
@@ -227,6 +315,11 @@ class Controls {
 
     if (!replay) return;
     document.getElementById('replay-counter').textContent = `${replay.cursor} / ${replay.len}`;
+    const slider = document.getElementById('replay-slider');
+    slider.min = '0';
+    slider.max = String(replay.len);
+    slider.value = String(replay.cursor);
+    slider.disabled = replay.len <= 0;
     document.getElementById('btn-replay-first').disabled = replay.cursor <= 0;
     document.getElementById('btn-replay-prev').disabled = replay.cursor <= 0;
     document.getElementById('btn-replay-next').disabled = replay.cursor >= replay.len;

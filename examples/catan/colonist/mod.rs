@@ -834,7 +834,17 @@ async fn handle_colonist_socket(
         if let Some(text) = text {
             match serde_json::from_str::<hexfish::server::ClientMsg>(&text) {
                 Ok(hexfish::server::ClientMsg::Authenticate { .. }) => {}
-                Ok(hexfish::server::ClientMsg::SetAutoSearch { enabled, target }) => {
+                Ok(hexfish::server::ClientMsg::SetAutoSearch {
+                    enabled,
+                    target,
+                    budget,
+                }) => {
+                    let target = match budget.unwrap_or_else(|| {
+                        hexfish::server::SearchBudget::simulations(target.unwrap_or(0))
+                    }) {
+                        hexfish::server::SearchBudget::Simulations { value } => value,
+                        hexfish::server::SearchBudget::PvDepth { .. } => 0,
+                    };
                     if enabled {
                         auto_refill = target;
                         // Ensure we reach `target` total sims at this position.
@@ -943,9 +953,19 @@ async fn handle_colonist_socket(
                     if let Ok(msg) = serde_json::from_str::<hexfish::server::ClientMsg>(&t) {
                         match &msg {
                             hexfish::server::ClientMsg::Authenticate { .. } => {}
-                            hexfish::server::ClientMsg::SetAutoSearch { enabled, target } => {
+                            hexfish::server::ClientMsg::SetAutoSearch {
+                                enabled,
+                                target,
+                                budget,
+                            } => {
+                                let target = match budget.unwrap_or_else(|| {
+                                    hexfish::server::SearchBudget::simulations(target.unwrap_or(0))
+                                }) {
+                                    hexfish::server::SearchBudget::Simulations { value } => value,
+                                    hexfish::server::SearchBudget::PvDepth { .. } => 0,
+                                };
                                 if *enabled {
-                                    auto_refill = *target;
+                                    auto_refill = target;
                                     let done = session.root_visits();
                                     sims_budget = target.saturating_sub(done);
                                 } else {
@@ -978,6 +998,7 @@ async fn handle_colonist_socket(
                         snapshot: snap,
                         action_labels: labels,
                         sims_total: after + sims_budget,
+                        budget: hexfish::server::SearchBudget::simulations(after + sims_budget),
                     },
                 )
                 .await;

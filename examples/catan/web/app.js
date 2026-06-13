@@ -8,6 +8,12 @@ window.hexfishBoard = board;
 const mctsPanel = new MCTSPanel();
 const controls = new Controls(session);
 
+controls.onNewGame = () => {
+  pendingNewGameSearch = true;
+  mctsPanel.clear();
+  board.clearSearchHighlights();
+};
+
 const RESOURCE_NAMES = ['lumber', 'brick', 'wool', 'grain', 'ore'];
 const DEV_CARD_NAMES = ['Knight', 'VP', 'Road Building', 'Year of Plenty', 'Monopoly'];
 const DEV_SHORT = ['Kn', 'VP', 'RB', 'YP', 'Mo'];
@@ -49,6 +55,7 @@ let editorBaseBoard = null;
 let editorTiles = createBlankEditorTiles();
 let selectedEditorTile = null;
 let pendingEditorStart = false;
+let pendingNewGameSearch = false;
 let lastActionLogLength = { analysis: null, replay: null };
 let previousFrameHands = { analysis: null, replay: null };
 let activeView = 'analysis';
@@ -117,9 +124,22 @@ session.on('GameState', (msg) => {
       renderEditorBoard();
       return;
     }
-    if (activeView === 'analysis') renderGameState(msg);
+    if (activeView === 'analysis') {
+      renderGameState(msg);
+      runPendingNewGameSearch(msg);
+    }
   }
 });
+
+function runPendingNewGameSearch(msg) {
+  if (!pendingNewGameSearch || msg.replay) return;
+  if (msg.is_terminal || msg.is_chance || !Array.isArray(msg.legal_actions) || msg.legal_actions.length === 0) {
+    pendingNewGameSearch = false;
+    return;
+  }
+  pendingNewGameSearch = false;
+  controls.runSearch();
+}
 
 function renderGameState(msg) {
   currentState = msg;
@@ -169,7 +189,7 @@ function renderGameState(msg) {
     // Button list for all actions
     for (const a of msg.legal_actions) {
       const btn = document.createElement('button');
-      btn.className = 'py-1 px-2 text-[11px] bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer whitespace-nowrap hover:bg-accent transition-colors';
+      btn.className = 'w-full py-1 px-2 text-left text-[11px] leading-snug bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors';
       btn.textContent = a.label;
       btn.addEventListener('click', () => {
         session.send({ type: 'PlayAction', action: a.action });
@@ -403,7 +423,7 @@ session.on('Subtree', (msg) => {
 
 session.on('SearchProgress', (msg) => {
   mctsPanel.updateSnapshot(msg.snapshot, msg.action_labels, currentState?.current_player ?? 0);
-  mctsPanel.showProgress(msg.snapshot.total_simulations, msg.sims_total);
+  mctsPanel.showProgress(msg.snapshot, msg.budget, msg.sims_total);
   updateSearchHighlights(msg.snapshot, msg.action_labels);
 });
 
@@ -449,6 +469,7 @@ function showAnalysisView() {
   activeView = 'analysis';
   setTabState('analysis');
   setEditorChrome(false);
+  setGameHeaderLabelsVisible(true);
   document.getElementById('main-layout').classList.remove('hidden');
   document.getElementById('replay-view').classList.add('hidden');
   document.getElementById('controls').classList.remove('hidden');
@@ -460,6 +481,7 @@ function showReplayView() {
   activeView = 'replay-list';
   setTabState('replay');
   setEditorChrome(false);
+  setGameHeaderLabelsVisible(false);
   document.getElementById('main-layout').classList.add('hidden');
   document.getElementById('replay-view').classList.remove('hidden');
   document.getElementById('controls').classList.add('hidden');
@@ -470,6 +492,7 @@ function showReplayBoardView() {
   activeView = 'replay-board';
   setTabState('replay');
   setEditorChrome(false);
+  setGameHeaderLabelsVisible(true);
   document.getElementById('main-layout').classList.remove('hidden');
   document.getElementById('replay-view').classList.add('hidden');
   document.getElementById('controls').classList.remove('hidden');
@@ -493,12 +516,19 @@ function showEditorView() {
   scheduleBoardChromePlacement();
 }
 
+function setGameHeaderLabelsVisible(visible) {
+  document.getElementById('phase-label').classList.toggle('hidden', !visible);
+  document.getElementById('turn-label').classList.toggle('hidden', !visible);
+}
+
 function setEditorChrome(enabled) {
   if (enabled) hideRollBadge();
+  document.getElementById('left-ad-panel')?.classList.toggle('hidden', enabled);
   document.getElementById('players-panel').classList.toggle('hidden', enabled);
   document.getElementById('analysis-panel').classList.toggle('hidden', enabled);
   document.getElementById('editor-panel').classList.toggle('hidden', !enabled);
-  document.getElementById('action-list').classList.toggle('hidden', enabled);
+  document.getElementById('action-panel')?.classList.toggle('hidden', enabled);
+  document.getElementById('board-history-controls')?.classList.toggle('hidden', enabled);
   document.getElementById('phase-label').classList.toggle('hidden', enabled);
   document.getElementById('turn-label').classList.toggle('hidden', enabled);
   board.onTileClick = enabled ? handleEditorTileClick : null;
@@ -738,7 +768,7 @@ function randomizeEditorBoard() {
     terrain,
     number: terrain === 'desert' ? null : numbers[numberIndex++],
   }));
-  setEditorStatus('Random board ready');
+  setEditorStatus('');
   renderEditorBoard();
 }
 
@@ -871,6 +901,11 @@ function updatePlayerPanel(idx, state) {
   if (state.player_names && state.player_names[idx]) {
     document.getElementById(`p${idx}-name`).textContent = state.player_names[idx];
   }
+
+  // Total resource cards
+  const resourceCount = pf.hand ? pf.hand.reduce((sum, count) => sum + count, 0) : 0;
+  document.getElementById(`p${idx}-card-count`).textContent =
+    `${resourceCount} ${resourceCount === 1 ? 'Card' : 'Cards'}`;
 
   // VP
   document.getElementById(`p${idx}-vp`).textContent = pf.vp;

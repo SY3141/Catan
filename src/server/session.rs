@@ -6,9 +6,19 @@ use crate::game_log::GameLog;
 use crate::mcts::{Config, NodeId, NodeKind, Search, SearchResult, Select, Tree};
 
 use super::protocol::{
-    ActionInfo, ClientMsg, EdgeSnapshot, ReplayState, SearchSnapshot, ServerMsg, TreeNodeSnapshot,
+    ActionInfo, ClientMsg, EdgeSnapshot, ReplayState, SearchBudget, SearchSnapshot, ServerMsg,
+    TreeNodeSnapshot,
 };
 use super::traits::GamePresenter;
+
+pub const MAX_PV_DEPTH_BUDGET: u32 = 30;
+pub const PV_DEPTH_SIM_SAFETY_CAP: u32 = 100_000;
+
+#[derive(Clone, Copy, Debug)]
+pub struct ActiveSearchBudget {
+    pub budget: SearchBudget,
+    pub sims_total: u32,
+}
 
 /// Per-player configuration.
 struct PlayerConfig {
@@ -48,6 +58,7 @@ pub struct GameSession<G: Game> {
     /// Last ExploreSubtree path, used to proactively send tree updates during search.
     last_explore: Option<(Vec<usize>, usize)>,
     replay: Option<ReplayMode>,
+    saved_live_log: Option<GameLog>,
 }
 
 impl<G: Game + 'static> GameSession<G> {
@@ -98,6 +109,7 @@ impl<G: Game + 'static> GameSession<G> {
             seed,
             last_explore: None,
             replay: None,
+            saved_live_log: None,
         }
     }
 
@@ -133,6 +145,7 @@ impl<G: Game + 'static> GameSession<G> {
             seed: 0,
             last_explore: None,
             replay: None,
+            saved_live_log: None,
         }
     }
 
@@ -146,6 +159,7 @@ impl<G: Game + 'static> GameSession<G> {
         self.history.clear();
         self.cursor = 0;
         self.replay = None;
+        self.saved_live_log = None;
 
         // Replay all actions into history.
         for &action in &log.actions {
@@ -190,6 +204,21 @@ impl<G: Game + 'static> GameSession<G> {
             initial_state,
             actions,
         })
+    }
+
+    /// Export the visible live game prefix unless that exact log was already saved.
+    pub fn export_unsaved_current_log(&self) -> Option<GameLog> {
+        let log = self.export_current_log()?;
+        let already_saved = match &self.saved_live_log {
+            Some(saved) => saved.initial_state == log.initial_state && saved.actions == log.actions,
+            None => false,
+        };
+        if already_saved { None } else { Some(log) }
+    }
+
+    /// Remember that the given live log has been persisted.
+    pub fn mark_current_log_saved(&mut self, log: &GameLog) {
+        self.saved_live_log = Some(log.clone());
     }
 
     /// Load an externally-built timeline (e.g. from colonist.io replay).
@@ -442,6 +471,7 @@ impl<G: Game + 'static> GameSession<G> {
                 self.history.clear();
                 self.cursor = 0;
                 self.replay = None;
+                self.saved_live_log = None;
                 self.auto_resolve_chance();
                 vec![self.state_msg()]
             }
@@ -455,6 +485,7 @@ impl<G: Game + 'static> GameSession<G> {
                 self.history.clear();
                 self.cursor = 0;
                 self.replay = None;
+                self.saved_live_log = None;
                 self.auto_resolve_chance();
                 vec![self.state_msg()]
             }
@@ -482,7 +513,10 @@ impl<G: Game + 'static> GameSession<G> {
                 self.auto_resolve_chance();
                 vec![self.state_msg()]
             }
-            ClientMsg::BotMove { simulations } => {
+            ClientMsg::BotMove {
+                simulations,
+                budget,
+            } => {
                 if self.replay.is_some() {
                     return vec![ServerMsg::Error {
                         message: "Cannot apply bot moves while viewing a replay".into(),
@@ -498,9 +532,8 @@ impl<G: Game + 'static> GameSession<G> {
                         message: "Current state is a chance node".into(),
                     }];
                 }
-                let player_idx = self.current_player_idx();
-                let sims = simulations.unwrap_or(self.configs[player_idx].simulations);
-                self.search.set_num_simulations(sims);
+                let budget = self.bot_move_budget(budget, simulations);
+                self.apply_search_budget(budget);
 
                 let result = self.run_search();
                 let action = result.selected_action;
@@ -530,7 +563,28 @@ impl<G: Game + 'static> GameSession<G> {
                         message: "Cannot run sims on chance/terminal state".into(),
                     }];
                 }
-                self.search.set_num_simulations(count);
+                self.apply_search_budget(SearchBudget::simulations(count));
+                let _result = self.run_search();
+                match self.build_snapshot() {
+                    Some(snap) => {
+                        let labels = self.edge_labels(&snap.edges);
+                        vec![ServerMsg::Snapshot {
+                            snapshot: snap,
+                            action_labels: labels,
+                        }]
+                    }
+                    None => vec![ServerMsg::Error {
+                        message: "No snapshot available".into(),
+                    }],
+                }
+            }
+            ClientMsg::RunSearch { budget, .. } => {
+                if self.is_terminal() || self.is_chance() {
+                    return vec![ServerMsg::Error {
+                        message: "Cannot run search on chance/terminal state".into(),
+                    }];
+                }
+                self.apply_search_budget(budget);
                 let _result = self.run_search();
                 match self.build_snapshot() {
                     Some(snap) => {
@@ -721,6 +775,10 @@ impl<G: Game + 'static> GameSession<G> {
         !self.is_terminal() && !self.is_chance()
     }
 
+    pub fn current_game_ended(&self) -> bool {
+        self.is_terminal()
+    }
+
     /// Returns true when automatic background search is useful.
     ///
     /// Forced decision states such as Roll or End Turn have only one legal
@@ -824,14 +882,44 @@ impl<G: Game + 'static> GameSession<G> {
         }
     }
 
+    fn bot_move_budget(
+        &self,
+        budget: Option<SearchBudget>,
+        simulations: Option<u32>,
+    ) -> SearchBudget {
+        budget.unwrap_or_else(|| {
+            let player_idx = self.current_player_idx();
+            SearchBudget::simulations(simulations.unwrap_or(self.configs[player_idx].simulations))
+        })
+    }
+
+    fn apply_search_budget(&mut self, budget: SearchBudget) -> ActiveSearchBudget {
+        let budget = sanitize_search_budget(budget);
+        let sims_total = match budget {
+            SearchBudget::Simulations { value } => {
+                self.search.set_num_simulations(value);
+                value
+            }
+            SearchBudget::PvDepth { value } => {
+                self.search
+                    .set_pv_depth_limit(value, PV_DEPTH_SIM_SAFETY_CAP);
+                PV_DEPTH_SIM_SAFETY_CAP
+            }
+        };
+        ActiveSearchBudget { budget, sims_total }
+    }
+
     /// Validate state and prepare search for streaming.
-    /// Returns `Ok(sims_total)` or `Err(error_msgs)`.
-    pub fn begin_search(&mut self, msg: &ClientMsg) -> Result<u32, Vec<ServerMsg>> {
+    /// Returns the applied budget or `Err(error_msgs)`.
+    pub fn begin_search(&mut self, msg: &ClientMsg) -> Result<ActiveSearchBudget, Vec<ServerMsg>> {
         // Cancel stale search state left by a previous interrupted search
         // (e.g. a panicked evaluator or dropped WebSocket connection).
         self.search.cancel_search();
         match msg {
-            ClientMsg::BotMove { simulations } => {
+            ClientMsg::BotMove {
+                simulations,
+                budget,
+            } => {
                 if self.replay.is_some() {
                     return Err(vec![ServerMsg::Error {
                         message: "Cannot apply bot moves while viewing a replay".into(),
@@ -847,10 +935,8 @@ impl<G: Game + 'static> GameSession<G> {
                         message: "Current state is a chance node".into(),
                     }]);
                 }
-                let player_idx = self.current_player_idx();
-                let sims = simulations.unwrap_or(self.configs[player_idx].simulations);
-                self.search.set_num_simulations(sims);
-                Ok(sims)
+                let budget = self.bot_move_budget(*budget, *simulations);
+                Ok(self.apply_search_budget(budget))
             }
             ClientMsg::RunSims { count, .. } => {
                 if self.is_terminal() || self.is_chance() {
@@ -858,8 +944,15 @@ impl<G: Game + 'static> GameSession<G> {
                         message: "Cannot run sims on chance/terminal state".into(),
                     }]);
                 }
-                self.search.set_num_simulations(*count);
-                Ok(*count)
+                Ok(self.apply_search_budget(SearchBudget::simulations(*count)))
+            }
+            ClientMsg::RunSearch { budget, .. } => {
+                if self.is_terminal() || self.is_chance() {
+                    return Err(vec![ServerMsg::Error {
+                        message: "Cannot run search on chance/terminal state".into(),
+                    }]);
+                }
+                Ok(self.apply_search_budget(*budget))
             }
             _ => Err(vec![ServerMsg::Error {
                 message: "begin_search called with non-search message".into(),
@@ -884,7 +977,7 @@ impl<G: Game + 'static> GameSession<G> {
         }
     }
 
-    /// Finish a streaming search: apply action (BotMove) or return snapshot (RunSims).
+    /// Finish a streaming search: apply action (BotMove) or return snapshot.
     pub fn finish_search(&mut self, msg: &ClientMsg, result: SearchResult) -> Vec<ServerMsg> {
         match msg {
             ClientMsg::BotMove { .. } => {
@@ -914,18 +1007,20 @@ impl<G: Game + 'static> GameSession<G> {
                     self.state_msg(),
                 ]
             }
-            ClientMsg::RunSims { .. } => match self.build_snapshot() {
-                Some(snap) => {
-                    let labels = self.edge_labels(&snap.edges);
-                    vec![ServerMsg::Snapshot {
-                        snapshot: snap,
-                        action_labels: labels,
-                    }]
+            ClientMsg::RunSims { .. } | ClientMsg::RunSearch { .. } => {
+                match self.build_snapshot() {
+                    Some(snap) => {
+                        let labels = self.edge_labels(&snap.edges);
+                        vec![ServerMsg::Snapshot {
+                            snapshot: snap,
+                            action_labels: labels,
+                        }]
+                    }
+                    None => vec![ServerMsg::Error {
+                        message: "No snapshot available".into(),
+                    }],
                 }
-                None => vec![ServerMsg::Error {
-                    message: "No snapshot available".into(),
-                }],
-            },
+            }
             _ => vec![],
         }
     }
@@ -1066,6 +1161,15 @@ impl<G: Game + 'static> GameSession<G> {
             }
         }
         label_subtree_walk(tree, state, &*self.presenter, parent_is_chance);
+    }
+}
+
+fn sanitize_search_budget(budget: SearchBudget) -> SearchBudget {
+    match budget {
+        SearchBudget::Simulations { value } => SearchBudget::simulations(value),
+        SearchBudget::PvDepth { value } => {
+            SearchBudget::pv_depth(value.clamp(1, MAX_PV_DEPTH_BUDGET))
+        }
     }
 }
 
@@ -1231,7 +1335,10 @@ mod tests {
         game::{Game, Status},
     };
 
-    use super::{ClientMsg, GameLog, GamePresenter, GameSession, ServerMsg};
+    use super::{
+        ClientMsg, GameLog, GamePresenter, GameSession, MAX_PV_DEPTH_BUDGET,
+        PV_DEPTH_SIM_SAFETY_CAP, SearchBudget, ServerMsg,
+    };
 
     #[derive(Clone)]
     struct TestGame {
@@ -1345,6 +1452,89 @@ mod tests {
             .expect("expected non-empty log");
         assert_eq!(log.initial_state, "7");
         assert_eq!(log.actions, vec![0]);
+    }
+
+    #[test]
+    fn export_unsaved_current_log_skips_already_saved_log() {
+        let mut session = test_session();
+
+        session.handle(ClientMsg::PlayAction { action: 0 });
+        let log = session
+            .export_unsaved_current_log()
+            .expect("expected first move log");
+        assert_eq!(log.actions, vec![0]);
+
+        session.mark_current_log_saved(&log);
+        assert!(session.export_unsaved_current_log().is_none());
+
+        session.handle(ClientMsg::PlayAction { action: 0 });
+        assert!(session.current_game_ended());
+        let terminal_log = session
+            .export_unsaved_current_log()
+            .expect("terminal log should differ from saved prefix");
+        assert_eq!(terminal_log.actions, vec![0, 0]);
+    }
+
+    #[test]
+    fn depth_budget_is_clamped_before_reaching_search() {
+        let mut session = test_session();
+        let active = session
+            .begin_search(&ClientMsg::RunSearch {
+                budget: SearchBudget::pv_depth(99),
+                target: None,
+            })
+            .expect("depth search should be accepted");
+
+        assert_eq!(active.budget, SearchBudget::pv_depth(MAX_PV_DEPTH_BUDGET));
+        assert_eq!(active.sims_total, PV_DEPTH_SIM_SAFETY_CAP);
+        assert_eq!(
+            session.search.config().target_pv_depth,
+            Some(MAX_PV_DEPTH_BUDGET)
+        );
+        assert_eq!(
+            session.search.config().num_simulations,
+            PV_DEPTH_SIM_SAFETY_CAP
+        );
+    }
+
+    #[test]
+    fn search_budget_protocol_accepts_new_and_legacy_messages() {
+        let run_search: ClientMsg = serde_json::from_str(
+            r#"{"type":"RunSearch","budget":{"mode":"pv_depth","value":8}}"#,
+        )
+        .expect("new RunSearch message");
+        match run_search {
+            ClientMsg::RunSearch { budget, target } => {
+                assert_eq!(budget, SearchBudget::pv_depth(8));
+                assert_eq!(target, None);
+            }
+            other => panic!("expected RunSearch, got {other:?}"),
+        }
+
+        let legacy_run_sims: ClientMsg =
+            serde_json::from_str(r#"{"type":"RunSims","count":7}"#)
+                .expect("legacy RunSims message");
+        match legacy_run_sims {
+            ClientMsg::RunSims { count, target } => {
+                assert_eq!(count, 7);
+                assert_eq!(target, None);
+            }
+            other => panic!("expected RunSims, got {other:?}"),
+        }
+
+        let legacy_bot_move: ClientMsg =
+            serde_json::from_str(r#"{"type":"BotMove","simulations":12}"#)
+                .expect("legacy BotMove message");
+        match legacy_bot_move {
+            ClientMsg::BotMove {
+                simulations,
+                budget,
+            } => {
+                assert_eq!(simulations, Some(12));
+                assert_eq!(budget, None);
+            }
+            other => panic!("expected BotMove, got {other:?}"),
+        }
     }
 
     #[test]

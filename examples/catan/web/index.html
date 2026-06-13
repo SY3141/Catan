@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>HexFish — Catan Analysis Board</title>
+<title>HexFish</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script>
 tailwind.config = {
@@ -21,7 +21,7 @@ tailwind.config = {
   }
 }
 </script>
-<link rel="stylesheet" href="style.css?v=inner-board-controls-20260612">
+<link rel="stylesheet" href="style.css?v=legal-moves-title-20260613">
 <script
   defer
   crossorigin="anonymous"
@@ -86,18 +86,35 @@ tailwind.config = {
     </div>
   </header>
 
-  <!-- Main 3-column layout -->
+  <!-- Main board layout -->
   <div id="main-layout" class="flex flex-1 overflow-hidden">
-    <!-- Center: SVG Board + action buttons -->
-    <div id="board-container" class="flex-1 min-w-0 flex flex-col items-stretch p-2 overflow-hidden">
-      <div id="board-shell" class="relative flex-1 min-h-0 w-full">
-        <button id="btn-rotate-left" class="absolute top-0 left-0 z-10 w-8 h-8 flex items-center justify-center bg-bg-3/90 border border-gray-700 text-gray-100 rounded cursor-pointer hover:bg-accent transition-colors" title="Rotate board counterclockwise" aria-label="Rotate board counterclockwise">&#8634;</button>
-        <button id="btn-mirror-board" class="absolute top-0 left-1/2 -translate-x-1/2 z-10 w-8 h-8 flex items-center justify-center bg-bg-3/90 border border-gray-700 text-gray-100 rounded cursor-pointer hover:bg-accent transition-colors" title="Mirror board" aria-label="Mirror board">&#8644;</button>
-        <button id="btn-rotate-right" class="absolute top-0 right-0 z-10 w-8 h-8 flex items-center justify-center bg-bg-3/90 border border-gray-700 text-gray-100 rounded cursor-pointer hover:bg-accent transition-colors" title="Rotate board clockwise" aria-label="Rotate board clockwise">&#8635;</button>
-        <div id="roll-badge" class="roll-badge hidden absolute right-0 bottom-0 z-10 flex w-[42px] h-[42px] items-center justify-center rounded-lg border border-white/50 bg-bg-3/90 text-white text-xl font-extrabold shadow-lg pointer-events-none" aria-live="polite" aria-label="Roll"></div>
-        <svg id="board-svg" class="w-full h-full min-h-0" viewBox="-50 -50 500 500"></svg>
+    <!-- Left: Advertisement -->
+    <aside id="left-ad-panel" class="w-44 min-w-44 flex flex-col p-2 bg-bg-2 border-r border-gray-700 overflow-hidden">
+      <div class="bg-bg rounded-md p-2.5 border border-gray-700 ad-card" id="adsense-panel" aria-label="Advertisement">
+        <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-2316784145315206"
+          crossorigin="anonymous"></script>
       </div>
-      <div id="action-list" class="w-full shrink-0 max-h-40 overflow-y-auto p-1 flex flex-wrap gap-1"></div>
+    </aside>
+
+    <!-- Center: SVG Board + action rail -->
+    <div id="board-container" class="flex-1 min-w-0 flex items-stretch gap-2 p-2 overflow-hidden">
+      <div id="board-play-area" class="flex-1 min-w-0 min-h-0 flex flex-col">
+        <div id="board-shell" class="relative flex-1 min-h-0 w-full">
+          <button id="btn-rotate-left" class="absolute top-0 left-0 z-10 w-8 h-8 flex items-center justify-center bg-bg-3/90 border border-gray-700 text-gray-100 rounded cursor-pointer hover:bg-accent transition-colors" title="Rotate board counterclockwise" aria-label="Rotate board counterclockwise">&#8634;</button>
+          <button id="btn-mirror-board" class="absolute top-0 left-1/2 -translate-x-1/2 z-10 w-8 h-8 flex items-center justify-center bg-bg-3/90 border border-gray-700 text-gray-100 rounded cursor-pointer hover:bg-accent transition-colors" title="Mirror board" aria-label="Mirror board">&#8644;</button>
+          <button id="btn-rotate-right" class="absolute top-0 right-0 z-10 w-8 h-8 flex items-center justify-center bg-bg-3/90 border border-gray-700 text-gray-100 rounded cursor-pointer hover:bg-accent transition-colors" title="Rotate board clockwise" aria-label="Rotate board clockwise">&#8635;</button>
+          <div id="board-history-controls" class="absolute z-10 flex items-center gap-1.5">
+            <button id="btn-undo" class="py-1.5 px-3 text-xs bg-bg-3/90 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-default" disabled>Undo</button>
+            <button id="btn-redo" class="py-1.5 px-3 text-xs bg-bg-3/90 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-default" disabled>Redo</button>
+          </div>
+          <div id="roll-badge" class="roll-badge hidden absolute right-0 bottom-0 z-10 flex w-[42px] h-[42px] items-center justify-center rounded-lg border border-white/50 bg-bg-3/90 text-white text-xl font-extrabold shadow-lg pointer-events-none" aria-live="polite" aria-label="Roll"></div>
+          <svg id="board-svg" class="w-full h-full min-h-0" viewBox="-50 -50 500 500"></svg>
+        </div>
+      </div>
+      <aside id="action-panel" class="w-44 min-w-44 max-w-52 shrink-0 min-h-0 flex flex-col border-l border-gray-700">
+        <h2 class="px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-gray-500 border-b border-gray-700">Legal Moves</h2>
+        <div id="action-list" class="flex-1 min-h-0 overflow-y-auto p-1 flex flex-col gap-1"></div>
+      </aside>
     </div>
 
     <!-- Right: Board Editor -->
@@ -125,8 +142,10 @@ tailwind.config = {
         <div class="flex flex-wrap gap-1 text-xs" id="bank-dev"></div>
       </div>
       <div class="bg-bg rounded-md p-2.5 border border-gray-700 player-card" id="player-0">
-        <h3 class="text-sm font-medium text-p1 flex items-center gap-1.5 mb-1">
-          <span id="p0-name">P1</span> <span class="bg-bg-3 px-1.5 py-0.5 rounded text-xs" id="p0-vp">0</span>
+        <h3 class="text-sm font-medium text-p1 flex items-end gap-1.5 mb-1">
+          <span id="p0-name" class="leading-none">P1</span>
+          <span class="bg-bg-3 px-1.5 py-0.5 rounded text-xs leading-none" id="p0-vp">0</span>
+          <span id="p0-card-count" class="text-xs text-gray-400 font-normal shrink-0 leading-none" title="Total resource cards">0 Cards</span>
         </h3>
         <div class="flex flex-wrap gap-1 text-xs" id="p0-hand"></div>
         <div class="flex flex-wrap gap-1 text-xs mt-1" id="p0-dev"></div>
@@ -134,8 +153,10 @@ tailwind.config = {
         <button class="takeover-btn mt-2 w-full py-1 text-xs bg-bg-3 border border-gray-700 text-gray-300 rounded hover:bg-accent transition-colors cursor-pointer" data-player="0">Take Over</button>
       </div>
       <div class="bg-bg rounded-md p-2.5 border border-gray-700 player-card" id="player-1">
-        <h3 class="text-sm font-medium text-p2 flex items-center gap-1.5 mb-1">
-          <span id="p1-name">P2</span> <span class="bg-bg-3 px-1.5 py-0.5 rounded text-xs" id="p1-vp">0</span>
+        <h3 class="text-sm font-medium text-p2 flex items-end gap-1.5 mb-1">
+          <span id="p1-name" class="leading-none">P2</span>
+          <span class="bg-bg-3 px-1.5 py-0.5 rounded text-xs leading-none" id="p1-vp">0</span>
+          <span id="p1-card-count" class="text-xs text-gray-400 font-normal shrink-0 leading-none" title="Total resource cards">0 Cards</span>
         </h3>
         <div class="flex flex-wrap gap-1 text-xs" id="p1-hand"></div>
         <div class="flex flex-wrap gap-1 text-xs mt-1" id="p1-dev"></div>
@@ -146,10 +167,6 @@ tailwind.config = {
         <h3 class="text-sm font-medium text-gray-400 mb-1">Dice <span id="dice-cards" class="text-gray-500 font-normal"></span></h3>
         <div id="dice-chart" class="flex items-end gap-px" style="height:64px"></div>
       </div>
-      <div class="bg-bg rounded-md p-2.5 border border-gray-700 ad-card" id="adsense-panel" aria-label="Advertisement">
-        <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-2316784145315206"
-     crossorigin="anonymous"></script>
-      </div>
     </div>
 
     <!-- Right: MCTS Analysis -->
@@ -158,6 +175,14 @@ tailwind.config = {
         <span id="sims-count" class="whitespace-nowrap text-gray-300">0 sims</span>
         <span id="root-q" class="whitespace-nowrap text-gray-300"></span>
         <span id="net-value" class="whitespace-nowrap text-gray-300"></span>
+      </div>
+      <div id="policy-header" class="flex items-center gap-1 px-2.5 py-1 text-[10px] uppercase tracking-wide text-gray-500 border-b border-gray-700">
+        <span class="w-5 shrink-0 text-right" title="Rank">#</span>
+        <span class="w-32 shrink-0" title="Move">Moves</span>
+        <span class="flex-1 min-w-0" aria-hidden="true"></span>
+        <span class="w-10 shrink-0 text-right" title="Simulations">Sims</span>
+        <span class="w-11 shrink-0 text-right" title="Win rate">WR</span>
+        <span class="w-6 shrink-0 text-right" title="Depth">D</span>
       </div>
       <div id="policy-bars" class="p-1 flex-1 overflow-y-auto"></div>
       <div id="tree-explorer" class="border-t border-gray-700 p-1.5">
@@ -196,19 +221,22 @@ tailwind.config = {
     <div id="replay-controls" class="hidden flex items-center gap-1.5 text-xs text-gray-300">
       <button id="btn-replay-first" class="py-1.5 px-2 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-default" title="First position" aria-label="First replay position">&#124;&lt;</button>
       <button id="btn-replay-prev" class="py-1.5 px-2 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-default" title="Previous position" aria-label="Previous replay position">&lt;</button>
+      <input id="replay-slider" type="range" min="0" max="0" value="0" step="1" class="w-48 accent-accent" aria-label="Replay position">
       <span id="replay-counter" class="min-w-16 text-center text-gray-300">0 / 0</span>
       <button id="btn-replay-next" class="py-1.5 px-2 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-default" title="Next position" aria-label="Next replay position">&gt;</button>
       <button id="btn-replay-last" class="py-1.5 px-2 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-default" title="Last position" aria-label="Last replay position">&gt;&#124;</button>
     </div>
-    <button id="btn-undo" class="py-1.5 px-3 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-default" disabled>Undo</button>
-    <button id="btn-redo" class="py-1.5 px-3 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-default" disabled>Redo</button>
     <button id="btn-bot-move" class="py-1.5 px-3 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-default">Bot Move</button>
-    <div class="flex items-center gap-1.5 text-xs text-gray-300">
-      <label class="flex items-center gap-1">Sims:
+    <div id="budget-control" class="flex items-center gap-1.5 text-xs text-gray-300">
+      <div class="flex rounded border border-gray-700 overflow-hidden" role="group" aria-label="Search budget mode">
+        <button id="budget-mode-sims" type="button" class="budget-mode-btn px-2 py-0.5 bg-accent text-white" data-budget-mode="simulations" aria-pressed="true">Sims</button>
+        <button id="budget-mode-depth" type="button" class="budget-mode-btn px-2 py-0.5 bg-bg-3 text-gray-300 hover:bg-bg" data-budget-mode="pv_depth" aria-pressed="false">Depth</button>
+      </div>
+      <label id="budget-value-label" class="flex items-center gap-1">Sims:
         <input type="number" id="sims-input" min="0" max="10000" value="50" step="50" class="w-16 bg-bg-3 border border-gray-700 text-gray-200 rounded px-1.5 py-0.5 text-xs">
       </label>
     </div>
-    <button id="btn-run-sims" class="py-1.5 px-3 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-default">Run Sims</button>
+    <button id="btn-run-sims" class="py-1.5 px-3 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-default">Run Search</button>
     <label id="apply-control" class="flex items-center gap-1 text-xs text-gray-300 cursor-pointer">
       <input type="checkbox" id="apply-toggle" class="accent-accent"> Apply
     </label>
@@ -225,9 +253,9 @@ tailwind.config = {
 
 <script src="session.js?v=anon-session-field-20260611"></script>
 <script src="board.js?v=board-editor-random-20260612"></script>
-<script src="mcts.js?v=mcts-hover-preview-20260612"></script>
-<script src="controls.js?v=split-replay-state-20260611"></script>
+<script src="mcts.js?v=search-depth-budget-20260613"></script>
+<script src="controls.js?v=search-depth-budget-20260613"></script>
 <script src="auth.js?v=user-sessions-20260610"></script>
-<script src="app.js?v=inner-board-controls-20260612"></script>
+<script src="app.js?v=search-depth-budget-20260613"></script>
 </body>
 </html>

@@ -18,7 +18,7 @@ class MCTSPanel {
   // click handlers stable during live search updates.
   updateSnapshot(snapshot, labels, currentPlayer = 0) {
     const pvDepth = snapshot.pv_depth ?? 0;
-    this.simsEl.textContent = `${snapshot.total_simulations} sims · depth ${pvDepth}`;
+    this.simsEl.textContent = `${snapshot.total_simulations} sims - Depth ${pvDepth}`;
     const [w, d, l] = snapshot.root_wdl;
     this.rootQEl.textContent = `W ${(w*100).toFixed(0)}% D ${(d*100).toFixed(0)}% L ${(l*100).toFixed(0)}%`;
     const nv = snapshot.network_value;
@@ -178,11 +178,20 @@ class MCTSPanel {
     return true;
   }
 
-  showProgress(done, total) {
+  showProgress(snapshot, budget, simsTotal) {
+    if (budget && budget.mode === 'pv_depth') {
+      const depth = snapshot?.pv_depth ?? 0;
+      this.simsEl.textContent = `Depth ${depth} / ${budget.value} - ${snapshot.total_simulations} sims`;
+      return;
+    }
+    const done = snapshot?.total_simulations ?? 0;
+    const total = budget?.value ?? simsTotal;
     this.simsEl.textContent = `${done} / ${total} sims`;
   }
 
   clear() {
+    this._lastEdgeKey = null;
+    this.expandedPaths.clear();
     this.barsEl.innerHTML = '';
     this.simsEl.textContent = '0 sims';
     this.rootQEl.textContent = '';

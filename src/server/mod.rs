@@ -3,7 +3,7 @@ mod protocol;
 mod session;
 mod traits;
 
-pub use protocol::{ClientMsg, ServerMsg};
+pub use protocol::{ClientMsg, SearchBudget, ServerMsg};
 pub use session::GameSession;
 pub use traits::GamePresenter;
 
@@ -373,6 +373,50 @@ impl<G: Game + 'static> UserSession<G> {
     }
 }
 
+fn save_replay_log<G: Game + 'static>(
+    user_session: &UserSession<G>,
+    log: &GameLog,
+) -> Option<ServerMsg> {
+    let store = user_session.replay_store.as_ref()?;
+    let counter = user_session
+        .next_replay_counter
+        .fetch_add(1, Ordering::Relaxed);
+    match store.save(
+        &user_session.account_key,
+        user_session.session_id,
+        counter,
+        log,
+    ) {
+        Ok(_) => None,
+        Err(message) => Some(ServerMsg::Error { message }),
+    }
+}
+
+fn save_current_replay_once<G: Game + 'static>(
+    user_session: &UserSession<G>,
+    session: &mut GameSession<G>,
+) -> Option<ServerMsg> {
+    let has_store = user_session.replay_store.is_some();
+    let log = session.export_unsaved_current_log()?;
+    let error = save_replay_log(user_session, &log);
+    if has_store && error.is_none() {
+        session.mark_current_log_saved(&log);
+    }
+    error
+}
+
+fn responses_include_terminal_game_state(responses: &[ServerMsg]) -> bool {
+    responses.iter().any(|msg| {
+        matches!(
+            msg,
+            ServerMsg::GameState {
+                is_terminal: true,
+                ..
+            }
+        )
+    })
+}
+
 struct UserSessionStore<G: Game + 'static> {
     factory: Arc<SessionFactory<G>>,
     sessions: StdMutex<HashMap<String, Arc<UserSession<G>>>>,
@@ -612,7 +656,7 @@ pub async fn serve_with_timeline<G: Game + 'static>(
 
 /// Run a streaming MCTS search, sending progress updates over the socket.
 ///
-/// Handles `BotMove` and `RunSims` messages. Returns the final response
+/// Handles `BotMove`, `RunSims`, and `RunSearch` messages. Returns the final response
 /// messages, or `Err(())` if the socket disconnected during search.
 pub async fn run_search<G: Game + 'static>(
     socket: &mut WebSocket,
@@ -621,7 +665,7 @@ pub async fn run_search<G: Game + 'static>(
 ) -> Result<Vec<ServerMsg>, ()> {
     match session.begin_search(msg) {
         Err(msgs) => Ok(msgs),
-        Ok(sims_total) => {
+        Ok(active_budget) => {
             let mut last_progress = 0;
             let result = loop {
                 if let Some(result) = session.search_tick() {
@@ -635,7 +679,8 @@ pub async fn run_search<G: Game + 'static>(
                             &ServerMsg::SearchProgress {
                                 snapshot: snap,
                                 action_labels: labels,
-                                sims_total,
+                                sims_total: active_budget.sims_total,
+                                budget: active_budget.budget,
                             },
                         )
                         .await?;
@@ -811,7 +856,7 @@ async fn handle_authenticated_socket<G: Game + 'static>(
     socket_id: u64,
     mut outbound_rx: mpsc::UnboundedReceiver<String>,
 ) -> Result<(), ()> {
-    let mut auto_search: Option<u32> = None;
+    let mut auto_search: Option<SearchBudget> = None;
 
     // Send initial state.
     {
@@ -851,7 +896,7 @@ async fn handle_authenticated_message<G: Game + 'static>(
     socket: &mut WebSocket,
     user_session: &Arc<UserSession<G>>,
     socket_id: u64,
-    auto_search: &mut Option<u32>,
+    auto_search: &mut Option<SearchBudget>,
     ws_msg: Message,
 ) -> Result<(), ()> {
     let text = match ws_msg {
@@ -877,15 +922,22 @@ async fn handle_authenticated_message<G: Game + 'static>(
     let message_target = client_msg_target(&client_msg);
 
     // Track auto-search state at the connection level.
-    if let ClientMsg::SetAutoSearch { enabled, target } = &client_msg {
-        *auto_search = if *enabled { Some(*target) } else { None };
+    if let ClientMsg::SetAutoSearch {
+        enabled,
+        target,
+        budget,
+    } = &client_msg
+    {
+        let budget = budget.unwrap_or_else(|| SearchBudget::simulations(target.unwrap_or(0)));
+        *auto_search = if *enabled { Some(budget) } else { None };
     }
 
     let responses = if message_target == ViewTarget::Replay {
         handle_replay_message(socket, user_session, client_msg).await?
     } else {
         let mut session = user_session.session.lock().await;
-        match client_msg {
+        let was_terminal = session.current_game_ended();
+        let mut responses = match client_msg {
             ClientMsg::ListReplays => match &user_session.replay_store {
                 Some(store) => match store.list(&user_session.account_key) {
                     Ok(entries) => vec![ServerMsg::ReplayList { entries }],
@@ -919,37 +971,39 @@ async fn handle_authenticated_message<G: Game + 'static>(
                     message: "Replay storage is not configured".into(),
                 }],
             },
-            msg @ (ClientMsg::NewGame { .. } | ClientMsg::StartEditedGame { .. }) => {
-                let pending_log = match &user_session.replay_store {
-                    Some(_) => session.export_current_log(),
-                    None => None,
+            msg @ ClientMsg::NewGame { .. } => {
+                let pending_log = if was_terminal {
+                    None
+                } else {
+                    session.export_unsaved_current_log()
                 };
                 let mut msgs = session.handle(msg);
                 let started_game = msgs
                     .iter()
                     .any(|msg| matches!(msg, ServerMsg::GameState { .. }));
                 if started_game {
-                    if let (Some(store), Some(log)) = (&user_session.replay_store, pending_log) {
-                        let counter = user_session
-                            .next_replay_counter
-                            .fetch_add(1, Ordering::Relaxed);
-                        if let Err(message) = store.save(
-                            &user_session.account_key,
-                            user_session.session_id,
-                            counter,
-                            &log,
-                        ) {
-                            msgs.insert(0, ServerMsg::Error { message });
+                    if let Some(log) = pending_log {
+                        if let Some(error) = save_replay_log(user_session, &log) {
+                            msgs.insert(0, error);
                         }
                     }
                 }
                 msgs
             }
-            msg @ (ClientMsg::BotMove { .. } | ClientMsg::RunSims { .. }) => {
+            msg @ ClientMsg::StartEditedGame { .. } => session.handle(msg),
+            msg @ (ClientMsg::BotMove { .. }
+            | ClientMsg::RunSims { .. }
+            | ClientMsg::RunSearch { .. }) => {
                 run_search(socket, &mut session, &msg).await?
             }
             msg => session.handle(msg),
+        };
+        if !was_terminal && responses_include_terminal_game_state(&responses) {
+            if let Some(error) = save_current_replay_once(user_session, &mut session) {
+                responses.insert(0, error);
+            }
         }
+        responses
     };
 
     // Check if any response is a state update that should trigger auto-search.
@@ -966,11 +1020,11 @@ async fn handle_authenticated_message<G: Game + 'static>(
 
     // Auto-search: trigger RunSims after state changes (e.g. PlayAction, BotMove).
     if has_state_update && message_target == ViewTarget::Analysis {
-        if let Some(target) = *auto_search {
+        if let Some(budget) = *auto_search {
             let mut session = user_session.session.lock().await;
             if session.should_auto_search() {
-                let auto_msg = ClientMsg::RunSims {
-                    count: target,
+                let auto_msg = ClientMsg::RunSearch {
+                    budget,
                     target: Some(ViewTarget::Analysis),
                 };
                 let msgs = run_search(socket, &mut session, &auto_msg).await?;
@@ -987,9 +1041,9 @@ async fn handle_authenticated_message<G: Game + 'static>(
 fn client_msg_target(msg: &ClientMsg) -> ViewTarget {
     match msg {
         ClientMsg::LoadReplay { .. } | ClientMsg::SetReplayCursor { .. } => ViewTarget::Replay,
-        ClientMsg::RunSims { target, .. } | ClientMsg::ExploreSubtree { target, .. } => {
-            target.unwrap_or(ViewTarget::Analysis)
-        }
+        ClientMsg::RunSims { target, .. }
+        | ClientMsg::RunSearch { target, .. }
+        | ClientMsg::ExploreSubtree { target, .. } => target.unwrap_or(ViewTarget::Analysis),
         _ => ViewTarget::Analysis,
     }
 }
@@ -1019,7 +1073,7 @@ async fn handle_replay_message<G: Game + 'static>(
                 message: "Replay storage is not configured".into(),
             }]),
         },
-        msg @ ClientMsg::RunSims { .. } => {
+        msg @ (ClientMsg::RunSims { .. } | ClientMsg::RunSearch { .. }) => {
             let mut replay_session = user_session.replay_session.lock().await;
             match replay_session.as_mut() {
                 Some(session) => run_search(socket, session, &msg).await,
@@ -1085,7 +1139,7 @@ mod tests {
     };
 
     use super::{
-        GamePresenter, ReplayStore, SessionFactory, UserSessionStore, ViewTarget,
+        GamePresenter, ReplayStore, SearchBudget, SessionFactory, UserSessionStore, ViewTarget,
         anonymous_user_id_from_id, anonymous_user_id_from_token, client_msg_target,
         current_unix_ms, safe_replay_id,
     };
@@ -1301,6 +1355,13 @@ mod tests {
         assert_eq!(
             client_msg_target(&super::ClientMsg::RunSims {
                 count: 1,
+                target: Some(ViewTarget::Replay),
+            }),
+            ViewTarget::Replay
+        );
+        assert_eq!(
+            client_msg_target(&super::ClientMsg::RunSearch {
+                budget: SearchBudget::pv_depth(8),
                 target: Some(ViewTarget::Replay),
             }),
             ViewTarget::Replay

@@ -13,8 +13,13 @@ pub use tree::{Edge, NodeId, NodeKind, Tree};
 pub struct Config {
     /// Simulation budget per search. Set to 0 to skip search entirely and
     /// select an action from the evaluator's policy alone (useful for
-    /// heuristic evaluators that encode a fixed strategy).
+    /// heuristic evaluators that encode a fixed strategy). When
+    /// `target_pv_depth` is set, this is the safety cap.
     pub num_simulations: u32,
+    /// Optional target principal-variation depth. When set, search stops once
+    /// the most-visited path from the root reaches this many edges, or when
+    /// `num_simulations` is exhausted.
+    pub target_pv_depth: Option<u32>,
     /// σ scaling parameter (controls Q influence on improved policy).
     pub c_visit: f32,
     /// σ scaling parameter.
@@ -31,6 +36,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             num_simulations: 800,
+            target_pv_depth: None,
             c_visit: 50.0,
             c_scale: 1.0,
             c_puct: 2.5,
@@ -197,6 +203,14 @@ impl<G: Game> Search<G> {
     /// Update the simulation budget (takes effect on the next search).
     pub fn set_num_simulations(&mut self, n: u32) {
         self.config.num_simulations = n;
+        self.config.target_pv_depth = None;
+    }
+
+    /// Update the search budget to stop at a target principal-variation depth,
+    /// with `max_simulations` as a hard safety cap.
+    pub fn set_pv_depth_limit(&mut self, target_depth: u32, max_simulations: u32) {
+        self.config.target_pv_depth = Some(target_depth);
+        self.config.num_simulations = max_simulations;
     }
 
     /// Total visits on the current root (sum of edge visit counts), or 0 if
@@ -289,6 +303,10 @@ impl<G: Game> Search<G> {
         // Compact tree from a previous apply_action / walk_tree.
         if self.needs_compact {
             self.begin_search(rng);
+        }
+
+        if self.budget_exhausted() {
+            return Select::Done;
         }
 
         // Run one simulation from root.
@@ -652,12 +670,25 @@ impl<G: Game> Search<G> {
         }
 
         // Not terminal — check if we should continue or are done.
-        if self.sims_done >= self.config.num_simulations {
+        if self.budget_exhausted() {
             Select::Done
         } else {
             // Recurse for the next sim.
             self.simulate(rng)
         }
+    }
+
+    fn budget_exhausted(&self) -> bool {
+        if self.sims_done >= self.config.num_simulations {
+            return true;
+        }
+        let Some(target_depth) = self.config.target_pv_depth else {
+            return false;
+        };
+        let Some(root) = self.root else {
+            return false;
+        };
+        compute_pv_depth(&self.tree, root) >= target_depth
     }
 }
 
@@ -985,6 +1016,55 @@ mod tests {
             "improved policy should favor action 0: policy = {:?}",
             result.policy
         );
+    }
+
+    #[test]
+    fn pv_depth_budget_stops_at_target_depth() {
+        let evaluator = RolloutEvaluator::default();
+        let mut rng = fastrand::Rng::new();
+        let mut search = Search::new(TrivialGame::new(), Config::default());
+        search.set_pv_depth_limit(1, 100);
+
+        let result = run_to_completion(&mut search, &evaluator, &mut rng);
+
+        assert_eq!(result.pv_depth, 1);
+        assert_eq!(
+            search.root_visits(),
+            1,
+            "search should stop as soon as the root PV reaches depth 1"
+        );
+    }
+
+    #[test]
+    fn pv_depth_budget_uses_simulation_safety_cap_when_unreachable() {
+        let evaluator = RolloutEvaluator::default();
+        let mut rng = fastrand::Rng::new();
+        let mut search = Search::new(TrivialGame::new(), Config::default());
+        search.set_pv_depth_limit(2, 3);
+
+        let result = run_to_completion(&mut search, &evaluator, &mut rng);
+
+        assert_eq!(result.pv_depth, 1);
+        assert_eq!(
+            search.root_visits(),
+            3,
+            "unreachable depth target should stop at the sim safety cap"
+        );
+    }
+
+    #[test]
+    fn setting_simulations_clears_depth_budget() {
+        let evaluator = RolloutEvaluator::default();
+        let mut rng = fastrand::Rng::new();
+        let mut search = Search::new(TrivialGame::new(), Config::default());
+        search.set_pv_depth_limit(2, 3);
+        search.set_num_simulations(5);
+
+        assert_eq!(search.config().target_pv_depth, None);
+        assert_eq!(search.config().num_simulations, 5);
+
+        let _result = run_to_completion(&mut search, &evaluator, &mut rng);
+        assert_eq!(search.root_visits(), 5);
     }
 
     /// Two-step game: P1 picks action 0 or 1, then picks 0 or 1 again.
