@@ -24,4 +24,4 @@ COPY --from=builder /app/examples/catan/web /app/examples/catan/web
 EXPOSE 3000
 
 ENTRYPOINT ["/app/catan"]
-CMD ["serve", "--port", "3000", "--eval", "rollout", "--human", "both"]
+CMD ["serve", "--eval", "rollout", "--human", "both"]

@@ -7,6 +7,8 @@ use crate::mcts::Config;
 pub use crate::tournament::TournamentOptions;
 
 const PREFIXES: [&str; 2] = ["p1", "p2"];
+#[cfg(feature = "server")]
+const DEFAULT_SERVE_PORT: u16 = 3000;
 
 fn prefixed_args(prefix: &str) -> Vec<Arg> {
     let d = Config::default();
@@ -116,8 +118,7 @@ pub fn serve_command() -> Command {
         .arg(
             Arg::new("port")
                 .long("port")
-                .default_value("3000")
-                .help("HTTP port"),
+                .help("HTTP port (defaults to $PORT, then 3000)"),
         )
         .arg(
             Arg::new("eval")
@@ -158,11 +159,10 @@ pub struct ServeOptions {
 /// Parse serve subcommand options.
 #[cfg(feature = "server")]
 pub fn parse_serve(matches: &ArgMatches) -> ServeOptions {
-    let port: u16 = matches
-        .get_one::<String>("port")
-        .unwrap()
-        .parse()
-        .expect("invalid port");
+    let port = parse_serve_port(
+        matches.get_one::<String>("port").map(String::as_str),
+        std::env::var("PORT").ok(),
+    );
     let eval_name = matches.get_one::<String>("eval").unwrap().clone();
     let human = matches.get_one::<String>("human").unwrap().as_str();
     let human_players = match human {
@@ -182,6 +182,51 @@ pub fn parse_serve(matches: &ArgMatches) -> ServeOptions {
         human_players,
         replay,
         web_log_dir,
+    }
+}
+
+#[cfg(feature = "server")]
+fn parse_serve_port(cli_port: Option<&str>, env_port: Option<String>) -> u16 {
+    if let Some(port) = cli_port {
+        return parse_port_value(port, "--port");
+    }
+
+    if let Some(port) = env_port.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+        return parse_port_value(port, "PORT");
+    }
+
+    DEFAULT_SERVE_PORT
+}
+
+#[cfg(feature = "server")]
+fn parse_port_value(value: &str, source: &str) -> u16 {
+    value
+        .parse()
+        .unwrap_or_else(|_| panic!("invalid {source} port: {value}"))
+}
+
+#[cfg(all(test, feature = "server"))]
+mod tests {
+    use super::parse_serve_port;
+
+    #[test]
+    fn serve_port_defaults_to_3000_without_cli_or_env() {
+        assert_eq!(parse_serve_port(None, None), 3000);
+    }
+
+    #[test]
+    fn serve_port_uses_port_env_when_cli_port_is_absent() {
+        assert_eq!(parse_serve_port(None, Some("8080".into())), 8080);
+    }
+
+    #[test]
+    fn serve_port_cli_arg_overrides_port_env() {
+        assert_eq!(parse_serve_port(Some("3001"), Some("8080".into())), 3001);
+    }
+
+    #[test]
+    fn serve_port_ignores_empty_port_env() {
+        assert_eq!(parse_serve_port(None, Some("  ".into())), 3000);
     }
 }
 

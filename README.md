@@ -71,6 +71,11 @@ Rebuild the image so the Rust server changes are included:
 docker compose up --build
 ```
 
+The server chooses its port in this order: an explicit `--port`, the
+`PORT` environment variable, then local default `3000`. This keeps
+`docker compose` available at <http://localhost:3000> while allowing
+Cloud Run to inject its required port.
+
 By default, when `CLERK_JWT_KEY` is not set, each WebSocket connection
 gets a fresh isolated game. To share one in-memory game across tabs and
 refreshes for the same Clerk account, create a local `.env` file from
