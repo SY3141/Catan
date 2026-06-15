@@ -888,10 +888,10 @@ impl<G: Game + 'static> GameSession<G> {
                 self.search.set_num_simulations(value);
                 value
             }
-            SearchBudget::PvDepth { value } => {
-                self.search
-                    .set_pv_depth_limit(value, PV_DEPTH_SIM_SAFETY_CAP);
-                PV_DEPTH_SIM_SAFETY_CAP
+            SearchBudget::PvDepth { value, simulations } => {
+                let sim_cap = simulations.unwrap_or(PV_DEPTH_SIM_SAFETY_CAP);
+                self.search.set_pv_depth_limit(value, sim_cap);
+                sim_cap
             }
         };
         ActiveSearchBudget { budget, sims_total }
@@ -1172,9 +1172,10 @@ impl<G: Game + 'static> GameSession<G> {
 fn sanitize_search_budget(budget: SearchBudget) -> SearchBudget {
     match budget {
         SearchBudget::Simulations { value } => SearchBudget::simulations(value),
-        SearchBudget::PvDepth { value } => {
-            SearchBudget::pv_depth(value.clamp(1, MAX_PV_DEPTH_BUDGET))
-        }
+        SearchBudget::PvDepth { value, simulations } => SearchBudget::PvDepth {
+            value: value.clamp(1, MAX_PV_DEPTH_BUDGET),
+            simulations: simulations.map(|value| value.clamp(1, PV_DEPTH_SIM_SAFETY_CAP)),
+        },
     }
 }
 
@@ -1504,6 +1505,37 @@ mod tests {
     }
 
     #[test]
+    fn depth_budget_sim_cap_is_clamped_before_reaching_search() {
+        let mut session = test_session();
+        let active = session
+            .begin_search(&ClientMsg::RunSearch {
+                budget: SearchBudget::pv_depth_with_simulations(
+                    99,
+                    PV_DEPTH_SIM_SAFETY_CAP + 1,
+                ),
+                target: None,
+            })
+            .expect("depth search should be accepted");
+
+        assert_eq!(
+            active.budget,
+            SearchBudget::pv_depth_with_simulations(
+                MAX_PV_DEPTH_BUDGET,
+                PV_DEPTH_SIM_SAFETY_CAP
+            )
+        );
+        assert_eq!(active.sims_total, PV_DEPTH_SIM_SAFETY_CAP);
+        assert_eq!(
+            session.search.config().target_pv_depth,
+            Some(MAX_PV_DEPTH_BUDGET)
+        );
+        assert_eq!(
+            session.search.config().num_simulations,
+            PV_DEPTH_SIM_SAFETY_CAP
+        );
+    }
+
+    #[test]
     fn search_budget_protocol_accepts_new_and_legacy_messages() {
         let run_search: ClientMsg =
             serde_json::from_str(r#"{"type":"RunSearch","budget":{"mode":"pv_depth","value":8}}"#)
@@ -1511,6 +1543,18 @@ mod tests {
         match run_search {
             ClientMsg::RunSearch { budget, target } => {
                 assert_eq!(budget, SearchBudget::pv_depth(8));
+                assert_eq!(target, None);
+            }
+            other => panic!("expected RunSearch, got {other:?}"),
+        }
+
+        let capped_depth: ClientMsg = serde_json::from_str(
+            r#"{"type":"RunSearch","budget":{"mode":"pv_depth","value":8,"simulations":1200}}"#,
+        )
+        .expect("capped depth RunSearch message");
+        match capped_depth {
+            ClientMsg::RunSearch { budget, target } => {
+                assert_eq!(budget, SearchBudget::pv_depth_with_simulations(8, 1200));
                 assert_eq!(target, None);
             }
             other => panic!("expected RunSearch, got {other:?}"),

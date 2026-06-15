@@ -21,7 +21,7 @@ tailwind.config = {
   }
 }
 </script>
-<link rel="stylesheet" href="style.css?v=legal-moves-title-20260613">
+<link rel="stylesheet" href="style.css?v=play-options-20260614">
 <script
   defer
   crossorigin="anonymous"
@@ -74,6 +74,7 @@ tailwind.config = {
   <header class="flex items-center gap-4 px-4 py-2 bg-bg-2 border-b border-gray-700">
     <h1 class="text-sm font-semibold text-gray-100">HexFish</h1>
     <div class="flex items-center gap-1 text-xs" role="tablist" aria-label="Main views">
+      <button id="tab-play" class="view-tab px-2 py-1 rounded text-gray-400 hover:text-gray-100 hover:bg-bg-3" type="button" role="tab" aria-selected="false">Play</button>
       <button id="tab-board" class="view-tab active px-2 py-1 rounded text-gray-100 bg-bg-3" type="button" role="tab" aria-selected="true">Analysis</button>
       <button id="tab-replay" class="view-tab px-2 py-1 rounded text-gray-400 hover:text-gray-100 hover:bg-bg-3" type="button" role="tab" aria-selected="false">Replay</button>
       <button id="tab-editor" class="view-tab px-2 py-1 rounded text-gray-400 hover:text-gray-100 hover:bg-bg-3" type="button" role="tab" aria-selected="false">Editor</button>
@@ -112,7 +113,8 @@ tailwind.config = {
         </div>
       </div>
       <aside id="action-panel" class="w-44 min-w-44 max-w-52 shrink-0 min-h-0 flex flex-col border-l border-gray-700">
-        <h2 class="px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-gray-500 border-b border-gray-700">Legal Moves</h2>
+        <h2 id="action-panel-title" class="px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-gray-500 border-b border-gray-700">Legal Moves</h2>
+        <div id="play-status" class="hidden border-b border-gray-700 px-2 py-2 text-xs text-gray-300"></div>
         <div id="action-list" class="flex-1 min-h-0 overflow-y-auto p-1 flex flex-col gap-1"></div>
       </aside>
     </div>
@@ -200,6 +202,29 @@ tailwind.config = {
     </div>
   </div>
 
+  <section id="play-setup-view" class="hidden flex-1 overflow-auto bg-bg p-3">
+    <div class="mx-auto w-full max-w-xl">
+      <section class="bg-bg-2 border border-gray-700 rounded p-4">
+        <div class="flex items-start justify-between gap-3">
+          <div>
+            <h2 class="text-sm font-semibold text-gray-100">You vs HexFish</h2>
+          </div>
+          <div class="flex flex-wrap items-center justify-end gap-2">
+            <label id="play-difficulty-label" class="flex items-center gap-1.5 text-xs text-gray-300">
+              Difficulty
+              <select id="play-difficulty-select" class="bg-bg-3 border border-gray-700 text-gray-100 rounded px-2 py-1 text-xs cursor-pointer" aria-label="HexFish difficulty"></select>
+            </label>
+            <div class="flex rounded border border-gray-700 overflow-hidden" role="group" aria-label="Choose your side">
+              <button id="play-side-p1" type="button" class="play-side-btn px-3 py-1 text-xs bg-accent text-white" data-player="0" aria-pressed="true">P1</button>
+              <button id="play-side-p2" type="button" class="play-side-btn px-3 py-1 text-xs bg-bg-3 text-gray-300 hover:bg-bg border-l border-gray-700" data-player="1" aria-pressed="false">P2</button>
+            </div>
+          </div>
+        </div>
+        <button id="btn-start-play-game" type="button" class="mt-4 py-1.5 px-3 text-xs bg-accent border border-accent text-white rounded cursor-pointer hover:bg-red-600 transition-colors">Start Game</button>
+      </section>
+    </div>
+  </section>
+
   <section id="replay-view" class="hidden flex-1 overflow-auto bg-bg p-3">
     <div class="mx-auto w-full max-w-3xl">
       <div class="flex items-center justify-between gap-2 mb-3">
@@ -244,25 +269,30 @@ tailwind.config = {
         <input type="number" id="sims-input" min="0" max="10000" value="50" step="50" class="w-16 bg-bg-3 border border-gray-700 text-gray-200 rounded px-1.5 py-0.5 text-xs">
       </label>
     </div>
-    <label id="apply-control" class="flex items-center gap-1 text-xs text-gray-300 cursor-pointer">
-      <input type="checkbox" id="apply-toggle" class="accent-accent"> Apply
-    </label>
-    <label id="autoplay-control" class="flex items-center gap-1 text-xs text-gray-300 cursor-pointer">
-      <input type="checkbox" id="autoplay-toggle" class="accent-accent"> Auto-play
-    </label>
-    <label id="autosearch-control" class="flex items-center gap-1 text-xs text-gray-300 cursor-pointer">
-      <input type="checkbox" id="autosearch-toggle" class="accent-accent"> Auto-search
-    </label>
+    <div id="options-menu-control" class="relative">
+      <button id="btn-options-menu" type="button" class="py-1.5 px-3 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors" aria-haspopup="menu" aria-expanded="false" aria-controls="options-flyout">Options</button>
+      <div id="options-flyout" class="hidden absolute left-0 bottom-full mb-2 z-20 min-w-36 rounded border border-gray-700 bg-bg-2 p-2 shadow-lg" role="menu">
+        <label id="apply-control" class="flex items-center gap-2 px-1.5 py-1 text-xs text-gray-300 cursor-pointer rounded hover:bg-bg-3">
+          <input type="checkbox" id="apply-toggle" class="accent-accent"> Apply
+        </label>
+        <label id="autoplay-control" class="flex items-center gap-2 px-1.5 py-1 text-xs text-gray-300 cursor-pointer rounded hover:bg-bg-3">
+          <input type="checkbox" id="autoplay-toggle" class="accent-accent"> Auto-play
+        </label>
+        <label id="autosearch-control" class="flex items-center gap-2 px-1.5 py-1 text-xs text-gray-300 cursor-pointer rounded hover:bg-bg-3">
+          <input type="checkbox" id="autosearch-toggle" class="accent-accent"> Auto-search
+        </label>
+      </div>
+    </div>
     <div id="result-banner" class="hidden px-3 py-1 bg-accent rounded font-semibold text-sm text-white"></div>
   </div>
 </div>
 <div id="svg-tooltip"></div>
 
-<script src="session.js?v=game-log-nav-20260614"></script>
+<script src="session.js?v=play-options-20260614"></script>
 <script src="board.js?v=board-editor-random-20260612"></script>
 <script src="mcts.js?v=game-log-nav-20260614"></script>
-<script src="controls.js?v=game-log-nav-20260614"></script>
+<script src="controls.js?v=play-ponder-20260615"></script>
 <script src="auth.js?v=user-sessions-20260610"></script>
-<script src="app.js?v=game-log-nav-20260614"></script>
+<script src="app.js?v=play-ponder-20260615"></script>
 </body>
 </html>

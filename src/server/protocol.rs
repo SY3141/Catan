@@ -64,7 +64,11 @@ pub enum ViewTarget {
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum SearchBudget {
     Simulations { value: u32 },
-    PvDepth { value: u32 },
+    PvDepth {
+        value: u32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        simulations: Option<u32>,
+    },
 }
 
 impl SearchBudget {
@@ -73,7 +77,17 @@ impl SearchBudget {
     }
 
     pub fn pv_depth(value: u32) -> Self {
-        Self::PvDepth { value }
+        Self::PvDepth {
+            value,
+            simulations: None,
+        }
+    }
+
+    pub fn pv_depth_with_simulations(value: u32, simulations: u32) -> Self {
+        Self::PvDepth {
+            value,
+            simulations: Some(simulations),
+        }
     }
 }
 

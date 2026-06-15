@@ -14,6 +14,8 @@ class Controls {
     this.autoSearch = document.getElementById('autosearch-toggle').checked;
     this.searchRunning = false;
     this.pauseRequested = false;
+    this.optionsAvailable = true;
+    this.optionsOpen = false;
     this.budgetMode = 'simulations';
     this.budgetValues = {
       simulations: parseInt(document.getElementById('sims-input').value) || 50,
@@ -23,6 +25,7 @@ class Controls {
     this._setBudgetMode(this.budgetMode);
     this._bind();
     this._updateSearchButtons();
+    this._updateOptionsVisibility();
     // Tell the server our initial auto-search state.
     if (this.autoSearch) this._syncAutoSearch();
   }
@@ -127,6 +130,27 @@ class Controls {
     btn.setAttribute('aria-pressed', active ? 'true' : 'false');
   }
 
+  setOptionsAvailable(available) {
+    this.optionsAvailable = !!available;
+    this._updateOptionsVisibility();
+  }
+
+  _setOptionsOpen(open) {
+    this.optionsOpen = !!open;
+    const flyout = document.getElementById('options-flyout');
+    const btn = document.getElementById('btn-options-menu');
+    if (flyout) flyout.classList.toggle('hidden', !this.optionsOpen);
+    if (btn) btn.setAttribute('aria-expanded', this.optionsOpen ? 'true' : 'false');
+  }
+
+  _updateOptionsVisibility() {
+    const control = document.getElementById('options-menu-control');
+    if (!control) return;
+    const hidden = !this.optionsAvailable || this.replayMode;
+    control.classList.toggle('hidden', hidden);
+    if (hidden) this._setOptionsOpen(false);
+  }
+
   /// Called on every GameState update.
   onStateUpdate(msg) {
     this.lastState = msg;
@@ -190,12 +214,24 @@ class Controls {
 
   _runSims() {
     if (this.searchRunning) return;
+    this.runSearchWithBudget(this._currentBudget(), this._searchTarget());
+  }
+
+  runSearchWithBudget(budget, target = this._searchTarget()) {
+    if (this.searchRunning) return false;
     this.session.send({
       type: 'RunSearch',
-      budget: this._currentBudget(),
-      target: this._searchTarget(),
+      budget,
+      target,
     });
     this.onSearchStarted();
+    return true;
+  }
+
+  pauseBeforeCommand() {
+    if (this.searchRunning && !this.pauseRequested) {
+      this.pauseSearch();
+    }
   }
 
   pauseSearch() {
@@ -242,6 +278,7 @@ class Controls {
   _bind() {
     document.getElementById('btn-new-game').addEventListener('click', () => {
       this.stopAutoplay();
+      this.pauseBeforeCommand();
       this.onNewGame?.();
       this.session.send({ type: 'NewGame', seed: null });
     });
@@ -249,12 +286,14 @@ class Controls {
     document.getElementById('btn-undo').addEventListener('click', () => {
       this.stopAutoplay();
       this._disableAutoSearch();
+      this.pauseBeforeCommand();
       this.session.send({ type: 'Undo' });
     });
 
     document.getElementById('btn-redo').addEventListener('click', () => {
       this.stopAutoplay();
       this._disableAutoSearch();
+      this.pauseBeforeCommand();
       this.session.send({ type: 'Redo' });
     });
 
@@ -272,6 +311,25 @@ class Controls {
 
     document.getElementById('btn-pause-search').addEventListener('click', () => {
       this.pauseSearch();
+    });
+
+    const optionsBtn = document.getElementById('btn-options-menu');
+    const optionsFlyout = document.getElementById('options-flyout');
+    optionsBtn?.addEventListener('click', (event) => {
+      event.stopPropagation();
+      this._setOptionsOpen(!this.optionsOpen);
+    });
+    optionsFlyout?.addEventListener('click', (event) => {
+      event.stopPropagation();
+    });
+    document.addEventListener('click', () => {
+      if (this.optionsOpen) this._setOptionsOpen(false);
+    });
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && this.optionsOpen) {
+        this._setOptionsOpen(false);
+        optionsBtn?.focus();
+      }
     });
 
     document.getElementById('autoplay-toggle').addEventListener('change', (e) => {
@@ -386,6 +444,7 @@ class Controls {
       document.getElementById('autoplay-toggle').checked = false;
       document.getElementById('autosearch-toggle').checked = false;
     }
+    this._updateOptionsVisibility();
 
     if (!replay) return;
     document.getElementById('replay-counter').textContent = `${replay.cursor} / ${replay.len}`;

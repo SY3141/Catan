@@ -8,18 +8,24 @@ window.hexfishBoard = board;
 const mctsPanel = new MCTSPanel();
 const controls = new Controls(session);
 
-controls.onNewGame = () => {
-  pendingNewGameSearch = true;
-  mctsPanel.clear();
-  board.clearSearchHighlights();
-};
-
 const RESOURCE_NAMES = ['lumber', 'brick', 'wool', 'grain', 'ore'];
 const DEV_CARD_NAMES = ['Knight', 'VP', 'Road Building', 'Year of Plenty', 'Monopoly'];
 const DEV_SHORT = ['Kn', 'VP', 'RB', 'YP', 'Mo'];
 const PLAYER_COLORS = ['#4a9eff', '#ff6b6b'];
 const EDITOR_TERRAINS = ['forest', 'hills', 'pasture', 'fields', 'mountains', 'desert'];
 const EDITOR_NUMBERS = [2, 3, 4, 5, 6, 8, 9, 10, 11, 12];
+const PLAY_DIFFICULTIES = [
+  { level: 1, simulations: 50, depth: 2 },
+  { level: 2, simulations: 100, depth: 3 },
+  { level: 3, simulations: 200, depth: 4 },
+  { level: 4, simulations: 400, depth: 5 },
+  { level: 5, simulations: 800, depth: 6 },
+  { level: 6, simulations: 1500, depth: 8 },
+  { level: 7, simulations: 3000, depth: 10 },
+  { level: 8, simulations: 6000, depth: 14 },
+  { level: 9, simulations: 12000, depth: 20 },
+  { level: 10, simulations: 25000, depth: 30 },
+];
 const EDITOR_TERRAIN_BAG = [
   'forest', 'forest', 'forest', 'forest',
   'hills', 'hills', 'hills',
@@ -59,6 +65,26 @@ let pendingNewGameSearch = false;
 let lastActionLogLength = { analysis: null, replay: null };
 let previousFrameHands = { analysis: null, replay: null };
 let activeView = 'analysis';
+let selectedPlayHumanPlayer = 0;
+let selectedPlayDifficulty = 5;
+let playMode = {
+  active: false,
+  humanPlayer: 0,
+  botThinking: false,
+};
+
+controls.onNewGame = () => {
+  if (activeView === 'play' && playMode.active) {
+    pendingNewGameSearch = false;
+    playMode.botThinking = false;
+  } else {
+    pendingNewGameSearch = true;
+    playMode.active = false;
+    playMode.botThinking = false;
+  }
+  mctsPanel.clear();
+  board.clearSearchHighlights();
+};
 
 function updateBoardChromePlacement() {
   const shell = document.getElementById('board-shell');
@@ -129,6 +155,113 @@ function activeActionLogIndex(msg) {
   return activeActionLogLength(msg) - 1;
 }
 
+function playViewActive() {
+  return activeView === 'play' && playMode.active;
+}
+
+function isPlayBotTurn(msg = currentState) {
+  return !!(
+    playViewActive() &&
+    msg &&
+    !msg.replay &&
+    !msg.is_terminal &&
+    !msg.is_chance &&
+    msg.current_player !== playMode.humanPlayer
+  );
+}
+
+function playNameForPlayer(idx) {
+  if (!playViewActive()) return null;
+  return idx === playMode.humanPlayer ? 'You' : 'HexFish';
+}
+
+function playerDisplayName(idx) {
+  return playNameForPlayer(idx) || `P${idx + 1}`;
+}
+
+function formatPlayerRefs(text) {
+  if (!playViewActive()) return text;
+  return String(text).replace(/\bP([12])\b/g, (_, num) => playerDisplayName(Number(num) - 1));
+}
+
+function playDifficultyConfig(level = selectedPlayDifficulty) {
+  return PLAY_DIFFICULTIES.find(cfg => cfg.level === level) || PLAY_DIFFICULTIES[4];
+}
+
+function playDifficultyDetails(cfg = playDifficultyConfig()) {
+  return `Level ${cfg.level}: target depth ${cfg.depth}, up to ${cfg.simulations.toLocaleString()} sims`;
+}
+
+function playDifficultyBudget() {
+  const cfg = playDifficultyConfig();
+  return {
+    mode: 'pv_depth',
+    value: cfg.depth,
+    simulations: cfg.simulations,
+  };
+}
+
+function playCanPonder(msg = currentState) {
+  return !!(
+    playViewActive() &&
+    msg &&
+    !msg.replay &&
+    !msg.is_terminal &&
+    !msg.is_chance &&
+    msg.current_player === playMode.humanPlayer &&
+    Array.isArray(msg.legal_actions) &&
+    msg.legal_actions.length > 0
+  );
+}
+
+function sendPlayAction(action) {
+  if (playViewActive()) controls.pauseBeforeCommand();
+  session.send({ type: 'PlayAction', action });
+}
+
+function setPlayDifficulty(level) {
+  const nextLevel = Number.isFinite(level) ? Math.max(1, Math.min(10, Math.round(level))) : 5;
+  selectedPlayDifficulty = nextLevel;
+  const cfg = playDifficultyConfig();
+  const detail = playDifficultyDetails(cfg);
+  const select = document.getElementById('play-difficulty-select');
+  const label = document.getElementById('play-difficulty-label');
+  if (select) {
+    select.value = String(cfg.level);
+    select.title = detail;
+    select.setAttribute('aria-label', `HexFish difficulty. ${detail}`);
+  }
+  if (label) label.title = detail;
+}
+
+function initPlayDifficultySelect() {
+  const select = document.getElementById('play-difficulty-select');
+  if (!select) return;
+  select.innerHTML = '';
+  for (const cfg of PLAY_DIFFICULTIES) {
+    const option = document.createElement('option');
+    option.value = String(cfg.level);
+    option.textContent = String(cfg.level);
+    option.title = playDifficultyDetails(cfg);
+    select.appendChild(option);
+  }
+  select.addEventListener('change', () => setPlayDifficulty(Number(select.value)));
+  setPlayDifficulty(selectedPlayDifficulty);
+}
+
+function setPlaySide(player) {
+  selectedPlayHumanPlayer = player === 1 ? 1 : 0;
+  for (const btn of document.querySelectorAll('.play-side-btn')) {
+    const active = Number(btn.dataset.player) === selectedPlayHumanPlayer;
+    btn.classList.toggle('bg-accent', active);
+    btn.classList.toggle('text-white', active);
+    btn.classList.toggle('bg-bg-3', !active);
+    btn.classList.toggle('text-gray-300', !active);
+    btn.classList.toggle('hover:bg-bg', !active);
+    btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+  }
+}
+
 // ── Message handlers ─────────────────────────────────────────────────
 
 session.on('GameState', (msg) => {
@@ -148,6 +281,11 @@ session.on('GameState', (msg) => {
     }
     if (activeView === 'editor') {
       renderEditorBoard();
+      return;
+    }
+    if (activeView === 'play') {
+      renderGameState(msg);
+      runPlayAutomation(msg);
       return;
     }
     if (activeView === 'analysis') {
@@ -205,8 +343,10 @@ function renderGameState(msg) {
   const actionList = document.getElementById('action-list');
   actionList.innerHTML = '';
   board.clearOverlays();
+  const playBotTurn = isPlayBotTurn(msg);
+  updateActionPanelStatus(msg, playBotTurn);
 
-  if (!msg.replay && !msg.is_terminal && !msg.is_chance) {
+  if (!msg.replay && !msg.is_terminal && !msg.is_chance && !playBotTurn) {
     // Board overlays for spatial actions
     if (currentBoard) {
       board.showLegalActions(msg.legal_actions, currentBoard, msg.current_player);
@@ -218,7 +358,8 @@ function renderGameState(msg) {
       btn.className = 'w-full py-1 px-2 text-left text-[11px] leading-snug bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors';
       btn.textContent = a.label;
       btn.addEventListener('click', () => {
-        session.send({ type: 'PlayAction', action: a.action });
+        if (isPlayBotTurn()) return;
+        sendPlayAction(a.action);
       });
       btn.addEventListener('mouseenter', () => showLegalActionPreview(a.action));
       btn.addEventListener('mouseleave', () => board.clearActionPreview());
@@ -242,10 +383,11 @@ function renderGameState(msg) {
       line.className = active
         ? 'py-0.5 px-1 rounded bg-bg-3 text-gray-100'
         : 'py-0.5 px-1 rounded hover:bg-bg-3';
-      const text = msg.action_log[i];
-      if (text.startsWith('P1:')) {
+      const rawText = msg.action_log[i];
+      const text = formatPlayerRefs(rawText);
+      if (rawText.startsWith('P1:')) {
         line.style.color = PLAYER_COLORS[0];
-      } else if (text.startsWith('P2:')) {
+      } else if (rawText.startsWith('P2:')) {
         line.style.color = PLAYER_COLORS[1];
       } else {
         line.style.color = '#a0a0a0';
@@ -284,14 +426,14 @@ function renderGameState(msg) {
   updateRollBadge(msg, state, viewKey);
 
   // Undo/Redo button states
-  document.getElementById('btn-undo').disabled = !msg.can_undo;
-  document.getElementById('btn-redo').disabled = !msg.can_redo;
+  document.getElementById('btn-undo').disabled = playBotTurn || !msg.can_undo;
+  document.getElementById('btn-redo').disabled = playBotTurn || !msg.can_redo;
 
   // Result banner
   const banner = document.getElementById('result-banner');
   if (msg.is_terminal && msg.result) {
     const winner = parseResultWinner(msg.result);
-    banner.textContent = msg.result;
+    banner.textContent = formatPlayerRefs(msg.result);
     banner.style.background = playerColor(winner) || '';
     banner.classList.remove('hidden');
     controls.onGameOver();
@@ -301,11 +443,40 @@ function renderGameState(msg) {
   }
 
   controls.onStateUpdate(msg);
+  updateViewChrome(msg);
   scheduleBoardChromePlacement();
+}
+
+function updateActionPanelStatus(msg, playBotTurn) {
+  const title = document.getElementById('action-panel-title');
+  const status = document.getElementById('play-status');
+  if (!title || !status) return;
+
+  if (!playViewActive()) {
+    title.textContent = 'Legal Moves';
+    status.textContent = '';
+    status.title = '';
+    status.classList.add('hidden');
+    return;
+  }
+
+  if (playBotTurn) {
+    title.textContent = 'Play';
+    status.textContent = 'HexFish thinking';
+    status.title = playDifficultyDetails();
+    status.classList.remove('hidden');
+    return;
+  }
+
+  title.textContent = msg?.is_terminal ? 'Play' : 'Legal Moves';
+  status.textContent = '';
+  status.title = '';
+  status.classList.add('hidden');
 }
 
 function showLegalActionPreview(action) {
   if (!currentBoard || !currentState) return;
+  if (isPlayBotTurn()) return;
   board.showActionPreview(action, currentBoard, currentState.current_player);
 }
 
@@ -421,7 +592,7 @@ function showRollBadge(total, roller) {
   badge.style.background = playerColor(playerIndex);
   badge.setAttribute('aria-label', playerIndex == null
     ? `Roll ${total}`
-    : `P${playerIndex + 1} rolled ${total}`);
+    : `${playerDisplayName(playerIndex)} rolled ${total}`);
   badge.classList.remove('hidden');
 }
 
@@ -432,6 +603,10 @@ function hideRollBadge() {
 }
 
 function updateSearchHighlights(snapshot, labels) {
+  if (playViewActive()) {
+    board.clearSearchHighlights();
+    return;
+  }
   if (!currentBoard || !snapshot.edges) return;
   const edges = snapshot.edges.map((e, i) => ({
     ...e,
@@ -465,6 +640,7 @@ session.on('SearchProgress', (msg) => {
 });
 
 session.on('BotAction', (msg) => {
+  playMode.botThinking = false;
   if (msg.snapshot) {
     mctsPanel.updateSnapshot(msg.snapshot, msg.action_labels || [], currentState?.current_player ?? 0);
     updateSearchHighlights(msg.snapshot, msg.action_labels || []);
@@ -478,32 +654,78 @@ session.on('Error', (msg) => {
     setEditorStatus(msg.message);
   }
   controls.onSearchError();
+  playMode.botThinking = false;
+  updateActionPanelStatus(currentState, isPlayBotTurn(currentState));
   setReplayStatus(msg.message);
   console.error('Server error:', msg.message);
 });
 
 session.on('Disconnected', () => {
   controls.onSearchError();
+  playMode.botThinking = false;
 });
 
 // ── View tabs / replay list ────────────────────────────────────────────────
 
 function setTabState(tab) {
+  const playTab = document.getElementById('tab-play');
   const boardTab = document.getElementById('tab-board');
   const replayTab = document.getElementById('tab-replay');
   const editorTab = document.getElementById('tab-editor');
+  const isPlay = tab === 'play';
   const isAnalysis = tab === 'analysis';
   const isReplay = tab === 'replay';
   const isEditor = tab === 'editor';
   const activeClasses = 'view-tab active px-2 py-1 rounded text-gray-100 bg-bg-3';
   const idleClasses = 'view-tab px-2 py-1 rounded text-gray-400 hover:text-gray-100 hover:bg-bg-3';
 
+  playTab.className = isPlay ? activeClasses : idleClasses;
   boardTab.className = isAnalysis ? activeClasses : idleClasses;
   replayTab.className = isReplay ? activeClasses : idleClasses;
   editorTab.className = isEditor ? activeClasses : idleClasses;
+  playTab.setAttribute('aria-selected', String(isPlay));
   boardTab.setAttribute('aria-selected', String(isAnalysis));
   replayTab.setAttribute('aria-selected', String(isReplay));
   editorTab.setAttribute('aria-selected', String(isEditor));
+}
+
+function showPlayView() {
+  if (!playMode.active) {
+    showPlaySetupView();
+    return;
+  }
+  activeView = 'play';
+  setTabState('play');
+  setEditorChrome(false);
+  setGameHeaderLabelsVisible(true);
+  document.getElementById('main-layout').classList.remove('hidden');
+  document.getElementById('play-setup-view').classList.add('hidden');
+  document.getElementById('replay-view').classList.add('hidden');
+  document.getElementById('controls').classList.remove('hidden');
+  controls.stopAutoplay();
+  controls._disableAutoSearch();
+  controls.setOptionsAvailable(false);
+  if (analysisState) {
+    renderGameState(analysisState);
+    runPlayAutomation(analysisState);
+  } else {
+    updateViewChrome(null);
+  }
+  scheduleBoardChromePlacement();
+}
+
+function showPlaySetupView() {
+  activeView = 'play-setup';
+  setTabState('play');
+  controls.stopAutoplay();
+  controls._disableAutoSearch();
+  controls.setOptionsAvailable(false);
+  setPlaySide(selectedPlayHumanPlayer);
+  setGameHeaderLabelsVisible(false);
+  document.getElementById('main-layout').classList.add('hidden');
+  document.getElementById('play-setup-view').classList.remove('hidden');
+  document.getElementById('replay-view').classList.add('hidden');
+  document.getElementById('controls').classList.add('hidden');
 }
 
 function showAnalysisView() {
@@ -512,9 +734,12 @@ function showAnalysisView() {
   setEditorChrome(false);
   setGameHeaderLabelsVisible(true);
   document.getElementById('main-layout').classList.remove('hidden');
+  document.getElementById('play-setup-view').classList.add('hidden');
   document.getElementById('replay-view').classList.add('hidden');
   document.getElementById('controls').classList.remove('hidden');
+  controls.setOptionsAvailable(true);
   if (analysisState) renderGameState(analysisState);
+  else updateViewChrome(null);
   scheduleBoardChromePlacement();
 }
 
@@ -524,8 +749,10 @@ function showReplayView() {
   setEditorChrome(false);
   setGameHeaderLabelsVisible(false);
   document.getElementById('main-layout').classList.add('hidden');
+  document.getElementById('play-setup-view').classList.add('hidden');
   document.getElementById('replay-view').classList.remove('hidden');
   document.getElementById('controls').classList.add('hidden');
+  controls.setOptionsAvailable(false);
   requestReplayList();
 }
 
@@ -535,9 +762,12 @@ function showReplayBoardView() {
   setEditorChrome(false);
   setGameHeaderLabelsVisible(true);
   document.getElementById('main-layout').classList.remove('hidden');
+  document.getElementById('play-setup-view').classList.add('hidden');
   document.getElementById('replay-view').classList.add('hidden');
   document.getElementById('controls').classList.remove('hidden');
+  controls.setOptionsAvailable(false);
   if (replayState) renderGameState(replayState);
+  else updateViewChrome(null);
   scheduleBoardChromePlacement();
 }
 
@@ -547,12 +777,14 @@ function showEditorView() {
   controls.stopAutoplay();
   controls._disableAutoSearch();
   document.getElementById('main-layout').classList.remove('hidden');
+  document.getElementById('play-setup-view').classList.add('hidden');
   document.getElementById('replay-view').classList.add('hidden');
   document.getElementById('controls').classList.remove('hidden');
   if (!editorBaseBoard && analysisState?.state?.board) {
     editorBaseBoard = analysisState.state.board;
   }
   setEditorChrome(true);
+  controls.setOptionsAvailable(false);
   renderEditorBoard();
   scheduleBoardChromePlacement();
 }
@@ -582,6 +814,87 @@ function setEditorChrome(enabled) {
       child.classList.toggle('hidden', enabled);
     }
   }
+}
+
+function setMctsMoveDetailsVisible(visible) {
+  document.getElementById('policy-header')?.classList.toggle('hidden', !visible);
+  document.getElementById('policy-bars')?.classList.toggle('hidden', !visible);
+  document.getElementById('tree-explorer')?.classList.toggle('hidden', !visible);
+}
+
+function updateViewChrome(msg) {
+  const inPlay = playViewActive();
+  const replay = !!msg?.replay || activeView === 'replay-board';
+  setMctsMoveDetailsVisible(!inPlay);
+
+  document.getElementById('search-action-control')?.classList.toggle('hidden', inPlay);
+  document.getElementById('budget-control')?.classList.toggle('hidden', inPlay);
+
+  const botMove = document.getElementById('btn-bot-move');
+  if (botMove) {
+    if (inPlay) {
+      botMove.classList.add('hidden');
+      botMove.disabled = true;
+    } else if (activeView === 'analysis' && !replay) {
+      botMove.classList.remove('hidden');
+      botMove.disabled = false;
+    }
+  }
+  for (const btn of document.querySelectorAll('.takeover-btn')) {
+    const hide = inPlay || replay || activeView === 'editor';
+    btn.classList.toggle('hidden', hide);
+    btn.disabled = hide;
+  }
+
+  controls.setOptionsAvailable(activeView === 'analysis' && !replay);
+  if (inPlay) board.clearSearchHighlights();
+}
+
+function startPlayGame() {
+  playMode.active = true;
+  playMode.humanPlayer = selectedPlayHumanPlayer;
+  playMode.botThinking = false;
+  pendingNewGameSearch = false;
+  controls.stopAutoplay();
+  controls._disableAutoSearch();
+  document.getElementById('apply-toggle').checked = false;
+  document.getElementById('autoplay-toggle').checked = false;
+  document.getElementById('autosearch-toggle').checked = false;
+  mctsPanel.clear();
+  board.clearSearchHighlights();
+  activeView = 'play';
+  setTabState('play');
+  setEditorChrome(false);
+  setGameHeaderLabelsVisible(true);
+  document.getElementById('main-layout').classList.remove('hidden');
+  document.getElementById('play-setup-view').classList.add('hidden');
+  document.getElementById('replay-view').classList.add('hidden');
+  document.getElementById('controls').classList.remove('hidden');
+  updateViewChrome(analysisState);
+  session.send({ type: 'NewGame', seed: null });
+}
+
+function runPlayAutomation(msg) {
+  if (!isPlayBotTurn(msg)) {
+    if (playViewActive() && (msg?.is_terminal || msg?.current_player === playMode.humanPlayer)) {
+      playMode.botThinking = false;
+    }
+    updateActionPanelStatus(msg, false);
+    runPlayPonderSearch(msg);
+    return;
+  }
+  updateActionPanelStatus(msg, true);
+  if (playMode.botThinking) return;
+  playMode.botThinking = true;
+  session.send({
+    type: 'BotMove',
+    budget: playDifficultyBudget(),
+  });
+}
+
+function runPlayPonderSearch(msg) {
+  if (!playCanPonder(msg) || controls.searchRunning) return;
+  controls.runSearchWithBudget(playDifficultyBudget(), 'analysis');
 }
 
 function requestReplayList() {
@@ -867,6 +1180,8 @@ function startEditedGame() {
     return;
   }
   pendingEditorStart = true;
+  playMode.active = false;
+  playMode.botThinking = false;
   setEditorStatus('Starting');
   session.send({
     type: 'StartEditedGame',
@@ -877,12 +1192,19 @@ function startEditedGame() {
 
 // ── Board action clicks ──────────────────────────────────────────────
 
+document.getElementById('tab-play').addEventListener('click', showPlayView);
 document.getElementById('tab-board').addEventListener('click', showAnalysisView);
 document.getElementById('tab-replay').addEventListener('click', showReplayView);
 document.getElementById('tab-editor').addEventListener('click', showEditorView);
 document.getElementById('btn-refresh-replays').addEventListener('click', requestReplayList);
+document.getElementById('btn-start-play-game').addEventListener('click', startPlayGame);
 document.getElementById('btn-start-edited-game').addEventListener('click', startEditedGame);
 document.getElementById('btn-random-editor-board').addEventListener('click', randomizeEditorBoard);
+for (const btn of document.querySelectorAll('.play-side-btn')) {
+  btn.addEventListener('click', () => setPlaySide(Number(btn.dataset.player)));
+}
+initPlayDifficultySelect();
+setPlaySide(selectedPlayHumanPlayer);
 initEditorControls();
 
 const boardShellEl = document.getElementById('board-shell');
@@ -895,7 +1217,8 @@ scheduleBoardChromePlacement();
 board.onActionClick = (action) => {
   if (activeView === 'editor') return;
   if (currentState?.replay) return;
-  session.send({ type: 'PlayAction', action });
+  if (isPlayBotTurn()) return;
+  sendPlayAction(action);
 };
 
 document.getElementById('btn-rotate-left').addEventListener('click', () => {
@@ -938,10 +1261,8 @@ function updatePlayerPanel(idx, state) {
   const pf = frame.players[idx];
   if (!pf) return;
 
-  // Player name
-  if (state.player_names && state.player_names[idx]) {
-    document.getElementById(`p${idx}-name`).textContent = state.player_names[idx];
-  }
+  const displayName = playNameForPlayer(idx) || state.player_names?.[idx] || `P${idx + 1}`;
+  document.getElementById(`p${idx}-name`).textContent = displayName;
 
   // Total resource cards
   const resourceCount = pf.hand ? pf.hand.reduce((sum, count) => sum + count, 0) : 0;
@@ -954,11 +1275,14 @@ function updatePlayerPanel(idx, state) {
   // Hand — always show all 5 resources as colored rectangles
   const handEl = document.getElementById(`p${idx}-hand`);
   handEl.innerHTML = '';
-  for (let r = 0; r < 5; r++) {
-    const card = document.createElement('span');
-    card.className = `resource-card ${RESOURCE_NAMES[r]}`;
-    card.textContent = pf.hand[r];
-    handEl.appendChild(card);
+  const hideResourceBreakdown = playViewActive() && idx !== playMode.humanPlayer;
+  if (!hideResourceBreakdown) {
+    for (let r = 0; r < 5; r++) {
+      const card = document.createElement('span');
+      card.className = `resource-card ${RESOURCE_NAMES[r]}`;
+      card.textContent = pf.hand[r];
+      handEl.appendChild(card);
+    }
   }
 
   // Dev cards
@@ -1135,7 +1459,8 @@ function updateDice(state) {
 
 document.addEventListener('keydown', (e) => {
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
-  if (activeView === 'replay-list' || activeView === 'editor') return;
+  if (activeView === 'replay-list' || activeView === 'editor' || activeView === 'play-setup') return;
+  if (isPlayBotTurn()) return;
   if (currentState?.replay && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
     e.preventDefault();
     const replay = currentState.replay;
