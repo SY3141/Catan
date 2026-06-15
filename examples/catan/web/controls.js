@@ -66,7 +66,7 @@ class Controls {
     } else {
       label.firstChild.textContent = 'Sims:';
       input.min = '0';
-      input.max = '10000';
+      input.max = '150000';
       input.step = '50';
       input.value = this.budgetValues.simulations;
     }

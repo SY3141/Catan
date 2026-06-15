@@ -71,16 +71,19 @@ let playMode = {
   active: false,
   humanPlayer: 0,
   botThinking: false,
+  forcedMoveKey: null,
 };
 
 controls.onNewGame = () => {
   if (activeView === 'play' && playMode.active) {
     pendingNewGameSearch = false;
     playMode.botThinking = false;
+    playMode.forcedMoveKey = null;
   } else {
     pendingNewGameSearch = true;
     playMode.active = false;
     playMode.botThinking = false;
+    playMode.forcedMoveKey = null;
   }
   mctsPanel.clear();
   board.clearSearchHighlights();
@@ -89,6 +92,7 @@ controls.onNewGame = () => {
 function updateBoardChromePlacement() {
   const shell = document.getElementById('board-shell');
   const svg = document.getElementById('board-svg');
+  const analysisBar = document.getElementById('analysis-bar-panel');
   if (!shell || !svg) return;
 
   const shellRect = shell.getBoundingClientRect();
@@ -123,6 +127,11 @@ function updateBoardChromePlacement() {
   shell.style.setProperty('--board-content-right', `${right}px`);
   shell.style.setProperty('--board-content-bottom', `${bottom}px`);
   shell.style.setProperty('--board-content-center-x', `${left + contentWidth / 2}px`);
+
+  if (analysisBar) {
+    analysisBar.style.setProperty('--analysis-board-top', `${top}px`);
+    analysisBar.style.setProperty('--analysis-board-bottom', `${bottom}px`);
+  }
 }
 
 function scheduleBoardChromePlacement() {
@@ -212,6 +221,10 @@ function playCanPonder(msg = currentState) {
     Array.isArray(msg.legal_actions) &&
     msg.legal_actions.length > 0
   );
+}
+
+function playForcedMoveKey(msg, action) {
+  return `${logHistoryCursor(msg)}:${msg.current_player}:${msg.phase}:${action}`;
 }
 
 function sendPlayAction(action) {
@@ -641,6 +654,7 @@ session.on('SearchProgress', (msg) => {
 
 session.on('BotAction', (msg) => {
   playMode.botThinking = false;
+  playMode.forcedMoveKey = null;
   if (msg.snapshot) {
     mctsPanel.updateSnapshot(msg.snapshot, msg.action_labels || [], currentState?.current_player ?? 0);
     updateSearchHighlights(msg.snapshot, msg.action_labels || []);
@@ -655,6 +669,7 @@ session.on('Error', (msg) => {
   }
   controls.onSearchError();
   playMode.botThinking = false;
+  playMode.forcedMoveKey = null;
   updateActionPanelStatus(currentState, isPlayBotTurn(currentState));
   setReplayStatus(msg.message);
   console.error('Server error:', msg.message);
@@ -663,6 +678,7 @@ session.on('Error', (msg) => {
 session.on('Disconnected', () => {
   controls.onSearchError();
   playMode.botThinking = false;
+  playMode.forcedMoveKey = null;
 });
 
 // ── View tabs / replay list ────────────────────────────────────────────────
@@ -801,6 +817,7 @@ function setEditorChrome(enabled) {
   document.getElementById('analysis-panel').classList.toggle('hidden', enabled);
   document.getElementById('editor-panel').classList.toggle('hidden', !enabled);
   document.getElementById('action-panel')?.classList.toggle('hidden', enabled);
+  document.getElementById('analysis-bar-panel')?.classList.toggle('hidden', enabled);
   document.getElementById('board-history-controls')?.classList.toggle('hidden', enabled);
   document.getElementById('phase-label').classList.toggle('hidden', enabled);
   document.getElementById('turn-label').classList.toggle('hidden', enabled);
@@ -826,6 +843,7 @@ function updateViewChrome(msg) {
   const inPlay = playViewActive();
   const replay = !!msg?.replay || activeView === 'replay-board';
   setMctsMoveDetailsVisible(!inPlay);
+  document.getElementById('analysis-bar-panel')?.classList.toggle('hidden', activeView === 'editor');
 
   document.getElementById('search-action-control')?.classList.toggle('hidden', inPlay);
   document.getElementById('budget-control')?.classList.toggle('hidden', inPlay);
@@ -854,6 +872,7 @@ function startPlayGame() {
   playMode.active = true;
   playMode.humanPlayer = selectedPlayHumanPlayer;
   playMode.botThinking = false;
+  playMode.forcedMoveKey = null;
   pendingNewGameSearch = false;
   controls.stopAutoplay();
   controls._disableAutoSearch();
@@ -878,12 +897,23 @@ function runPlayAutomation(msg) {
   if (!isPlayBotTurn(msg)) {
     if (playViewActive() && (msg?.is_terminal || msg?.current_player === playMode.humanPlayer)) {
       playMode.botThinking = false;
+      playMode.forcedMoveKey = null;
     }
     updateActionPanelStatus(msg, false);
     runPlayPonderSearch(msg);
     return;
   }
   updateActionPanelStatus(msg, true);
+  if (Array.isArray(msg.legal_actions) && msg.legal_actions.length === 1) {
+    const action = msg.legal_actions[0].action;
+    const key = playForcedMoveKey(msg, action);
+    if (playMode.forcedMoveKey === key) return;
+    playMode.forcedMoveKey = key;
+    playMode.botThinking = false;
+    session.send({ type: 'PlayAction', action });
+    return;
+  }
+  playMode.forcedMoveKey = null;
   if (playMode.botThinking) return;
   playMode.botThinking = true;
   session.send({
@@ -1182,6 +1212,7 @@ function startEditedGame() {
   pendingEditorStart = true;
   playMode.active = false;
   playMode.botThinking = false;
+  playMode.forcedMoveKey = null;
   setEditorStatus('Starting');
   session.send({
     type: 'StartEditedGame',

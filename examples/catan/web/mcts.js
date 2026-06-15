@@ -4,8 +4,10 @@ class MCTSPanel {
   constructor() {
     this.barsEl = document.getElementById('policy-bars');
     this.simsEl = document.getElementById('sims-count');
-    this.rootQEl = document.getElementById('root-q');
-    this.netValEl = document.getElementById('net-value');
+    this.analysisBarEl = document.getElementById('analysis-bar-track');
+    this.analysisP1El = document.getElementById('analysis-bar-p1');
+    this.analysisP2El = document.getElementById('analysis-bar-p2');
+    this.analysisValueEl = document.getElementById('analysis-bar-value');
     this.treeViewEl = document.getElementById('tree-view');
     this.onExplore = null;
     this.onPreview = null;
@@ -19,11 +21,7 @@ class MCTSPanel {
   updateSnapshot(snapshot, labels, currentPlayer = 0) {
     const pvDepth = snapshot.pv_depth ?? 0;
     this.simsEl.textContent = `${snapshot.total_simulations} sims - Depth ${pvDepth}`;
-    const [w, d, l] = snapshot.root_wdl;
-    this.rootQEl.textContent = `W ${(w*100).toFixed(0)}% D ${(d*100).toFixed(0)}% L ${(l*100).toFixed(0)}%`;
-    const nv = snapshot.network_value;
-    const nw = (nv + 1) / 2;
-    this.netValEl.textContent = `Net: ${(nw*100).toFixed(0)}%`;
+    this._updateAnalysisBar(snapshot.root_wdl);
 
     // Build sorted edge data
     const edges = snapshot.edges.map((e, i) => ({
@@ -194,9 +192,43 @@ class MCTSPanel {
     this.expandedPaths.clear();
     this.barsEl.innerHTML = '';
     this.simsEl.textContent = '0 sims';
-    this.rootQEl.textContent = '';
-    this.netValEl.textContent = '';
     this.treeViewEl.innerHTML = '';
+    this._updateAnalysisBar([0, 1, 0]);
+  }
+
+  _updateAnalysisBar(rootWdl) {
+    if (!this.analysisBarEl || !this.analysisP1El || !this.analysisP2El || !this.analysisValueEl) return;
+    let [w, d, l] = Array.isArray(rootWdl) ? rootWdl : [0, 1, 0];
+    w = this._clamp01(w);
+    d = this._clamp01(d);
+    l = this._clamp01(l);
+
+    const total = w + d + l;
+    if (total > 0) {
+      w /= total;
+      d /= total;
+      l /= total;
+    } else {
+      w = 0;
+      d = 1;
+      l = 0;
+    }
+
+    const p1Share = this._clamp01(w + d / 2);
+    const p2Share = 1 - p1Share;
+    const p1Percent = p1Share * 100;
+    const p2Percent = p2Share * 100;
+    const value = Math.round(p1Share * 100);
+    const wPct = Math.round(w * 100);
+    const dPct = Math.round(d * 100);
+    const lPct = Math.round(l * 100);
+
+    this.analysisP1El.style.height = `${p1Percent.toFixed(2)}%`;
+    this.analysisP2El.style.height = `${p2Percent.toFixed(2)}%`;
+    this.analysisValueEl.textContent = `${value}`;
+    this.analysisBarEl.setAttribute('aria-valuenow', `${value}`);
+    this.analysisBarEl.setAttribute('aria-valuetext', `P1 ${value}, win ${wPct}%, draw ${dPct}%, loss ${lPct}%`);
+    this.analysisBarEl.title = `P1 ${value}; win ${wPct}%, draw ${dPct}%, loss ${lPct}%`;
   }
 
   _renderNode(node, depth, isLast = true, path = [], prefix = '') {
@@ -253,5 +285,10 @@ class MCTSPanel {
     if (q > 0) return '#8bc34a';
     if (q > -0.1) return '#ff9800';
     return '#f44336';
+  }
+
+  _clamp01(value) {
+    if (!Number.isFinite(value)) return 0;
+    return Math.max(0, Math.min(1, value));
   }
 }

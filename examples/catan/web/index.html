@@ -21,7 +21,7 @@ tailwind.config = {
   }
 }
 </script>
-<link rel="stylesheet" href="style.css?v=play-options-20260614">
+<link rel="stylesheet" href="style.css?v=analysis-bar-fit-20260615">
 <script
   defer
   crossorigin="anonymous"
@@ -99,6 +99,14 @@ tailwind.config = {
 
     <!-- Center: SVG Board + action rail -->
     <div id="board-container" class="flex-1 min-w-0 flex items-stretch gap-2 p-2 overflow-hidden">
+      <aside id="analysis-bar-panel" class="analysis-bar-panel" aria-label="Search value">
+        <div id="analysis-bar-track" class="analysis-bar-track" role="meter" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50">
+          <div id="analysis-bar-p1" class="analysis-bar-fill analysis-bar-p1" style="height:50%"></div>
+          <div id="analysis-bar-p2" class="analysis-bar-fill analysis-bar-p2" style="height:50%"></div>
+          <div class="analysis-bar-midline" aria-hidden="true"></div>
+        </div>
+        <div id="analysis-bar-value" class="analysis-bar-value">50</div>
+      </aside>
       <div id="board-play-area" class="flex-1 min-w-0 min-h-0 flex flex-col">
         <div id="board-shell" class="relative flex-1 min-h-0 w-full">
           <button id="btn-rotate-left" class="absolute top-0 left-0 z-10 w-8 h-8 flex items-center justify-center bg-bg-3/90 border border-gray-700 text-gray-100 rounded cursor-pointer hover:bg-accent transition-colors" title="Rotate board counterclockwise" aria-label="Rotate board counterclockwise">&#8634;</button>
@@ -176,10 +184,6 @@ tailwind.config = {
       <div id="search-info" class="px-2.5 py-2 text-xs border-b border-gray-700">
         <div class="flex gap-3 flex-wrap">
           <span id="sims-count" class="whitespace-nowrap text-gray-300">0 sims</span>
-        </div>
-        <div class="mt-1 flex gap-3 flex-wrap">
-          <span id="root-q" class="whitespace-nowrap text-gray-300"></span>
-          <span id="net-value" class="whitespace-nowrap text-gray-300"></span>
         </div>
       </div>
       <div id="policy-header" class="flex items-center gap-1 px-2.5 py-1 text-[10px] uppercase tracking-wide text-gray-500 border-b border-gray-700">
@@ -266,7 +270,7 @@ tailwind.config = {
         <button id="budget-mode-depth" type="button" class="budget-mode-btn px-2 py-0.5 bg-bg-3 text-gray-300 hover:bg-bg" data-budget-mode="pv_depth" aria-pressed="false">Depth</button>
       </div>
       <label id="budget-value-label" class="flex items-center gap-1">Sims:
-        <input type="number" id="sims-input" min="0" max="10000" value="50" step="50" class="w-16 bg-bg-3 border border-gray-700 text-gray-200 rounded px-1.5 py-0.5 text-xs">
+        <input type="number" id="sims-input" min="0" max="150000" value="50" step="50" class="w-24 bg-bg-3 border border-gray-700 text-gray-200 rounded px-1.5 py-0.5 text-xs">
       </label>
     </div>
     <div id="options-menu-control" class="relative">
@@ -290,9 +294,9 @@ tailwind.config = {
 
 <script src="session.js?v=play-options-20260614"></script>
 <script src="board.js?v=board-editor-random-20260612"></script>
-<script src="mcts.js?v=game-log-nav-20260614"></script>
-<script src="controls.js?v=play-ponder-20260615"></script>
+<script src="mcts.js?v=no-wdl-net-20260615"></script>
+<script src="controls.js?v=sims-limit-20260615"></script>
 <script src="auth.js?v=user-sessions-20260610"></script>
-<script src="app.js?v=play-ponder-20260615"></script>
+<script src="app.js?v=analysis-bar-fit-20260615"></script>
 </body>
 </html>
