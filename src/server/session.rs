@@ -394,6 +394,19 @@ impl<G: Game + 'static> GameSession<G> {
         }
     }
 
+    fn action_log_with_cursors(&self) -> (Vec<String>, Vec<usize>) {
+        let mut action_log = Vec::new();
+        let mut action_log_cursors = Vec::new();
+        for (i, entry) in self.history.iter().enumerate() {
+            if entry.label.is_empty() {
+                continue;
+            }
+            action_log.push(entry.label.clone());
+            action_log_cursors.push(i + 1);
+        }
+        (action_log, action_log_cursors)
+    }
+
     /// Build a GameState server message for the current state (public for live push).
     pub fn state_msg(&self) -> ServerMsg {
         let state = self.search.state();
@@ -425,11 +438,7 @@ impl<G: Game + 'static> GameSession<G> {
             None
         };
 
-        let action_log: Vec<String> = self.history[..self.cursor]
-            .iter()
-            .filter(|e| !e.label.is_empty())
-            .map(|e| e.label.clone())
-            .collect();
+        let (action_log, action_log_cursors) = self.action_log_with_cursors();
 
         ServerMsg::GameState {
             state: self.presenter.serialize_state(state),
@@ -440,6 +449,8 @@ impl<G: Game + 'static> GameSession<G> {
             is_terminal,
             result,
             action_log,
+            history_cursor: self.cursor,
+            action_log_cursors,
             can_undo: self.cursor > 0,
             can_redo: self.cursor < self.history.len(),
             replay: self.replay.as_ref().map(|replay| ReplayState {
@@ -599,6 +610,7 @@ impl<G: Game + 'static> GameSession<G> {
                     }],
                 }
             }
+            ClientMsg::PauseSearch { .. } => self.pause_search(),
             ClientMsg::GetSnapshot => match self.build_snapshot() {
                 Some(snap) => {
                     let labels = self.edge_labels(&snap.edges);
@@ -710,34 +722,10 @@ impl<G: Game + 'static> GameSession<G> {
                     }]
                 }
             }
-            ClientMsg::SetLogCursor { index } => {
-                // Map log entry index (labeled entries only) to history cursor.
-                let mut labeled = 0;
-                let mut target_cursor = 0;
-                for (i, entry) in self.history.iter().enumerate() {
-                    if !entry.label.is_empty() {
-                        if labeled == index {
-                            // Set cursor to just after this entry.
-                            target_cursor = i + 1;
-                            break;
-                        }
-                        labeled += 1;
-                    }
-                }
-                if target_cursor <= self.history.len() {
-                    self.cursor = target_cursor;
-                    let state = if target_cursor > 0 {
-                        self.history[target_cursor - 1]
-                            .next_state
-                            .clone()
-                            .unwrap_or_else(|| self.history[target_cursor - 1].state.clone())
-                    } else {
-                        self.history[0].state.clone()
-                    };
-                    self.search.reset(state);
-                }
-                vec![self.state_msg()]
-            }
+            ClientMsg::SetLogCursor { cursor } => match self.set_cursor(cursor) {
+                Ok(()) => vec![self.state_msg()],
+                Err(message) => vec![ServerMsg::Error { message }],
+            },
             ClientMsg::SetReplayCursor { cursor } => {
                 if self.replay.is_none() {
                     return vec![ServerMsg::Error {
@@ -1097,6 +1085,23 @@ impl<G: Game + 'static> GameSession<G> {
         self.search.cancel_search();
     }
 
+    /// Cancel an in-progress analysis search and return the partial snapshot.
+    pub fn pause_search(&mut self) -> Vec<ServerMsg> {
+        self.search.cancel_search();
+        match self.build_snapshot() {
+            Some(snap) => {
+                let labels = self.edge_labels(&snap.edges);
+                vec![ServerMsg::Snapshot {
+                    snapshot: snap,
+                    action_labels: labels,
+                }]
+            }
+            None => vec![ServerMsg::Error {
+                message: "No search is running".into(),
+            }],
+        }
+    }
+
     /// Update the MCTS simulation budget.
     pub fn set_num_simulations(&mut self, n: u32) {
         self.search.set_num_simulations(n);
@@ -1110,7 +1115,7 @@ impl<G: Game + 'static> GameSession<G> {
     fn set_cursor(&mut self, cursor: usize) -> Result<(), String> {
         if cursor > self.history.len() {
             return Err(format!(
-                "Replay cursor {cursor} is past the end of the game ({})",
+                "History cursor {cursor} is past the end of the game ({})",
                 self.history.len()
             ));
         }
@@ -1347,7 +1352,7 @@ mod tests {
     }
 
     impl Game for TestGame {
-        const NUM_ACTIONS: usize = 1;
+        const NUM_ACTIONS: usize = 2;
 
         fn status(&self) -> Status {
             if self.moves >= 2 {
@@ -1360,11 +1365,12 @@ mod tests {
         fn legal_actions(&self, buf: &mut Vec<usize>) {
             if !matches!(self.status(), Status::Terminal(_)) {
                 buf.push(0);
+                buf.push(1);
             }
         }
 
         fn apply_action(&mut self, action: usize) {
-            assert_eq!(action, 0);
+            assert!(action < Self::NUM_ACTIONS);
             self.moves += 1;
         }
     }
@@ -1499,10 +1505,9 @@ mod tests {
 
     #[test]
     fn search_budget_protocol_accepts_new_and_legacy_messages() {
-        let run_search: ClientMsg = serde_json::from_str(
-            r#"{"type":"RunSearch","budget":{"mode":"pv_depth","value":8}}"#,
-        )
-        .expect("new RunSearch message");
+        let run_search: ClientMsg =
+            serde_json::from_str(r#"{"type":"RunSearch","budget":{"mode":"pv_depth","value":8}}"#)
+                .expect("new RunSearch message");
         match run_search {
             ClientMsg::RunSearch { budget, target } => {
                 assert_eq!(budget, SearchBudget::pv_depth(8));
@@ -1511,9 +1516,8 @@ mod tests {
             other => panic!("expected RunSearch, got {other:?}"),
         }
 
-        let legacy_run_sims: ClientMsg =
-            serde_json::from_str(r#"{"type":"RunSims","count":7}"#)
-                .expect("legacy RunSims message");
+        let legacy_run_sims: ClientMsg = serde_json::from_str(r#"{"type":"RunSims","count":7}"#)
+            .expect("legacy RunSims message");
         match legacy_run_sims {
             ClientMsg::RunSims { count, target } => {
                 assert_eq!(count, 7);
@@ -1535,6 +1539,128 @@ mod tests {
             }
             other => panic!("expected BotMove, got {other:?}"),
         }
+
+        let pause_search: ClientMsg =
+            serde_json::from_str(r#"{"type":"PauseSearch"}"#).expect("pause search message");
+        match pause_search {
+            ClientMsg::PauseSearch { target } => assert_eq!(target, None),
+            other => panic!("expected PauseSearch, got {other:?}"),
+        }
+
+        let pause_replay: ClientMsg =
+            serde_json::from_str(r#"{"type":"PauseSearch","target":"replay"}"#)
+                .expect("targeted pause search message");
+        match pause_replay {
+            ClientMsg::PauseSearch { target } => {
+                assert_eq!(target, Some(super::super::protocol::ViewTarget::Replay));
+            }
+            other => panic!("expected PauseSearch, got {other:?}"),
+        }
+
+        let set_log_cursor: ClientMsg =
+            serde_json::from_str(r#"{"type":"SetLogCursor","cursor":1}"#)
+                .expect("raw log cursor message");
+        match set_log_cursor {
+            ClientMsg::SetLogCursor { cursor } => assert_eq!(cursor, 1),
+            other => panic!("expected SetLogCursor, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_log_cursor_browses_full_history_without_truncating() {
+        let mut session = test_session();
+        session.handle(ClientMsg::PlayAction { action: 0 });
+        session.handle(ClientMsg::PlayAction { action: 0 });
+
+        match session
+            .handle(ClientMsg::SetLogCursor { cursor: 1 })
+            .as_slice()
+        {
+            [ServerMsg::GameState {
+                state,
+                action_log,
+                history_cursor,
+                action_log_cursors,
+                can_redo,
+                ..
+            }] => {
+                assert_eq!(state["moves"], serde_json::json!(1));
+                assert_eq!(*history_cursor, 1);
+                assert_eq!(action_log.len(), 2);
+                assert_eq!(action_log_cursors, &vec![1, 2]);
+                assert!(*can_redo);
+            }
+            other => panic!("expected browsed GameState, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn playing_different_action_from_history_replaces_future_branch() {
+        let mut session = test_session();
+        session.handle(ClientMsg::PlayAction { action: 0 });
+        session.handle(ClientMsg::PlayAction { action: 0 });
+        session.handle(ClientMsg::SetLogCursor { cursor: 1 });
+
+        match session.handle(ClientMsg::PlayAction { action: 1 }).as_slice() {
+            [ServerMsg::GameState {
+                state,
+                action_log,
+                history_cursor,
+                action_log_cursors,
+                can_redo,
+                ..
+            }] => {
+                assert_eq!(state["moves"], serde_json::json!(2));
+                assert_eq!(*history_cursor, 2);
+                assert_eq!(action_log.len(), 2);
+                assert!(action_log[1].contains("Action 1"));
+                assert_eq!(action_log_cursors, &vec![1, 2]);
+                assert!(!*can_redo);
+            }
+            other => panic!("expected branched GameState, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pause_search_returns_partial_snapshot_without_clearing_tree() {
+        let mut session = test_session();
+        session
+            .begin_search(&ClientMsg::RunSearch {
+                budget: SearchBudget::simulations(10),
+                target: None,
+            })
+            .expect("search starts");
+
+        for _ in 0..20 {
+            if session.root_visits() > 0 {
+                break;
+            }
+            let _ = session.search_tick();
+        }
+        let visits_before_pause = session.root_visits();
+        assert!(
+            visits_before_pause > 0,
+            "test search should accumulate visits before pause"
+        );
+
+        match session.pause_search().as_slice() {
+            [ServerMsg::Snapshot { snapshot, .. }] => {
+                assert_eq!(snapshot.total_simulations, visits_before_pause);
+            }
+            other => panic!("expected partial snapshot, got {other:?}"),
+        }
+
+        session
+            .begin_search(&ClientMsg::RunSearch {
+                budget: SearchBudget::simulations(1),
+                target: None,
+            })
+            .expect("search resumes");
+        assert_eq!(
+            session.root_visits(),
+            visits_before_pause,
+            "pause should preserve accumulated search visits"
+        );
     }
 
     #[test]

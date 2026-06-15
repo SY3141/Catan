@@ -12,6 +12,8 @@ class Controls {
     this.lastState = null;
     this.replayMode = false;
     this.autoSearch = document.getElementById('autosearch-toggle').checked;
+    this.searchRunning = false;
+    this.pauseRequested = false;
     this.budgetMode = 'simulations';
     this.budgetValues = {
       simulations: parseInt(document.getElementById('sims-input').value) || 50,
@@ -20,6 +22,7 @@ class Controls {
     this.onNewGame = null;
     this._setBudgetMode(this.budgetMode);
     this._bind();
+    this._updateSearchButtons();
     // Tell the server our initial auto-search state.
     if (this.autoSearch) this._syncAutoSearch();
   }
@@ -92,6 +95,38 @@ class Controls {
     });
   }
 
+  _setSearchRunning(running) {
+    this.searchRunning = !!running;
+    this.session.setSearchInterruptMode?.(this.searchRunning);
+    this._updateSearchButtons();
+  }
+
+  _finishSearch() {
+    this._setSearchRunning(false);
+    this.pauseRequested = false;
+  }
+
+  _updateSearchButtons() {
+    const searchBtn = document.getElementById('btn-run-sims');
+    const pauseBtn = document.getElementById('btn-pause-search');
+    if (!searchBtn || !pauseBtn) return;
+    const searchActive = this.searchRunning && !this.pauseRequested;
+    const pauseActive = !searchActive;
+    searchBtn.disabled = false;
+    pauseBtn.disabled = false;
+    this._setSegmentActive(searchBtn, searchActive);
+    this._setSegmentActive(pauseBtn, pauseActive);
+  }
+
+  _setSegmentActive(btn, active) {
+    btn.classList.toggle('bg-accent', active);
+    btn.classList.toggle('text-white', active);
+    btn.classList.toggle('bg-bg-3', !active);
+    btn.classList.toggle('text-gray-300', !active);
+    btn.classList.toggle('hover:bg-bg', !active);
+    btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+  }
+
   /// Called on every GameState update.
   onStateUpdate(msg) {
     this.lastState = msg;
@@ -100,10 +135,12 @@ class Controls {
     if (this.replayMode) {
       this.stopAutoplay();
       this._disableAutoSearch();
+      this._finishSearch();
       this.pendingAutoplay = false;
       return;
     }
     if (!this.autoplay || msg.is_terminal) {
+      if (msg.is_terminal) this._finishSearch();
       this.pendingAutoplay = false;
       return;
     }
@@ -119,7 +156,10 @@ class Controls {
 
   /// Called when a Snapshot arrives (manual search completed).
   onSimsDone(snapshot) {
+    const paused = this.pauseRequested;
+    this._finishSearch();
     if (this.replayMode) return;
+    if (paused) return;
     if (document.getElementById('apply-toggle').checked || this.autoplay) {
       if (snapshot && snapshot.edges && snapshot.edges.length > 0) {
         const best = snapshot.edges.reduce((a, b) => b.visits > a.visits ? b : a);
@@ -130,13 +170,18 @@ class Controls {
   }
 
   /// Called when BotMove completes.
-  onBotDone() {}
+  onBotDone() {
+    this._finishSearch();
+  }
 
   /// Called on server Error.
-  onSearchError() {}
+  onSearchError() {
+    this._finishSearch();
+  }
 
   onGameOver() {
     this.stopAutoplay();
+    this._finishSearch();
   }
 
   runSearch() {
@@ -144,11 +189,36 @@ class Controls {
   }
 
   _runSims() {
+    if (this.searchRunning) return;
     this.session.send({
       type: 'RunSearch',
       budget: this._currentBudget(),
       target: this._searchTarget(),
     });
+    this.onSearchStarted();
+  }
+
+  pauseSearch() {
+    if (!this.searchRunning || this.pauseRequested) return;
+    this.pauseRequested = true;
+    this._updateSearchButtons();
+    this.session.send({
+      type: 'PauseSearch',
+      target: this._searchTarget(),
+    });
+  }
+
+  onSearchStarted() {
+    this.pauseRequested = false;
+    this._setSearchRunning(true);
+  }
+
+  onSearchProgress() {
+    if (this.searchRunning) this._updateSearchButtons();
+  }
+
+  isPausePending() {
+    return this.pauseRequested;
   }
 
   _searchTarget() {
@@ -198,6 +268,10 @@ class Controls {
 
     document.getElementById('btn-run-sims').addEventListener('click', () => {
       this._runSims();
+    });
+
+    document.getElementById('btn-pause-search').addEventListener('click', () => {
+      this.pauseSearch();
     });
 
     document.getElementById('autoplay-toggle').addEventListener('change', (e) => {

@@ -21,6 +21,7 @@ use axum::{
     Router,
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
 };
+use futures_util::FutureExt;
 use tokio::sync::{Mutex, mpsc};
 use tower_http::services::ServeDir;
 
@@ -34,6 +35,7 @@ pub use auth::ClerkAuth;
 
 /// Send a progress snapshot every N simulations.
 const PROGRESS_INTERVAL: u32 = 100;
+const SEARCH_INTERRUPT_INTERVAL: u32 = 8;
 const BOARD_FINGERPRINT_RETRIES: usize = 64;
 
 #[derive(Clone)]
@@ -667,9 +669,18 @@ pub async fn run_search<G: Game + 'static>(
         Err(msgs) => Ok(msgs),
         Ok(active_budget) => {
             let mut last_progress = 0;
+            let mut ticks_since_interrupt_check = 0;
             let result = loop {
                 if let Some(result) = session.search_tick() {
                     break result;
+                }
+                ticks_since_interrupt_check += 1;
+                if ticks_since_interrupt_check >= SEARCH_INTERRUPT_INTERVAL {
+                    ticks_since_interrupt_check = 0;
+                    tokio::task::yield_now().await;
+                    if let Some(msgs) = handle_search_interrupt(socket, session, msg).await? {
+                        return Ok(msgs);
+                    }
                 }
                 if let Some((snap, labels)) = session.snapshot_with_labels() {
                     if snap.total_simulations >= last_progress + PROGRESS_INTERVAL {
@@ -687,12 +698,83 @@ pub async fn run_search<G: Game + 'static>(
                         if let Some(subtree_msg) = session.explore_subtree_msg() {
                             let _ = send_msg(socket, &subtree_msg).await;
                         }
+                        if let Some(msgs) = handle_search_interrupt(socket, session, msg).await? {
+                            return Ok(msgs);
+                        }
                     }
                 }
             };
             Ok(session.finish_search(msg, result))
         }
     }
+}
+
+async fn handle_search_interrupt<G: Game + 'static>(
+    socket: &mut WebSocket,
+    session: &mut GameSession<G>,
+    active_msg: &ClientMsg,
+) -> Result<Option<Vec<ServerMsg>>, ()> {
+    let Some(inbound) = socket.recv().now_or_never() else {
+        return Ok(None);
+    };
+    let Some(inbound) = inbound else {
+        return Err(());
+    };
+    let ws_msg = inbound.map_err(|_| ())?;
+    let text = match ws_msg {
+        Message::Text(text) => text,
+        Message::Close(_) => return Err(()),
+        _ => return Ok(None),
+    };
+
+    let msg: ClientMsg = match serde_json::from_str(&text) {
+        Ok(msg) => msg,
+        Err(e) => {
+            send_msg(
+                socket,
+                &ServerMsg::Error {
+                    message: format!("Invalid message: {e}"),
+                },
+            )
+            .await?;
+            return Ok(None);
+        }
+    };
+
+    if !matches!(msg, ClientMsg::PauseSearch { .. }) {
+        send_msg(
+            socket,
+            &ServerMsg::Error {
+                message: "Search is running; pause before sending another command".into(),
+            },
+        )
+        .await?;
+        return Ok(None);
+    }
+
+    if matches!(active_msg, ClientMsg::BotMove { .. }) {
+        send_msg(
+            socket,
+            &ServerMsg::Error {
+                message: "Bot moves cannot be paused".into(),
+            },
+        )
+        .await?;
+        return Ok(None);
+    }
+
+    if client_msg_target(&msg) != client_msg_target(active_msg) {
+        send_msg(
+            socket,
+            &ServerMsg::Error {
+                message: "Pause target does not match the active search".into(),
+            },
+        )
+        .await?;
+        return Ok(None);
+    }
+
+    Ok(Some(session.pause_search()))
 }
 
 async fn handle_socket<G: Game + 'static>(
@@ -993,9 +1075,7 @@ async fn handle_authenticated_message<G: Game + 'static>(
             msg @ ClientMsg::StartEditedGame { .. } => session.handle(msg),
             msg @ (ClientMsg::BotMove { .. }
             | ClientMsg::RunSims { .. }
-            | ClientMsg::RunSearch { .. }) => {
-                run_search(socket, &mut session, &msg).await?
-            }
+            | ClientMsg::RunSearch { .. }) => run_search(socket, &mut session, &msg).await?,
             msg => session.handle(msg),
         };
         if !was_terminal && responses_include_terminal_game_state(&responses) {
@@ -1043,6 +1123,7 @@ fn client_msg_target(msg: &ClientMsg) -> ViewTarget {
         ClientMsg::LoadReplay { .. } | ClientMsg::SetReplayCursor { .. } => ViewTarget::Replay,
         ClientMsg::RunSims { target, .. }
         | ClientMsg::RunSearch { target, .. }
+        | ClientMsg::PauseSearch { target, .. }
         | ClientMsg::ExploreSubtree { target, .. } => target.unwrap_or(ViewTarget::Analysis),
         _ => ViewTarget::Analysis,
     }
@@ -1082,7 +1163,9 @@ async fn handle_replay_message<G: Game + 'static>(
                 }]),
             }
         }
-        msg @ (ClientMsg::SetReplayCursor { .. } | ClientMsg::ExploreSubtree { .. }) => {
+        msg @ (ClientMsg::SetReplayCursor { .. }
+        | ClientMsg::PauseSearch { .. }
+        | ClientMsg::ExploreSubtree { .. }) => {
             let mut replay_session = user_session.replay_session.lock().await;
             match replay_session.as_mut() {
                 Some(session) => Ok(session.handle(msg)),
@@ -1365,6 +1448,16 @@ mod tests {
                 target: Some(ViewTarget::Replay),
             }),
             ViewTarget::Replay
+        );
+        assert_eq!(
+            client_msg_target(&super::ClientMsg::PauseSearch {
+                target: Some(ViewTarget::Replay),
+            }),
+            ViewTarget::Replay
+        );
+        assert_eq!(
+            client_msg_target(&super::ClientMsg::PauseSearch { target: None }),
+            ViewTarget::Analysis
         );
         assert_eq!(
             client_msg_target(&super::ClientMsg::ExploreSubtree {

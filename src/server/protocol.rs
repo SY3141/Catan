@@ -121,6 +121,8 @@ pub enum ClientMsg {
         budget: SearchBudget,
         target: Option<ViewTarget>,
     },
+    /// Stop an in-progress analysis search, preserving partial results.
+    PauseSearch { target: Option<ViewTarget> },
     /// Request current search snapshot.
     GetSnapshot,
     /// Explore a subtree by following an action path.
@@ -146,8 +148,8 @@ pub enum ClientMsg {
     Undo,
     /// Redo previously undone action.
     Redo,
-    /// Jump to a specific log entry (0-based index into labeled entries).
-    SetLogCursor { index: usize },
+    /// Jump to a raw history cursor (0..=history.len()) from a log entry.
+    SetLogCursor { cursor: usize },
     /// Configure per-player settings.
     SetConfig { player: u8, simulations: u32 },
     /// Enable/disable continuous background search with a search budget.
@@ -173,6 +175,8 @@ pub enum ServerMsg {
         is_terminal: bool,
         result: Option<String>,
         action_log: Vec<String>,
+        history_cursor: usize,
+        action_log_cursors: Vec<usize>,
         can_undo: bool,
         can_redo: bool,
         replay: Option<ReplayState>,

@@ -10,6 +10,7 @@ class Session {
     this.authenticated = false;
     this.queue = [];
     this.shouldReconnect = false;
+    this.deferDuringSearch = false;
     this.getAuthToken = options.getAuthToken || null;
     this.anonymousSessionId = options.anonymousSessionId || this._loadAnonymousSessionId();
   }
@@ -77,6 +78,8 @@ class Session {
         this.authenticated = false;
         this.ws = null;
       }
+      const handler = this.handlers.Disconnected;
+      if (handler) handler({ type: 'Disconnected' });
       if (shouldReconnect) {
         setTimeout(() => this.connect(), 2000);
       }
@@ -89,6 +92,19 @@ class Session {
 
   send(msg) {
     const json = JSON.stringify(msg);
+    if (this.deferDuringSearch && msg.type !== 'PauseSearch') {
+      this.queue.push(json);
+      return;
+    }
+    this._sendOrQueue(json);
+  }
+
+  setSearchInterruptMode(enabled) {
+    this.deferDuringSearch = !!enabled;
+    if (!this.deferDuringSearch) this._flushQueue();
+  }
+
+  _sendOrQueue(json) {
     if (this.connected && this.authenticated && this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(json);
     } else {
@@ -96,10 +112,22 @@ class Session {
     }
   }
 
+  _flushQueue() {
+    if (!this.connected || !this.authenticated || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    const queued = this.queue;
+    this.queue = [];
+    for (const json of queued) {
+      this.ws.send(json);
+    }
+  }
+
   disconnect() {
     this.shouldReconnect = false;
     this.connected = false;
     this.authenticated = false;
+    this.deferDuringSearch = false;
     this.queue = [];
     if (this.ws) {
       this.ws.close();

@@ -103,6 +103,32 @@ function scheduleBoardChromePlacement() {
   requestAnimationFrame(updateBoardChromePlacement);
 }
 
+function logHistoryCursor(msg) {
+  if (Number.isFinite(msg?.history_cursor)) return msg.history_cursor;
+  if (Number.isFinite(msg?.replay?.cursor)) return msg.replay.cursor;
+  return Array.isArray(msg?.action_log) ? msg.action_log.length : 0;
+}
+
+function actionLogCursors(msg) {
+  if (Array.isArray(msg?.action_log_cursors)) return msg.action_log_cursors;
+  const entries = Array.isArray(msg?.action_log) ? msg.action_log : [];
+  return entries.map((_, i) => i + 1);
+}
+
+function activeActionLogLength(msg) {
+  const cursors = actionLogCursors(msg);
+  const cursor = logHistoryCursor(msg);
+  let active = 0;
+  while (active < cursors.length && cursors[active] <= cursor) {
+    active++;
+  }
+  return active;
+}
+
+function activeActionLogIndex(msg) {
+  return activeActionLogLength(msg) - 1;
+}
+
 // ── Message handlers ─────────────────────────────────────────────────
 
 session.on('GameState', (msg) => {
@@ -205,11 +231,17 @@ function renderGameState(msg) {
   // Game log
   const logView = document.getElementById('log-view');
   const wasAtBottom = logView.scrollHeight - logView.scrollTop - logView.clientHeight < 8;
+  const previousScrollTop = logView.scrollTop;
+  const cursors = actionLogCursors(msg);
+  const activeLogIndex = activeActionLogIndex(msg);
   logView.innerHTML = '';
   if (msg.action_log) {
     for (let i = 0; i < msg.action_log.length; i++) {
       const line = document.createElement('div');
-      line.className = 'py-0.5';
+      const active = i === activeLogIndex;
+      line.className = active
+        ? 'py-0.5 px-1 rounded bg-bg-3 text-gray-100'
+        : 'py-0.5 px-1 rounded hover:bg-bg-3';
       const text = msg.action_log[i];
       if (text.startsWith('P1:')) {
         line.style.color = PLAYER_COLORS[0];
@@ -225,10 +257,11 @@ function renderGameState(msg) {
       line.addEventListener('click', () => {
         controls.stopAutoplay();
         controls._disableAutoSearch();
+        const cursor = cursors[i] ?? i + 1;
         if (msg.replay) {
-          session.send({ type: 'SetReplayCursor', cursor: i + 1 });
+          session.send({ type: 'SetReplayCursor', cursor });
         } else {
-          session.send({ type: 'SetLogCursor', index: i });
+          session.send({ type: 'SetLogCursor', cursor });
         }
       });
       logView.appendChild(line);
@@ -243,6 +276,8 @@ function renderGameState(msg) {
     }
     if (wasAtBottom) {
       logView.scrollTop = logView.scrollHeight;
+    } else {
+      logView.scrollTop = previousScrollTop;
     }
   }
 
@@ -276,7 +311,7 @@ function showLegalActionPreview(action) {
 
 function updateRollBadge(msg, state, viewKey) {
   const entries = msg.action_log || [];
-  const currentLength = entries.length;
+  const currentLength = activeActionLogLength(msg);
   const currentHands = frameHands(state);
   const previousLength = lastActionLogLength[viewKey];
 
@@ -298,7 +333,7 @@ function updateRollBadge(msg, state, viewKey) {
     return;
   }
 
-  const newEntries = entries.slice(previousLength);
+  const newEntries = entries.slice(previousLength, currentLength);
   const handGained = hasPositiveHandGain(previousFrameHands[viewKey], currentHands);
   for (let i = newEntries.length - 1; i >= 0; i--) {
     const total = parseRollTotal(newEntries[i]);
@@ -422,6 +457,8 @@ session.on('Subtree', (msg) => {
 });
 
 session.on('SearchProgress', (msg) => {
+  controls.onSearchProgress();
+  if (controls.isPausePending()) return;
   mctsPanel.updateSnapshot(msg.snapshot, msg.action_labels, currentState?.current_player ?? 0);
   mctsPanel.showProgress(msg.snapshot, msg.budget, msg.sims_total);
   updateSearchHighlights(msg.snapshot, msg.action_labels);
@@ -443,6 +480,10 @@ session.on('Error', (msg) => {
   controls.onSearchError();
   setReplayStatus(msg.message);
   console.error('Server error:', msg.message);
+});
+
+session.on('Disconnected', () => {
+  controls.onSearchError();
 });
 
 // ── View tabs / replay list ────────────────────────────────────────────────
