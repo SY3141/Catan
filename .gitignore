@@ -4,7 +4,6 @@ rust-analyzer.toml
 target/
 perf.*
 logs/
-checkpoints/
 reference/
 tasklist.md
 features.md
