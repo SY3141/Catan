@@ -7,6 +7,7 @@ use serde_json::Value;
 #[derive(Debug, Serialize)]
 pub struct SearchSnapshot {
     pub total_simulations: u32,
+    pub fresh_simulations: u32,
     pub pv_depth: u32,
     pub root_wdl: [f32; 3],
     pub network_value: f32,
@@ -18,6 +19,7 @@ pub struct SearchSnapshot {
 pub struct EdgeSnapshot {
     pub action: usize,
     pub visits: u32,
+    pub fresh_visits: u32,
     pub q: Option<f32>,
     pub improved_policy: f32,
     pub depth: Option<u32>,
@@ -63,7 +65,9 @@ pub enum ViewTarget {
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum SearchBudget {
-    Simulations { value: u32 },
+    Simulations {
+        value: u32,
+    },
     PvDepth {
         value: u32,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -154,6 +158,8 @@ pub enum ClientMsg {
         enabled: bool,
         delay_ms: Option<u64>,
     },
+    /// Configure singleplayer mode. `None` disables singleplayer-specific UI rules.
+    SetSingleplayer { human_player: Option<u8> },
     /// Poll external state (e.g. colonist.io CDP). Default: returns current state.
     PollState,
     /// Request current game state.

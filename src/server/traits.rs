@@ -14,6 +14,14 @@ pub trait GamePresenter<G: Game>: Send + Sync {
     /// Human-readable label for an action in the given state (includes player prefix).
     fn action_label(&self, state: &G, action: usize) -> String;
 
+    /// Legal actions exposed to a singleplayer human.
+    ///
+    /// Defaults to the engine action generator. Games may override this for
+    /// UI-only relaxations that should not affect MCTS/training legal actions.
+    fn human_legal_actions(&self, state: &G, actions: &mut Vec<usize>) {
+        state.legal_actions(actions);
+    }
+
     /// Action description without player prefix (for tree explorer where
     /// the acting player varies by depth).
     fn action_description(&self, state: &G, action: usize) -> String {

@@ -186,11 +186,27 @@ class Controls {
     if (paused) return;
     if (document.getElementById('apply-toggle').checked || this.autoplay) {
       if (snapshot && snapshot.edges && snapshot.edges.length > 0) {
-        const best = snapshot.edges.reduce((a, b) => b.visits > a.visits ? b : a);
+        const best = this._bestSnapshotEdge(snapshot.edges);
         this.pendingAutoplay = this.autoplay;
         this.session.send({ type: 'PlayAction', action: best.action });
       }
     }
+  }
+
+  _bestSnapshotEdge(edges) {
+    const fresh = (edge) => Number.isFinite(edge?.fresh_visits) ? edge.fresh_visits : (edge?.visits ?? 0);
+    const anyFresh = edges.some(edge => fresh(edge) > 0);
+    return edges.reduce((best, edge) => {
+      if (!best) return edge;
+      if (anyFresh) {
+        const edgeFresh = fresh(edge);
+        const bestFresh = fresh(best);
+        if (edgeFresh !== bestFresh) return edgeFresh > bestFresh ? edge : best;
+      }
+      const edgePolicy = edge?.improved_policy ?? 0;
+      const bestPolicy = best?.improved_policy ?? 0;
+      return edgePolicy > bestPolicy ? edge : best;
+    }, null);
   }
 
   /// Called when BotMove completes.
@@ -232,6 +248,18 @@ class Controls {
     if (this.searchRunning && !this.pauseRequested) {
       this.pauseSearch();
     }
+  }
+
+  interruptSearchForCommand(msg) {
+    if (!this.searchRunning || this.pauseRequested) return false;
+    this.pauseRequested = true;
+    this._updateSearchButtons();
+    if (typeof this.session.sendInterrupt === 'function') {
+      this.session.sendInterrupt(msg);
+    } else {
+      this.session.send(msg);
+    }
+    return true;
   }
 
   pauseSearch() {
@@ -279,7 +307,8 @@ class Controls {
     document.getElementById('btn-new-game').addEventListener('click', () => {
       this.stopAutoplay();
       this.pauseBeforeCommand();
-      this.onNewGame?.();
+      const shouldStartNewGame = this.onNewGame?.() !== false;
+      if (!shouldStartNewGame) return;
       this.session.send({ type: 'NewGame', seed: null });
     });
 

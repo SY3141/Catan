@@ -313,6 +313,13 @@ impl GamePresenter<GameState> for CatanPresenter {
         visualize::format_action_desc(ActionId(action as u8), state)
     }
 
+    fn human_legal_actions(&self, state: &GameState, actions: &mut Vec<usize>) {
+        actions.clear();
+        let mut catan_actions = Vec::new();
+        game::action::legal_actions_without_setup_pip_filter(state, &mut catan_actions);
+        actions.extend(catan_actions.iter().map(|a| a.0 as usize));
+    }
+
     fn action_description(&self, state: &GameState, action: usize) -> String {
         visualize::format_action_desc(ActionId(action as u8), state)
     }

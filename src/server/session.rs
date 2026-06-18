@@ -59,6 +59,7 @@ pub struct GameSession<G: Game> {
     last_explore: Option<(Vec<usize>, usize)>,
     replay: Option<ReplayMode>,
     saved_live_log: Option<GameLog>,
+    singleplayer_human_player: Option<usize>,
 }
 
 impl<G: Game + 'static> GameSession<G> {
@@ -110,6 +111,7 @@ impl<G: Game + 'static> GameSession<G> {
             last_explore: None,
             replay: None,
             saved_live_log: None,
+            singleplayer_human_player: None,
         }
     }
 
@@ -146,6 +148,7 @@ impl<G: Game + 'static> GameSession<G> {
             last_explore: None,
             replay: None,
             saved_live_log: None,
+            singleplayer_human_player: None,
         }
     }
 
@@ -668,6 +671,18 @@ impl<G: Game + 'static> GameSession<G> {
                 // Autoplay is handled client-side by sending BotMove in a loop.
                 vec![self.state_msg()]
             }
+            ClientMsg::SetSingleplayer { human_player } => {
+                self.singleplayer_human_player = match human_player {
+                    Some(player) if player < 2 => Some(player as usize),
+                    Some(player) => {
+                        return vec![ServerMsg::Error {
+                            message: format!("Invalid player: {player}"),
+                        }];
+                    }
+                    None => None,
+                };
+                Vec::new()
+            }
             ClientMsg::Undo => {
                 if self.cursor > 0 {
                     // Skip back over chance entries to the previous decision point.
@@ -746,7 +761,12 @@ impl<G: Game + 'static> GameSession<G> {
 
     fn legal_actions(&self) -> Vec<usize> {
         let mut buf = Vec::new();
-        self.search.state().legal_actions(&mut buf);
+        if self.singleplayer_human_player == Some(self.current_player_idx()) {
+            self.presenter
+                .human_legal_actions(self.search.state(), &mut buf);
+        } else {
+            self.search.state().legal_actions(&mut buf);
+        }
         buf
     }
 
@@ -894,6 +914,7 @@ impl<G: Game + 'static> GameSession<G> {
                 sim_cap
             }
         };
+        self.search.start_search();
         ActiveSearchBudget { budget, sims_total }
     }
 
@@ -1040,13 +1061,16 @@ impl<G: Game + 'static> GameSession<G> {
         if tree.is_empty() {
             return None;
         }
-        let root = tree.root();
+        let root = self.search.root_node()?;
         let edges = tree.edges(root);
         let total_sims: u32 = edges.iter().map(|e| e.visits).sum();
+        let fresh_visits = self.search.root_fresh_visits();
+        let fresh_sims = self.search.fresh_root_visits();
 
         let edge_snaps: Vec<EdgeSnapshot> = edges
             .iter()
-            .map(|e| {
+            .enumerate()
+            .map(|(idx, e)| {
                 let (q, depth) = match e.child {
                     Some(child) => (Some(tree.q(child)), Some(compute_pv_depth(tree, child))),
                     None => (None, None),
@@ -1054,6 +1078,7 @@ impl<G: Game + 'static> GameSession<G> {
                 EdgeSnapshot {
                     action: e.action,
                     visits: e.visits,
+                    fresh_visits: fresh_visits.get(idx).copied().unwrap_or(e.visits),
                     q,
                     improved_policy: e.prior, // use prior as improved_policy approximation
                     depth,
@@ -1064,6 +1089,7 @@ impl<G: Game + 'static> GameSession<G> {
         let wdl = tree.wdl(root);
         Some(SearchSnapshot {
             total_simulations: total_sims,
+            fresh_simulations: fresh_sims,
             pv_depth: compute_pv_depth(tree, root),
             root_wdl: [wdl.w, wdl.d, wdl.l],
             network_value: wdl.q(),
@@ -1445,6 +1471,10 @@ mod tests {
         )
     }
 
+    fn finish_search(session: &mut GameSession<TestGame>) {
+        while session.search_tick().is_none() {}
+    }
+
     #[test]
     fn export_current_log_skips_empty_and_uses_visible_prefix() {
         let mut session = test_session();
@@ -1509,20 +1539,14 @@ mod tests {
         let mut session = test_session();
         let active = session
             .begin_search(&ClientMsg::RunSearch {
-                budget: SearchBudget::pv_depth_with_simulations(
-                    99,
-                    PV_DEPTH_SIM_SAFETY_CAP + 1,
-                ),
+                budget: SearchBudget::pv_depth_with_simulations(99, PV_DEPTH_SIM_SAFETY_CAP + 1),
                 target: None,
             })
             .expect("depth search should be accepted");
 
         assert_eq!(
             active.budget,
-            SearchBudget::pv_depth_with_simulations(
-                MAX_PV_DEPTH_BUDGET,
-                PV_DEPTH_SIM_SAFETY_CAP
-            )
+            SearchBudget::pv_depth_with_simulations(MAX_PV_DEPTH_BUDGET, PV_DEPTH_SIM_SAFETY_CAP)
         );
         assert_eq!(active.sims_total, PV_DEPTH_SIM_SAFETY_CAP);
         assert_eq!(
@@ -1620,14 +1644,16 @@ mod tests {
             .handle(ClientMsg::SetLogCursor { cursor: 1 })
             .as_slice()
         {
-            [ServerMsg::GameState {
-                state,
-                action_log,
-                history_cursor,
-                action_log_cursors,
-                can_redo,
-                ..
-            }] => {
+            [
+                ServerMsg::GameState {
+                    state,
+                    action_log,
+                    history_cursor,
+                    action_log_cursors,
+                    can_redo,
+                    ..
+                },
+            ] => {
                 assert_eq!(state["moves"], serde_json::json!(1));
                 assert_eq!(*history_cursor, 1);
                 assert_eq!(action_log.len(), 2);
@@ -1645,15 +1671,20 @@ mod tests {
         session.handle(ClientMsg::PlayAction { action: 0 });
         session.handle(ClientMsg::SetLogCursor { cursor: 1 });
 
-        match session.handle(ClientMsg::PlayAction { action: 1 }).as_slice() {
-            [ServerMsg::GameState {
-                state,
-                action_log,
-                history_cursor,
-                action_log_cursors,
-                can_redo,
-                ..
-            }] => {
+        match session
+            .handle(ClientMsg::PlayAction { action: 1 })
+            .as_slice()
+        {
+            [
+                ServerMsg::GameState {
+                    state,
+                    action_log,
+                    history_cursor,
+                    action_log_cursors,
+                    can_redo,
+                    ..
+                },
+            ] => {
                 assert_eq!(state["moves"], serde_json::json!(2));
                 assert_eq!(*history_cursor, 2);
                 assert_eq!(action_log.len(), 2);
@@ -1690,6 +1721,7 @@ mod tests {
         match session.pause_search().as_slice() {
             [ServerMsg::Snapshot { snapshot, .. }] => {
                 assert_eq!(snapshot.total_simulations, visits_before_pause);
+                assert_eq!(snapshot.fresh_simulations, visits_before_pause);
             }
             other => panic!("expected partial snapshot, got {other:?}"),
         }
@@ -1704,6 +1736,72 @@ mod tests {
             session.root_visits(),
             visits_before_pause,
             "pause should preserve accumulated search visits"
+        );
+        let (snapshot, _) = session
+            .snapshot_with_labels()
+            .expect("snapshot should remain available");
+        assert_eq!(snapshot.total_simulations, visits_before_pause);
+        assert_eq!(
+            snapshot.fresh_simulations, 0,
+            "a new explicit search starts a fresh baseline"
+        );
+    }
+
+    #[test]
+    fn same_root_search_resets_fresh_visit_baseline() {
+        let mut session = test_session();
+        session
+            .begin_search(&ClientMsg::RunSearch {
+                budget: SearchBudget::simulations(5),
+                target: None,
+            })
+            .expect("first search starts");
+        finish_search(&mut session);
+
+        let (first, _) = session
+            .snapshot_with_labels()
+            .expect("first snapshot should exist");
+        assert_eq!(first.total_simulations, 5);
+        assert_eq!(first.fresh_simulations, 5);
+        assert_eq!(
+            first.edges.iter().map(|edge| edge.visits).sum::<u32>(),
+            first.total_simulations
+        );
+        assert_eq!(
+            first
+                .edges
+                .iter()
+                .map(|edge| edge.fresh_visits)
+                .sum::<u32>(),
+            first.fresh_simulations
+        );
+
+        session
+            .begin_search(&ClientMsg::RunSearch {
+                budget: SearchBudget::simulations(3),
+                target: None,
+            })
+            .expect("second search starts");
+        let (baseline, _) = session
+            .snapshot_with_labels()
+            .expect("baseline snapshot should exist");
+        assert_eq!(baseline.total_simulations, 5);
+        assert_eq!(baseline.fresh_simulations, 0);
+        assert!(baseline.edges.iter().all(|edge| edge.fresh_visits == 0));
+
+        finish_search(&mut session);
+        let (second, _) = session
+            .snapshot_with_labels()
+            .expect("second snapshot should exist");
+        assert_eq!(second.total_simulations, 8);
+        assert_eq!(second.fresh_simulations, 3);
+        assert_eq!(
+            second
+                .edges
+                .iter()
+                .map(|edge| edge.fresh_visits)
+                .sum::<u32>(),
+            second.fresh_simulations
         );
     }
 

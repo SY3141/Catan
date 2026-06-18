@@ -21,7 +21,7 @@ tailwind.config = {
   }
 }
 </script>
-<link rel="stylesheet" href="style.css?v=analysis-bar-fit-20260615">
+<link rel="stylesheet" href="style.css?v=resource-cards-centered-20260618">
 <script
   defer
   crossorigin="anonymous"
@@ -99,16 +99,19 @@ tailwind.config = {
 
     <!-- Center: SVG Board + action rail -->
     <div id="board-container" class="flex-1 min-w-0 flex items-stretch gap-2 p-2 overflow-hidden">
-      <aside id="analysis-bar-panel" class="analysis-bar-panel" aria-label="Search value">
-        <div id="analysis-bar-track" class="analysis-bar-track" role="meter" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50">
-          <div id="analysis-bar-p1" class="analysis-bar-fill analysis-bar-p1" style="height:50%"></div>
-          <div id="analysis-bar-p2" class="analysis-bar-fill analysis-bar-p2" style="height:50%"></div>
-          <div class="analysis-bar-midline" aria-hidden="true"></div>
-        </div>
-        <div id="analysis-bar-value" class="analysis-bar-value">50</div>
-      </aside>
       <div id="board-play-area" class="flex-1 min-w-0 min-h-0 flex flex-col">
         <div id="board-shell" class="relative flex-1 min-h-0 w-full">
+          <aside id="analysis-bar-panel" class="analysis-bar-panel" aria-label="Search value">
+            <div id="analysis-bar-track" class="analysis-bar-track" role="meter" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50">
+              <div id="analysis-bar-p1" class="analysis-bar-fill analysis-bar-p1" style="height:50%">
+                <span id="analysis-bar-p1-label" class="analysis-bar-label">50</span>
+              </div>
+              <div id="analysis-bar-p2" class="analysis-bar-fill analysis-bar-p2" style="height:50%">
+                <span id="analysis-bar-p2-label" class="analysis-bar-label">50</span>
+              </div>
+              <div class="analysis-bar-midline" aria-hidden="true"></div>
+            </div>
+          </aside>
           <button id="btn-rotate-left" class="absolute top-0 left-0 z-10 w-8 h-8 flex items-center justify-center bg-bg-3/90 border border-gray-700 text-gray-100 rounded cursor-pointer hover:bg-accent transition-colors" title="Rotate board counterclockwise" aria-label="Rotate board counterclockwise">&#8634;</button>
           <button id="btn-mirror-board" class="absolute top-0 left-1/2 -translate-x-1/2 z-10 w-8 h-8 flex items-center justify-center bg-bg-3/90 border border-gray-700 text-gray-100 rounded cursor-pointer hover:bg-accent transition-colors" title="Mirror board" aria-label="Mirror board">&#8644;</button>
           <button id="btn-rotate-right" class="absolute top-0 right-0 z-10 w-8 h-8 flex items-center justify-center bg-bg-3/90 border border-gray-700 text-gray-100 rounded cursor-pointer hover:bg-accent transition-colors" title="Rotate board clockwise" aria-label="Rotate board clockwise">&#8635;</button>
@@ -116,6 +119,14 @@ tailwind.config = {
             <button id="btn-undo" class="py-1.5 px-3 text-xs bg-bg-3/90 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-default" disabled>Undo</button>
             <button id="btn-redo" class="py-1.5 px-3 text-xs bg-bg-3/90 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-default" disabled>Redo</button>
           </div>
+          <div id="board-resource-legend" class="board-resource-legend" aria-label="Resources">
+            <span class="resource-card board-resource-card lumber" data-resource-index="0">0 Lumber</span>
+            <span class="resource-card board-resource-card brick" data-resource-index="1">0 Brick</span>
+            <span class="resource-card board-resource-card wool" data-resource-index="2">0 Wool</span>
+            <span class="resource-card board-resource-card grain" data-resource-index="3">0 Grain</span>
+            <span class="resource-card board-resource-card ore" data-resource-index="4">0 Ore</span>
+          </div>
+          <div id="resource-animation-layer" class="resource-animation-layer" aria-hidden="true"></div>
           <div id="roll-badge" class="roll-badge hidden absolute right-0 bottom-0 z-10 flex w-[42px] h-[42px] items-center justify-center rounded-lg border border-white/50 bg-bg-3/90 text-white text-xl font-extrabold shadow-lg pointer-events-none" aria-live="polite" aria-label="Roll"></div>
           <svg id="board-svg" class="w-full h-full min-h-0" viewBox="-50 -50 500 500"></svg>
         </div>
@@ -190,7 +201,7 @@ tailwind.config = {
         <span class="w-5 shrink-0 text-right" title="Rank">#</span>
         <span class="w-32 shrink-0" title="Move">Moves</span>
         <span class="flex-1 min-w-0" aria-hidden="true"></span>
-        <span class="w-10 shrink-0 text-right" title="Simulations">Sims</span>
+        <span class="w-16 shrink-0 text-right" title="Fresh / total simulations">Sims</span>
         <span class="w-11 shrink-0 text-right" title="Win rate">WR</span>
         <span class="w-6 shrink-0 text-right" title="Depth">D</span>
       </div>
@@ -211,7 +222,7 @@ tailwind.config = {
       <section class="bg-bg-2 border border-gray-700 rounded p-4">
         <div class="flex items-start justify-between gap-3">
           <div>
-            <h2 class="text-sm font-semibold text-gray-100">You vs HexFish</h2>
+            <h2 id="play-setup-title" class="text-sm font-semibold text-gray-100">You vs HexFish5</h2>
           </div>
           <div class="flex flex-wrap items-center justify-end gap-2">
             <label id="play-difficulty-label" class="flex items-center gap-1.5 text-xs text-gray-300">
@@ -293,10 +304,10 @@ tailwind.config = {
 <div id="svg-tooltip"></div>
 
 <script src="session.js?v=play-options-20260614"></script>
-<script src="board.js?v=board-editor-random-20260612"></script>
-<script src="mcts.js?v=no-wdl-net-20260615"></script>
-<script src="controls.js?v=sims-limit-20260615"></script>
+<script src="board.js?v=resource-production-20260618"></script>
+<script src="mcts.js?v=mcts-rank-colors-20260618"></script>
+<script src="controls.js?v=play-new-game-menu-20260615"></script>
 <script src="auth.js?v=user-sessions-20260610"></script>
-<script src="app.js?v=analysis-bar-fit-20260615"></script>
+<script src="app.js?v=singleplayer-difficulty-20260618"></script>
 </body>
 </html>

@@ -99,6 +99,10 @@ class Session {
     this._sendOrQueue(json);
   }
 
+  sendInterrupt(msg) {
+    this._sendOrQueue(JSON.stringify(msg));
+  }
+
   setSearchInterruptMode(enabled) {
     this.deferDuringSearch = !!enabled;
     if (!this.deferDuringSearch) this._flushQueue();

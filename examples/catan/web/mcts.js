@@ -7,7 +7,8 @@ class MCTSPanel {
     this.analysisBarEl = document.getElementById('analysis-bar-track');
     this.analysisP1El = document.getElementById('analysis-bar-p1');
     this.analysisP2El = document.getElementById('analysis-bar-p2');
-    this.analysisValueEl = document.getElementById('analysis-bar-value');
+    this.analysisP1LabelEl = document.getElementById('analysis-bar-p1-label');
+    this.analysisP2LabelEl = document.getElementById('analysis-bar-p2-label');
     this.treeViewEl = document.getElementById('tree-view');
     this.onExplore = null;
     this.onPreview = null;
@@ -20,7 +21,7 @@ class MCTSPanel {
   // click handlers stable during live search updates.
   updateSnapshot(snapshot, labels, currentPlayer = 0) {
     const pvDepth = snapshot.pv_depth ?? 0;
-    this.simsEl.textContent = `${snapshot.total_simulations} sims - Depth ${pvDepth}`;
+    this.simsEl.textContent = `${this._simSummary(snapshot)} - Depth ${pvDepth}`;
     this._updateAnalysisBar(snapshot.root_wdl);
 
     // Build sorted edge data
@@ -29,15 +30,17 @@ class MCTSPanel {
       label: labels[i] || `Action ${e.action}`,
     }));
 
-    // Sort: visited first by visits descending, then Q as tiebreaker (flipped for P2),
-    // then unvisited by policy
+    // Sort by fresh visits from the current search. Reused total visits remain
+    // visible, but they should not decide the recommended move.
     const qSign = currentPlayer === 0 ? 1 : -1;
     edges.sort((a, b) => {
-      const av = a.visits > 0 ? 1 : 0;
-      const bv = b.visits > 0 ? 1 : 0;
+      const af = this._freshVisits(a);
+      const bf = this._freshVisits(b);
+      const av = af > 0 ? 1 : 0;
+      const bv = bf > 0 ? 1 : 0;
       if (av !== bv) return bv - av;
       if (av && bv) {
-        if (a.visits !== b.visits) return b.visits - a.visits;
+        if (af !== bf) return bf - af;
         const aq = (a.q ?? 0) * qSign;
         const bq = (b.q ?? 0) * qSign;
         return bq - aq;
@@ -86,13 +89,14 @@ class MCTSPanel {
         });
         row.tabIndex = 0;
 
+        const rankColor = this._rankHighlightColor(idx);
         row.innerHTML = `
-          <span data-role="rank" class="w-5 shrink-0 text-right text-gray-500 text-[10px]">${idx + 1}</span>
+          <span data-role="rank" class="w-5 shrink-0 text-right text-gray-500 text-[10px]" style="${rankColor ? `color:${rankColor};font-weight:700` : ''}">${idx + 1}</span>
           <span data-role="label" class="w-32 shrink-0 overflow-hidden text-ellipsis whitespace-nowrap" title="${edge.label}">${edge.label}</span>
           <div class="flex-1 h-3.5 bg-bar rounded-sm relative">
             <div class="h-full rounded-sm transition-[width] duration-150" style="width:${pct}%;background:${qColor}"></div>
           </div>
-          <span data-role="visits" class="w-10 text-right text-gray-500 shrink-0 text-[10px]">${edge.visits}</span>
+          <span data-role="visits" class="w-16 text-right text-gray-500 shrink-0 text-[10px]" title="Fresh / total simulations">${this._visitLabel(edge)}</span>
           <span data-role="q" class="w-11 text-right shrink-0 text-[10px]" style="color:${qColor}">${q != null ? ((q + 1) / 2 * 100).toFixed(0) + '%' : '—'}</span>
           <span data-role="depth" class="w-6 text-right text-gray-500 shrink-0 text-[10px]">${edge.depth || ''}</span>
         `;
@@ -111,8 +115,16 @@ class MCTSPanel {
         const visits = row.querySelector('[data-role="visits"]');
         const qEl = row.querySelector('[data-role="q"]');
         const depth = row.querySelector('[data-role="depth"]');
-        if (rank) rank.textContent = `${idx + 1}`;
-        if (visits) visits.textContent = `${edge.visits}`;
+        if (rank) {
+          const rankColor = this._rankHighlightColor(idx);
+          rank.textContent = `${idx + 1}`;
+          rank.style.color = rankColor || '';
+          rank.style.fontWeight = rankColor ? '700' : '';
+        }
+        if (visits) {
+          visits.textContent = this._visitLabel(edge);
+          visits.title = 'Fresh / total simulations';
+        }
         if (qEl) {
           qEl.textContent = q != null ? ((q + 1) / 2 * 100).toFixed(0) + '%' : '—';
           qEl.style.color = qColor;
@@ -179,10 +191,11 @@ class MCTSPanel {
   showProgress(snapshot, budget, simsTotal) {
     if (budget && budget.mode === 'pv_depth') {
       const depth = snapshot?.pv_depth ?? 0;
-      this.simsEl.textContent = `Depth ${depth} / ${budget.value} - ${snapshot.total_simulations} sims`;
+      const done = snapshot?.fresh_simulations ?? snapshot?.total_simulations ?? 0;
+      this.simsEl.textContent = `Depth ${depth} / ${budget.value} - ${done} sims`;
       return;
     }
-    const done = snapshot?.total_simulations ?? 0;
+    const done = snapshot?.fresh_simulations ?? snapshot?.total_simulations ?? 0;
     const total = budget?.value ?? simsTotal;
     this.simsEl.textContent = `${done} / ${total} sims`;
   }
@@ -197,7 +210,7 @@ class MCTSPanel {
   }
 
   _updateAnalysisBar(rootWdl) {
-    if (!this.analysisBarEl || !this.analysisP1El || !this.analysisP2El || !this.analysisValueEl) return;
+    if (!this.analysisBarEl || !this.analysisP1El || !this.analysisP2El) return;
     let [w, d, l] = Array.isArray(rootWdl) ? rootWdl : [0, 1, 0];
     w = this._clamp01(w);
     d = this._clamp01(d);
@@ -215,20 +228,21 @@ class MCTSPanel {
     }
 
     const p1Share = this._clamp01(w + d / 2);
-    const p2Share = 1 - p1Share;
-    const p1Percent = p1Share * 100;
-    const p2Percent = p2Share * 100;
     const value = Math.round(p1Share * 100);
+    const p2Value = 100 - value;
+    const p1Percent = value;
+    const p2Percent = p2Value;
     const wPct = Math.round(w * 100);
     const dPct = Math.round(d * 100);
     const lPct = Math.round(l * 100);
 
-    this.analysisP1El.style.height = `${p1Percent.toFixed(2)}%`;
-    this.analysisP2El.style.height = `${p2Percent.toFixed(2)}%`;
-    this.analysisValueEl.textContent = `${value}`;
+    this.analysisP1El.style.height = `${p1Percent}%`;
+    this.analysisP2El.style.height = `${p2Percent}%`;
+    if (this.analysisP1LabelEl) this.analysisP1LabelEl.textContent = `${value}`;
+    if (this.analysisP2LabelEl) this.analysisP2LabelEl.textContent = `${p2Value}`;
     this.analysisBarEl.setAttribute('aria-valuenow', `${value}`);
-    this.analysisBarEl.setAttribute('aria-valuetext', `P1 ${value}, win ${wPct}%, draw ${dPct}%, loss ${lPct}%`);
-    this.analysisBarEl.title = `P1 ${value}; win ${wPct}%, draw ${dPct}%, loss ${lPct}%`;
+    this.analysisBarEl.setAttribute('aria-valuetext', `P1 ${value} percent, P2 ${p2Value} percent, P1 win ${wPct} percent, draw ${dPct} percent, P2 win ${lPct} percent`);
+    this.analysisBarEl.title = `P1 ${value} percent, P2 ${p2Value} percent; P1 win ${wPct} percent, draw ${dPct} percent, P2 win ${lPct} percent`;
   }
 
   _renderNode(node, depth, isLast = true, path = [], prefix = '') {
@@ -280,11 +294,35 @@ class MCTSPanel {
   }
 
   // Color Q values: green for positive (good for P1), red for negative.
+  _rankHighlightColor(index) {
+    return ['#1b8a2a', '#1a6fc4', '#b82040'][index] || '';
+  }
+
   _qColor(q) {
     if (q > 0.1) return '#4caf50';
     if (q > 0) return '#8bc34a';
     if (q > -0.1) return '#ff9800';
     return '#f44336';
+  }
+
+  _freshVisits(edge) {
+    return Number.isFinite(edge?.fresh_visits) ? edge.fresh_visits : (edge?.visits ?? 0);
+  }
+
+  _totalVisits(edge) {
+    return Number.isFinite(edge?.visits) ? edge.visits : this._freshVisits(edge);
+  }
+
+  _visitLabel(edge) {
+    const fresh = this._freshVisits(edge);
+    const total = this._totalVisits(edge);
+    return total > fresh ? `${fresh}/${total}` : `${fresh}`;
+  }
+
+  _simSummary(snapshot) {
+    const fresh = snapshot?.fresh_simulations ?? snapshot?.total_simulations ?? 0;
+    const total = snapshot?.total_simulations ?? fresh;
+    return total > fresh ? `${fresh} fresh / ${total} total sims` : `${fresh} sims`;
   }
 
   _clamp01(value) {

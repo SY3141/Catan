@@ -9,6 +9,13 @@ const mctsPanel = new MCTSPanel();
 const controls = new Controls(session);
 
 const RESOURCE_NAMES = ['lumber', 'brick', 'wool', 'grain', 'ore'];
+const TERRAIN_RESOURCE_INDEX = {
+  forest: 0,
+  hills: 1,
+  pasture: 2,
+  fields: 3,
+  mountains: 4,
+};
 const DEV_CARD_NAMES = ['Knight', 'VP', 'Road Building', 'Year of Plenty', 'Monopoly'];
 const DEV_SHORT = ['Kn', 'VP', 'RB', 'YP', 'Mo'];
 const PLAYER_COLORS = ['#4a9eff', '#ff6b6b'];
@@ -17,14 +24,14 @@ const EDITOR_NUMBERS = [2, 3, 4, 5, 6, 8, 9, 10, 11, 12];
 const PLAY_DIFFICULTIES = [
   { level: 1, simulations: 50, depth: 2 },
   { level: 2, simulations: 100, depth: 3 },
-  { level: 3, simulations: 200, depth: 4 },
-  { level: 4, simulations: 400, depth: 5 },
-  { level: 5, simulations: 800, depth: 6 },
-  { level: 6, simulations: 1500, depth: 8 },
-  { level: 7, simulations: 3000, depth: 10 },
-  { level: 8, simulations: 6000, depth: 14 },
-  { level: 9, simulations: 12000, depth: 20 },
-  { level: 10, simulations: 25000, depth: 30 },
+  { level: 3, simulations: 200, depth: 5 },
+  { level: 4, simulations: 350, depth: 7 },
+  { level: 5, simulations: 550, depth: 9 },
+  { level: 6, simulations: 800, depth: 12 },
+  { level: 7, simulations: 1200, depth: 15 },
+  { level: 8, simulations: 1700, depth: 18 },
+  { level: 9, simulations: 2300, depth: 21 },
+  { level: 10, simulations: 3000, depth: 25 },
 ];
 const EDITOR_TERRAIN_BAG = [
   'forest', 'forest', 'forest', 'forest',
@@ -72,27 +79,43 @@ let playMode = {
   humanPlayer: 0,
   botThinking: false,
   forcedMoveKey: null,
+  pendingHumanMove: false,
 };
+let serverSingleplayerHumanPlayer = undefined;
+
+function setServerSingleplayerHumanPlayer(player) {
+  const humanPlayer = player == null ? null : player;
+  if (serverSingleplayerHumanPlayer === humanPlayer) return;
+  serverSingleplayerHumanPlayer = humanPlayer;
+  session.send({ type: 'SetSingleplayer', human_player: humanPlayer });
+}
 
 controls.onNewGame = () => {
-  if (activeView === 'play' && playMode.active) {
+  if (activeView === 'play') {
     pendingNewGameSearch = false;
-    playMode.botThinking = false;
-    playMode.forcedMoveKey = null;
-  } else {
-    pendingNewGameSearch = true;
     playMode.active = false;
     playMode.botThinking = false;
     playMode.forcedMoveKey = null;
+    playMode.pendingHumanMove = false;
+    setServerSingleplayerHumanPlayer(null);
+    mctsPanel.clear();
+    board.clearSearchHighlights();
+    showPlaySetupView();
+    return false;
   }
+  pendingNewGameSearch = true;
+  playMode.active = false;
+  playMode.botThinking = false;
+  playMode.forcedMoveKey = null;
+  playMode.pendingHumanMove = false;
   mctsPanel.clear();
   board.clearSearchHighlights();
+  return true;
 };
 
 function updateBoardChromePlacement() {
   const shell = document.getElementById('board-shell');
   const svg = document.getElementById('board-svg');
-  const analysisBar = document.getElementById('analysis-bar-panel');
   if (!shell || !svg) return;
 
   const shellRect = shell.getBoundingClientRect();
@@ -128,10 +151,6 @@ function updateBoardChromePlacement() {
   shell.style.setProperty('--board-content-bottom', `${bottom}px`);
   shell.style.setProperty('--board-content-center-x', `${left + contentWidth / 2}px`);
 
-  if (analysisBar) {
-    analysisBar.style.setProperty('--analysis-board-top', `${top}px`);
-    analysisBar.style.setProperty('--analysis-board-bottom', `${bottom}px`);
-  }
 }
 
 function scheduleBoardChromePlacement() {
@@ -179,9 +198,18 @@ function isPlayBotTurn(msg = currentState) {
   );
 }
 
+function playBotName(level = selectedPlayDifficulty) {
+  return `HexFish${playDifficultyConfig(level).level}`;
+}
+
+function updatePlayBotLabels() {
+  const heading = document.getElementById('play-setup-title');
+  if (heading) heading.textContent = `You vs ${playBotName()}`;
+}
+
 function playNameForPlayer(idx) {
   if (!playViewActive()) return null;
-  return idx === playMode.humanPlayer ? 'You' : 'HexFish';
+  return idx === playMode.humanPlayer ? 'You' : playBotName();
 }
 
 function playerDisplayName(idx) {
@@ -191,6 +219,14 @@ function playerDisplayName(idx) {
 function formatPlayerRefs(text) {
   if (!playViewActive()) return text;
   return String(text).replace(/\bP([12])\b/g, (_, num) => playerDisplayName(Number(num) - 1));
+}
+
+function formatResultBanner(text) {
+  const winner = parseResultWinner(text);
+  if (playViewActive() && winner === playMode.humanPlayer) {
+    return `${playerDisplayName(winner)} win`;
+  }
+  return formatPlayerRefs(text);
 }
 
 function playDifficultyConfig(level = selectedPlayDifficulty) {
@@ -228,8 +264,13 @@ function playForcedMoveKey(msg, action) {
 }
 
 function sendPlayAction(action) {
-  if (playViewActive()) controls.pauseBeforeCommand();
-  session.send({ type: 'PlayAction', action });
+  const msg = { type: 'PlayAction', action };
+  if (playViewActive()) {
+    if (playMode.pendingHumanMove) return;
+    playMode.pendingHumanMove = true;
+    if (controls.searchRunning && controls.interruptSearchForCommand(msg)) return;
+  }
+  session.send(msg);
 }
 
 function setPlayDifficulty(level) {
@@ -245,6 +286,7 @@ function setPlayDifficulty(level) {
     select.setAttribute('aria-label', `HexFish difficulty. ${detail}`);
   }
   if (label) label.title = detail;
+  updatePlayBotLabels();
 }
 
 function initPlayDifficultySelect() {
@@ -320,6 +362,7 @@ function runPendingNewGameSearch(msg) {
 
 function renderGameState(msg) {
   currentState = msg;
+  if (playViewActive()) playMode.pendingHumanMove = false;
   const state = msg.state;
   const viewKey = msg.replay ? 'replay' : 'analysis';
 
@@ -345,6 +388,7 @@ function renderGameState(msg) {
   // Player panels
   updatePlayerPanel(0, state);
   updatePlayerPanel(1, state);
+  updateBoardResourceLegend(msg, state);
   updateBank(state);
   updateDice(state);
 
@@ -446,7 +490,7 @@ function renderGameState(msg) {
   const banner = document.getElementById('result-banner');
   if (msg.is_terminal && msg.result) {
     const winner = parseResultWinner(msg.result);
-    banner.textContent = formatPlayerRefs(msg.result);
+    banner.textContent = formatResultBanner(msg.result);
     banner.style.background = playerColor(winner) || '';
     banner.classList.remove('hidden');
     controls.onGameOver();
@@ -475,7 +519,7 @@ function updateActionPanelStatus(msg, playBotTurn) {
 
   if (playBotTurn) {
     title.textContent = 'Play';
-    status.textContent = 'HexFish thinking';
+    status.textContent = `${playBotName()} thinking`;
     status.title = playDifficultyDetails();
     status.classList.remove('hidden');
     return;
@@ -507,6 +551,7 @@ function updateRollBadge(msg, state, viewKey) {
 
   if (currentLength < previousLength) {
     hideRollBadge();
+    clearResourceProductionAnimations();
     lastActionLogLength[viewKey] = currentLength;
     previousFrameHands[viewKey] = currentHands;
     return;
@@ -532,6 +577,7 @@ function updateRollBadge(msg, state, viewKey) {
       hideRollBadge();
     } else if (rollLogHasExplicitGain(newEntries[i]) || handGained) {
       showRollBadge(total, roller);
+      showResourceProductionAnimations(total, previousFrameHands[viewKey], currentHands, state);
     } else {
       hideRollBadge();
     }
@@ -615,6 +661,109 @@ function hideRollBadge() {
   badge.classList.add('hidden');
 }
 
+function showResourceProductionAnimations(roll, beforeHands, afterHands, state) {
+  const layer = document.getElementById('resource-animation-layer');
+  if (!layer || !currentBoard || !state?.frame || !beforeHands || !afterHands) return;
+
+  const items = resourceProductionAnimationItems(roll, beforeHands, afterHands, state);
+  if (items.length === 0) return;
+
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    const tile = currentBoard.tiles[item.tileIndex];
+    const from = tile ? board.boardPointToShellPoint(tile.cx, tile.cy) : null;
+    const to = resourceAnimationTarget(item.resourceIndex);
+    if (!from || !to) continue;
+
+    const chip = document.createElement('span');
+    chip.className = `resource-card resource-production-chip ${RESOURCE_NAMES[item.resourceIndex]}`;
+    chip.textContent = `+${item.amount}`;
+    chip.style.left = `${from.x}px`;
+    chip.style.top = `${from.y}px`;
+    chip.style.setProperty('--resource-dx', `${to.x - from.x}px`);
+    chip.style.setProperty('--resource-dy', `${to.y - from.y}px`);
+    chip.style.animationDelay = `${Math.min(i * 70, 420)}ms`;
+    layer.appendChild(chip);
+
+    chip.addEventListener('animationend', () => chip.remove(), { once: true });
+    window.setTimeout(() => chip.remove(), 1600 + Math.min(i * 70, 420));
+  }
+}
+
+function clearResourceProductionAnimations() {
+  const layer = document.getElementById('resource-animation-layer');
+  if (layer) layer.innerHTML = '';
+}
+
+function resourceProductionAnimationItems(roll, beforeHands, afterHands, state) {
+  const frame = state.frame;
+  const items = [];
+  for (let playerIndex = 0; playerIndex < afterHands.length; playerIndex++) {
+    for (let resourceIndex = 0; resourceIndex < RESOURCE_NAMES.length; resourceIndex++) {
+      let remaining = (afterHands[playerIndex]?.[resourceIndex] ?? 0) -
+        (beforeHands[playerIndex]?.[resourceIndex] ?? 0);
+      if (remaining <= 0) continue;
+
+      const sources = productionSourcesFor(playerIndex, resourceIndex, roll, frame);
+      for (const source of sources) {
+        if (remaining <= 0) break;
+        const amount = Math.min(source.amount, remaining);
+        items.push({
+          tileIndex: source.tileIndex,
+          resourceIndex,
+          amount,
+        });
+        remaining -= amount;
+      }
+    }
+  }
+  return items;
+}
+
+function productionSourcesFor(playerIndex, resourceIndex, roll, frame) {
+  const buildings = frame.buildings?.[playerIndex];
+  if (!currentBoard?.tiles || !buildings) return [];
+
+  const sources = [];
+  const robberTile = Number(frame.robber);
+  for (let tileIndex = 0; tileIndex < currentBoard.tiles.length; tileIndex++) {
+    const tile = currentBoard.tiles[tileIndex];
+    if (!tile || Number(tile.number) !== roll || tileIndex === robberTile) continue;
+    if (TERRAIN_RESOURCE_INDEX[tile.terrain] !== resourceIndex) continue;
+
+    const amount = tileProductionAmount(tile, buildings);
+    if (amount > 0) {
+      sources.push({ tileIndex, amount });
+    }
+  }
+  return sources;
+}
+
+function tileProductionAmount(tile, buildings) {
+  const nodeSet = new Set((tile.nodes || []).map(Number));
+  let amount = 0;
+  for (const node of buildings.settlements || []) {
+    if (nodeSet.has(Number(node))) amount += 1;
+  }
+  for (const node of buildings.cities || []) {
+    if (nodeSet.has(Number(node))) amount += 2;
+  }
+  return amount;
+}
+
+function resourceAnimationTarget(resourceIndex) {
+  const card = document.querySelector(`#board-resource-legend [data-resource-index="${resourceIndex}"]`);
+  const shell = document.getElementById('board-shell');
+  if (!card || !shell) return null;
+  const cardRect = card.getBoundingClientRect();
+  const shellRect = shell.getBoundingClientRect();
+  if (!cardRect.width || !cardRect.height) return null;
+  return {
+    x: cardRect.left - shellRect.left + cardRect.width / 2,
+    y: cardRect.top - shellRect.top + cardRect.height / 2,
+  };
+}
+
 function updateSearchHighlights(snapshot, labels) {
   if (playViewActive()) {
     board.clearSearchHighlights();
@@ -625,8 +774,13 @@ function updateSearchHighlights(snapshot, labels) {
     ...e,
     label: labels[i] || `Action ${e.action}`,
   }));
-  // Sort by visits descending (matches MCTS panel order).
-  edges.sort((a, b) => b.visits - a.visits);
+  // Sort by fresh visits descending (matches MCTS panel order).
+  const fresh = (edge) => Number.isFinite(edge?.fresh_visits) ? edge.fresh_visits : (edge?.visits ?? 0);
+  edges.sort((a, b) => {
+    const visitDiff = fresh(b) - fresh(a);
+    if (visitDiff !== 0) return visitDiff;
+    return (b.improved_policy ?? 0) - (a.improved_policy ?? 0);
+  });
   board.showSearchHighlights(edges, currentBoard);
 }
 
@@ -655,6 +809,7 @@ session.on('SearchProgress', (msg) => {
 session.on('BotAction', (msg) => {
   playMode.botThinking = false;
   playMode.forcedMoveKey = null;
+  playMode.pendingHumanMove = false;
   if (msg.snapshot) {
     mctsPanel.updateSnapshot(msg.snapshot, msg.action_labels || [], currentState?.current_player ?? 0);
     updateSearchHighlights(msg.snapshot, msg.action_labels || []);
@@ -670,6 +825,7 @@ session.on('Error', (msg) => {
   controls.onSearchError();
   playMode.botThinking = false;
   playMode.forcedMoveKey = null;
+  playMode.pendingHumanMove = false;
   updateActionPanelStatus(currentState, isPlayBotTurn(currentState));
   setReplayStatus(msg.message);
   console.error('Server error:', msg.message);
@@ -679,6 +835,7 @@ session.on('Disconnected', () => {
   controls.onSearchError();
   playMode.botThinking = false;
   playMode.forcedMoveKey = null;
+  playMode.pendingHumanMove = false;
 });
 
 // ── View tabs / replay list ────────────────────────────────────────────────
@@ -710,6 +867,7 @@ function showPlayView() {
     showPlaySetupView();
     return;
   }
+  setServerSingleplayerHumanPlayer(playMode.humanPlayer);
   activeView = 'play';
   setTabState('play');
   setEditorChrome(false);
@@ -732,6 +890,7 @@ function showPlayView() {
 
 function showPlaySetupView() {
   activeView = 'play-setup';
+  setServerSingleplayerHumanPlayer(null);
   setTabState('play');
   controls.stopAutoplay();
   controls._disableAutoSearch();
@@ -746,6 +905,7 @@ function showPlaySetupView() {
 
 function showAnalysisView() {
   activeView = 'analysis';
+  setServerSingleplayerHumanPlayer(null);
   setTabState('analysis');
   setEditorChrome(false);
   setGameHeaderLabelsVisible(true);
@@ -761,6 +921,7 @@ function showAnalysisView() {
 
 function showReplayView() {
   activeView = 'replay-list';
+  setServerSingleplayerHumanPlayer(null);
   setTabState('replay');
   setEditorChrome(false);
   setGameHeaderLabelsVisible(false);
@@ -774,6 +935,7 @@ function showReplayView() {
 
 function showReplayBoardView() {
   activeView = 'replay-board';
+  setServerSingleplayerHumanPlayer(null);
   setTabState('replay');
   setEditorChrome(false);
   setGameHeaderLabelsVisible(true);
@@ -789,6 +951,7 @@ function showReplayBoardView() {
 
 function showEditorView() {
   activeView = 'editor';
+  setServerSingleplayerHumanPlayer(null);
   setTabState('editor');
   controls.stopAutoplay();
   controls._disableAutoSearch();
@@ -812,6 +975,7 @@ function setGameHeaderLabelsVisible(visible) {
 
 function setEditorChrome(enabled) {
   if (enabled) hideRollBadge();
+  if (enabled) clearResourceProductionAnimations();
   document.getElementById('left-ad-panel')?.classList.toggle('hidden', enabled);
   document.getElementById('players-panel').classList.toggle('hidden', enabled);
   document.getElementById('analysis-panel').classList.toggle('hidden', enabled);
@@ -819,6 +983,8 @@ function setEditorChrome(enabled) {
   document.getElementById('action-panel')?.classList.toggle('hidden', enabled);
   document.getElementById('analysis-bar-panel')?.classList.toggle('hidden', enabled);
   document.getElementById('board-history-controls')?.classList.toggle('hidden', enabled);
+  document.getElementById('board-resource-legend')?.classList.toggle('hidden', enabled);
+  document.getElementById('resource-animation-layer')?.classList.toggle('hidden', enabled);
   document.getElementById('phase-label').classList.toggle('hidden', enabled);
   document.getElementById('turn-label').classList.toggle('hidden', enabled);
   board.onTileClick = enabled ? handleEditorTileClick : null;
@@ -844,6 +1010,8 @@ function updateViewChrome(msg) {
   const replay = !!msg?.replay || activeView === 'replay-board';
   setMctsMoveDetailsVisible(!inPlay);
   document.getElementById('analysis-bar-panel')?.classList.toggle('hidden', activeView === 'editor');
+  document.getElementById('board-resource-legend')?.classList.toggle('hidden', activeView === 'editor');
+  document.getElementById('resource-animation-layer')?.classList.toggle('hidden', activeView === 'editor');
 
   document.getElementById('search-action-control')?.classList.toggle('hidden', inPlay);
   document.getElementById('budget-control')?.classList.toggle('hidden', inPlay);
@@ -873,6 +1041,7 @@ function startPlayGame() {
   playMode.humanPlayer = selectedPlayHumanPlayer;
   playMode.botThinking = false;
   playMode.forcedMoveKey = null;
+  playMode.pendingHumanMove = false;
   pendingNewGameSearch = false;
   controls.stopAutoplay();
   controls._disableAutoSearch();
@@ -890,6 +1059,7 @@ function startPlayGame() {
   document.getElementById('replay-view').classList.add('hidden');
   document.getElementById('controls').classList.remove('hidden');
   updateViewChrome(analysisState);
+  setServerSingleplayerHumanPlayer(playMode.humanPlayer);
   session.send({ type: 'NewGame', seed: null });
 }
 
@@ -1213,6 +1383,7 @@ function startEditedGame() {
   playMode.active = false;
   playMode.botThinking = false;
   playMode.forcedMoveKey = null;
+  playMode.pendingHumanMove = false;
   setEditorStatus('Starting');
   session.send({
     type: 'StartEditedGame',
@@ -1372,6 +1543,28 @@ function updatePlayerPanel(idx, state) {
   statsEl.textContent = parts.join(' · ');
 }
 
+function updateBoardResourceLegend(msg, state) {
+  const legend = document.getElementById('board-resource-legend');
+  if (!legend || !state?.frame?.players) return;
+
+  const playerIndex = playViewActive()
+    ? playMode.humanPlayer
+    : (msg.current_player === 0 || msg.current_player === 1 ? msg.current_player : 0);
+  const hand = state.frame.players[playerIndex]?.hand || [0, 0, 0, 0, 0];
+
+  for (const card of legend.querySelectorAll('[data-resource-index]')) {
+    const resourceIndex = Number(card.dataset.resourceIndex);
+    if (!Number.isInteger(resourceIndex)) continue;
+    const count = hand[resourceIndex] ?? 0;
+    const name = RESOURCE_NAMES[resourceIndex] || '';
+    card.textContent = `${count} ${capitalizeResourceName(name)}`;
+  }
+}
+
+function capitalizeResourceName(name) {
+  return name ? name[0].toUpperCase() + name.slice(1) : '';
+}
+
 function updateBank(state) {
   const bankEl = document.getElementById('bank-dev');
   if (!bankEl) return;
@@ -1417,7 +1610,7 @@ const FAIR_PROBS = [1,2,3,4,5,6,5,4,3,2,1].map(v => v / 36);
 function updateDice(state) {
   const panel = document.getElementById('dice-panel');
   const dice = state.dice;
-  if (!dice) { panel.style.display = 'none'; return; }
+  if (!dice || playViewActive()) { panel.style.display = 'none'; return; }
   panel.style.display = '';
 
   document.getElementById('dice-cards').textContent = `(${dice.cards_left}/${dice.total_cards})`;

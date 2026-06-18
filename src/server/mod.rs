@@ -683,8 +683,8 @@ pub async fn run_search<G: Game + 'static>(
                     }
                 }
                 if let Some((snap, labels)) = session.snapshot_with_labels() {
-                    if snap.total_simulations >= last_progress + PROGRESS_INTERVAL {
-                        last_progress = snap.total_simulations;
+                    if snap.fresh_simulations >= last_progress + PROGRESS_INTERVAL {
+                        last_progress = snap.fresh_simulations;
                         send_msg(
                             socket,
                             &ServerMsg::SearchProgress {
@@ -741,40 +741,70 @@ async fn handle_search_interrupt<G: Game + 'static>(
         }
     };
 
-    if !matches!(msg, ClientMsg::PauseSearch { .. }) {
-        send_msg(
-            socket,
-            &ServerMsg::Error {
-                message: "Search is running; pause before sending another command".into(),
-            },
-        )
-        .await?;
-        return Ok(None);
-    }
+    match msg {
+        pause @ ClientMsg::PauseSearch { .. } => {
+            if matches!(active_msg, ClientMsg::BotMove { .. }) {
+                send_msg(
+                    socket,
+                    &ServerMsg::Error {
+                        message: "Bot moves cannot be paused".into(),
+                    },
+                )
+                .await?;
+                return Ok(None);
+            }
 
-    if matches!(active_msg, ClientMsg::BotMove { .. }) {
-        send_msg(
-            socket,
-            &ServerMsg::Error {
-                message: "Bot moves cannot be paused".into(),
-            },
-        )
-        .await?;
-        return Ok(None);
-    }
+            if client_msg_target(&pause) != client_msg_target(active_msg) {
+                send_msg(
+                    socket,
+                    &ServerMsg::Error {
+                        message: "Pause target does not match the active search".into(),
+                    },
+                )
+                .await?;
+                return Ok(None);
+            }
 
-    if client_msg_target(&msg) != client_msg_target(active_msg) {
-        send_msg(
-            socket,
-            &ServerMsg::Error {
-                message: "Pause target does not match the active search".into(),
-            },
-        )
-        .await?;
-        return Ok(None);
-    }
+            Ok(Some(session.pause_search()))
+        }
+        play @ ClientMsg::PlayAction { .. } => {
+            if matches!(active_msg, ClientMsg::BotMove { .. }) {
+                send_msg(
+                    socket,
+                    &ServerMsg::Error {
+                        message: "Bot moves cannot be interrupted".into(),
+                    },
+                )
+                .await?;
+                return Ok(None);
+            }
 
-    Ok(Some(session.pause_search()))
+            if client_msg_target(active_msg) != ViewTarget::Analysis {
+                send_msg(
+                    socket,
+                    &ServerMsg::Error {
+                        message: "Cannot play actions during a replay search".into(),
+                    },
+                )
+                .await?;
+                return Ok(None);
+            }
+
+            let mut msgs = session.pause_search();
+            msgs.extend(session.handle(play));
+            Ok(Some(msgs))
+        }
+        _ => {
+            send_msg(
+                socket,
+                &ServerMsg::Error {
+                    message: "Search is running; pause before sending another command".into(),
+                },
+            )
+            .await?;
+            Ok(None)
+        }
+    }
 }
 
 async fn handle_socket<G: Game + 'static>(

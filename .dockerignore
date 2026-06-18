@@ -1,7 +1,6 @@
 .git
 .dist
 target
-checkpoints
 
 .env
 .env.*

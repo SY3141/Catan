@@ -256,7 +256,7 @@ impl ActionId {
 pub fn legal_actions(state: &GameState, actions: &mut Vec<ActionId>) {
     actions.clear();
     match &state.phase {
-        Phase::PlaceSettlement => populate_place_settlement(state, actions),
+        Phase::PlaceSettlement => populate_place_settlement(state, actions, true),
         Phase::PlaceRoad => populate_place_road(state, actions),
         Phase::PreRoll => populate_preroll(state, actions),
         Phase::Roll | Phase::StealResolve | Phase::DevCardDraw => {
@@ -316,6 +316,15 @@ pub fn legal_actions(state: &GameState, actions: &mut Vec<ActionId>) {
     }
 }
 
+pub fn legal_actions_without_setup_pip_filter(state: &GameState, actions: &mut Vec<ActionId>) {
+    if matches!(state.phase, Phase::PlaceSettlement) {
+        actions.clear();
+        populate_place_settlement(state, actions, false);
+    } else {
+        legal_actions(state, actions);
+    }
+}
+
 /// Minimum total pips for a setup settlement spot. Spots below this threshold
 /// are dominated — in 1v1 with 50+ spots available, a < 8 pip spot is never
 /// optimal. Disabled during colonist replay (canonical_build_order = false).
@@ -324,7 +333,11 @@ const MIN_SETUP_PIPS: u8 = 8;
 /// Pips per dice number: pips[n] = 6 - |7 - n| for n in 2..=12.
 const PIPS: [u8; 13] = [0, 0, 1, 2, 3, 4, 5, 0, 5, 4, 3, 2, 1];
 
-fn populate_place_settlement(state: &GameState, actions: &mut Vec<ActionId>) {
+fn populate_place_settlement(
+    state: &GameState,
+    actions: &mut Vec<ActionId>,
+    enforce_min_pips: bool,
+) {
     let adj = &state.topology.adj;
     let topo = &state.topology;
     let occupied = state.occupied_nodes();
@@ -338,7 +351,7 @@ fn populate_place_settlement(state: &GameState, actions: &mut Vec<ActionId>) {
     }
 
     // Precompute tile numbers for pip calculation.
-    let tile_numbers = if state.canonical_build_order {
+    let tile_numbers = if enforce_min_pips && state.canonical_build_order {
         let mut numbers = [0u8; 19];
         for roll in 2..=12u8 {
             for &tid in &topo.dice_to_tiles[roll as usize] {
@@ -937,6 +950,18 @@ mod tests {
             actions.len(),
             54,
             "all 54 nodes should be legal without canonical ordering"
+        );
+    }
+
+    #[test]
+    fn human_setup_actions_do_not_filter_low_pips() {
+        let state = make_state();
+        let mut actions = Vec::new();
+        legal_actions_without_setup_pip_filter(&state, &mut actions);
+        assert_eq!(
+            actions.len(),
+            54,
+            "singleplayer human setup should expose every distance-legal node"
         );
     }
 

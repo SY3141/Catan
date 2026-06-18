@@ -137,6 +137,8 @@ pub struct Search<G: Game> {
     depth_max: u32,
     /// Whether the tree needs compaction before starting the next search.
     needs_compact: bool,
+    /// Root edge visits at the start of the current explicit search.
+    root_visit_baseline: Vec<u32>,
 }
 
 // ── Public API ────────────────────────────────────────────────────────
@@ -159,6 +161,7 @@ impl<G: Game> Search<G> {
             root_network_value: 0.0,
             depth_max: 0,
             needs_compact: false,
+            root_visit_baseline: Vec::new(),
         }
     }
 
@@ -173,6 +176,7 @@ impl<G: Game> Search<G> {
         self.root_network_value = 0.0;
         self.depth_max = 0;
         self.needs_compact = false;
+        self.root_visit_baseline.clear();
     }
 
     /// Read access to the internal game state.
@@ -200,6 +204,19 @@ impl<G: Game> Search<G> {
         self.sims_done = 0;
     }
 
+    /// Start a fresh search budget at the current root.
+    ///
+    /// The tree is still reused, but current root visits become the baseline
+    /// for fresh-visit selection and reporting.
+    pub fn start_search(&mut self) {
+        self.reset_search_counters();
+        if self.root.is_some() && !self.needs_compact {
+            self.capture_root_visit_baseline();
+        } else {
+            self.root_visit_baseline.clear();
+        }
+    }
+
     /// Update the simulation budget (takes effect on the next search).
     pub fn set_num_simulations(&mut self, n: u32) {
         self.config.num_simulations = n;
@@ -219,6 +236,30 @@ impl<G: Game> Search<G> {
         self.root
             .map(|r| self.tree.edges(r).iter().map(|e| e.visits).sum())
             .unwrap_or(0)
+    }
+
+    /// Total root visits added since the latest explicit search start.
+    pub fn fresh_root_visits(&self) -> u32 {
+        self.root_fresh_visits().into_iter().sum()
+    }
+
+    /// Per-edge root visits added since the latest explicit search start.
+    pub fn root_fresh_visits(&self) -> Vec<u32> {
+        self.root
+            .map(|r| {
+                self.tree
+                    .edges(r)
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, edge)| self.fresh_visits_for_edge(idx, edge))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Current root node, if one exists.
+    pub fn root_node(&self) -> Option<NodeId> {
+        self.root
     }
 
     /// Read access to the MCTS config.
@@ -290,6 +331,18 @@ impl<G: Game> Search<G> {
     /// [`Select::Terminal`] with a terminal value, or [`Select::Done`]
     /// when the simulation budget is exhausted.
     pub fn select(&mut self, rng: &mut fastrand::Rng) -> Select<G> {
+        // A followed subtree needs its own fresh search even when the
+        // previous root had already exhausted its budget.
+        if self.needs_compact {
+            if self.root.is_some() {
+                self.begin_search(rng);
+            } else {
+                self.needs_compact = false;
+                self.reset_search_counters();
+                self.root_visit_baseline.clear();
+            }
+        }
+
         // Budget exhausted — search is done.
         if self.sims_done >= self.config.num_simulations {
             return Select::Done;
@@ -298,11 +351,6 @@ impl<G: Game> Search<G> {
         // Ensure the root is expanded.
         if self.root.is_none() {
             return self.expand_root(rng);
-        }
-
-        // Compact tree from a previous apply_action / walk_tree.
-        if self.needs_compact {
-            self.begin_search(rng);
         }
 
         if self.budget_exhausted() {
@@ -323,6 +371,7 @@ impl<G: Game> Search<G> {
                 self.root_network_value = eval.wdl.q();
                 // Dirichlet noise is generated lazily on the next select() call.
                 self.root_noise.clear();
+                self.capture_root_visit_baseline();
                 self.bufs.reclaim_actions(actions);
             }
             LeafInner::Simulation {
@@ -403,12 +452,29 @@ impl<G: Game> Search<G> {
             policy[edge.action] = prob;
         }
 
-        // Selected action: highest visit count.
-        let selected_action = edges
+        let fresh_visits: Vec<u32> = edges
             .iter()
-            .max_by_key(|e| e.visits)
-            .map(|e| e.action)
-            .unwrap_or(0);
+            .enumerate()
+            .map(|(idx, edge)| self.fresh_visits_for_edge(idx, edge))
+            .collect();
+
+        // Selected action: highest visits added during this explicit search.
+        // If no fresh visits were added, use the improved policy.
+        let any_fresh = fresh_visits.iter().any(|&visits| visits > 0);
+        let mut selected_idx = 0usize;
+        for idx in 1..edges.len() {
+            let better = if any_fresh {
+                fresh_visits[idx] > fresh_visits[selected_idx]
+                    || (fresh_visits[idx] == fresh_visits[selected_idx]
+                        && improved_logits[idx] > improved_logits[selected_idx])
+            } else {
+                improved_logits[idx] > improved_logits[selected_idx]
+            };
+            if better {
+                selected_idx = idx;
+            }
+        }
+        let selected_action = edges.get(selected_idx).map(|e| e.action).unwrap_or(0);
 
         let prior_top1_action = edges
             .iter()
@@ -440,9 +506,7 @@ impl<G: Game> Search<G> {
     /// Begin a new search: compact tree, reset counters, generate noise.
     fn begin_search(&mut self, rng: &mut fastrand::Rng) {
         self.needs_compact = false;
-        self.sims_done = 0;
-        self.q_bounds = (0.0, 0.0);
-        self.depth_max = 0;
+        self.reset_search_counters();
 
         if let Some(old_root) = self.root {
             let new_root = self.tree.compact(old_root);
@@ -455,15 +519,17 @@ impl<G: Game> Search<G> {
                 self.tree.edges(new_root).len(),
                 rng,
             );
+            self.capture_root_visit_baseline();
+        } else {
+            self.root_visit_baseline.clear();
         }
     }
 
     /// First-time root expansion (tree is empty).
     fn expand_root(&mut self, rng: &mut fastrand::Rng) -> Select<G> {
         self.needs_compact = false;
-        self.sims_done = 0;
-        self.q_bounds = (0.0, 0.0);
-        self.depth_max = 0;
+        self.reset_search_counters();
+        self.root_visit_baseline.clear();
 
         // Terminal root — immediate result.
         if let Status::Terminal(reward) = self.root_state.status() {
@@ -486,6 +552,7 @@ impl<G: Game> Search<G> {
                 self.root_network_value = self.tree.utility(id);
                 self.root_noise =
                     sample_dirichlet(self.config.dirichlet_alpha, self.tree.edges(id).len(), rng);
+                self.capture_root_visit_baseline();
                 // Count as one sim and continue.
                 self.sims_done += 1;
                 self.simulate(rng)
@@ -493,6 +560,7 @@ impl<G: Game> Search<G> {
             ExpandResult::Chance(id) => {
                 self.root = Some(id);
                 self.root_network_value = self.tree.utility(id);
+                self.capture_root_visit_baseline();
                 // Chance root — proceed to simulation.
                 self.simulate(rng)
             }
@@ -689,6 +757,25 @@ impl<G: Game> Search<G> {
             return false;
         };
         compute_pv_depth(&self.tree, root) >= target_depth
+    }
+
+    fn reset_search_counters(&mut self) {
+        self.sims_done = 0;
+        self.q_bounds = (0.0, 0.0);
+        self.depth_max = 0;
+    }
+
+    fn capture_root_visit_baseline(&mut self) {
+        self.root_visit_baseline.clear();
+        if let Some(root) = self.root {
+            self.root_visit_baseline
+                .extend(self.tree.edges(root).iter().map(|edge| edge.visits));
+        }
+    }
+
+    fn fresh_visits_for_edge(&self, idx: usize, edge: &Edge) -> u32 {
+        edge.visits
+            .saturating_sub(self.root_visit_baseline.get(idx).copied().unwrap_or(0))
     }
 }
 
@@ -1144,6 +1231,41 @@ mod tests {
         assert!(
             (total - 1.0).abs() < 0.01,
             "policy should sum to ~1.0, got {total}"
+        );
+    }
+
+    #[test]
+    fn selected_action_uses_fresh_visits_after_reuse() {
+        let evaluator = RolloutEvaluator::default();
+        let config = Config {
+            num_simulations: 1,
+            dirichlet_epsilon: 0.0,
+            ..Default::default()
+        };
+        let mut rng = fastrand::Rng::new();
+        let mut search = Search::new(TrivialGame::new(), config);
+        let _ = run_to_completion(&mut search, &evaluator, &mut rng);
+
+        let root = search.root.expect("root should be expanded");
+        {
+            let edges = search.tree.edges_mut(root);
+            edges[0].visits = 1_000;
+            edges[1].visits = 10;
+        }
+
+        search.start_search();
+        {
+            let edges = search.tree.edges_mut(root);
+            edges[0].visits += 1;
+            edges[1].visits += 5;
+        }
+
+        let result = search.result();
+
+        assert_eq!(search.root_fresh_visits(), vec![1, 5]);
+        assert_eq!(
+            result.selected_action, 1,
+            "fresh visits should beat larger reused total visits"
         );
     }
 

@@ -13,6 +13,15 @@ const TERRAIN_COLORS = {
 
 const HEX_SIZE = 50;
 const SQRT3 = Math.sqrt(3);
+const BUILDING_SCALE = 1.5;
+const SETTLEMENT_SIZE = 10 * BUILDING_SCALE;
+const SETTLEMENT_HALF = SETTLEMENT_SIZE / 2;
+const SETTLEMENT_ACTION_RADIUS = 8 * BUILDING_SCALE;
+const SETTLEMENT_HIGHLIGHT_RADIUS = 9 * BUILDING_SCALE;
+const CITY_ACTION_RADIUS = 10 * BUILDING_SCALE;
+const CITY_HIGHLIGHT_HALF = 8 * BUILDING_SCALE;
+const CITY_HIGHLIGHT_SIZE = CITY_HIGHLIGHT_HALF * 2;
+const CITY_HIGHLIGHT_RX = 2 * BUILDING_SCALE;
 
 function catanPips(number) {
   return number === 7 ? 0 : Math.max(0, 6 - Math.abs(7 - number));
@@ -211,7 +220,8 @@ class Board {
       for (const nid of frame.buildings[p].settlements) {
         const [x, y] = nodes[nid];
         const settlement = this._el('rect', {
-          x: x - 5, y: y - 5, width: 10, height: 10,
+          x: x - SETTLEMENT_HALF, y: y - SETTLEMENT_HALF,
+          width: SETTLEMENT_SIZE, height: SETTLEMENT_SIZE,
           fill: color, stroke: '#111', 'stroke-width': 1
         });
         buildG.appendChild(this._keepUpright(settlement, x, y));
@@ -274,7 +284,8 @@ class Board {
     if (action < 54) {
       const [x, y] = nodes[action];
       el = this._el('rect', {
-        x: x - 5, y: y - 5, width: 10, height: 10,
+        x: x - SETTLEMENT_HALF, y: y - SETTLEMENT_HALF,
+        width: SETTLEMENT_SIZE, height: SETTLEMENT_SIZE,
         fill: color, stroke: '#fff', 'stroke-width': 1.5
       });
       uprightAt = [x, y];
@@ -340,14 +351,19 @@ class Board {
       if (rank >= 3) break;
       const a = edge.action;
       const color = RANK_COLORS[rank];
-      const label = `#${rank + 1}: ${edge.label} (${edge.visits} visits)`;
+      const freshVisits = Number.isFinite(edge.fresh_visits)
+        ? edge.fresh_visits
+        : (Number.isFinite(edge.visits) ? edge.visits : 0);
+      const totalVisits = Number.isFinite(edge.visits) ? edge.visits : freshVisits;
+      const visitsLabel = totalVisits > freshVisits ? `${freshVisits}/${totalVisits}` : `${freshVisits}`;
+      const label = `#${rank + 1}: ${edge.label} (${visitsLabel} visits)`;
       let el = null;
 
       // Settlement
       if (a < 54) {
         const [x, y] = nodes[a];
         el = this._el('circle', {
-          cx: x, cy: y, r: 9,
+          cx: x, cy: y, r: SETTLEMENT_HIGHLIGHT_RADIUS,
           fill: 'none', stroke: color,
           'stroke-width': 2.5, 'pointer-events': 'none',
           class: 'search-highlight', opacity: 0.9,
@@ -372,7 +388,8 @@ class Board {
         const nid = a - 126;
         const [x, y] = nodes[nid];
         el = this._el('rect', {
-          x: x - 8, y: y - 8, width: 16, height: 16, rx: 2,
+          x: x - CITY_HIGHLIGHT_HALF, y: y - CITY_HIGHLIGHT_HALF,
+          width: CITY_HIGHLIGHT_SIZE, height: CITY_HIGHLIGHT_SIZE, rx: CITY_HIGHLIGHT_RX,
           fill: 'none', stroke: color,
           'stroke-width': 2.5, 'pointer-events': 'none',
           class: 'search-highlight', opacity: 0.9,
@@ -443,6 +460,30 @@ class Board {
     return el;
   }
 
+  boardPointToShellPoint(x, y) {
+    const shell = document.getElementById('board-shell');
+    const matrix = this.contentGroup?.getScreenCTM?.() || this.svg?.getScreenCTM?.();
+    if (!shell || !matrix) return null;
+
+    let screenPoint;
+    if (typeof this.svg.createSVGPoint === 'function') {
+      const point = this.svg.createSVGPoint();
+      point.x = x;
+      point.y = y;
+      screenPoint = point.matrixTransform(matrix);
+    } else if (typeof DOMPoint === 'function') {
+      screenPoint = new DOMPoint(x, y).matrixTransform(matrix);
+    } else {
+      return null;
+    }
+
+    const shellRect = shell.getBoundingClientRect();
+    return {
+      x: screenPoint.x - shellRect.left,
+      y: screenPoint.y - shellRect.top,
+    };
+  }
+
   // Attach instant tooltip (replaces slow browser-native <title>).
   _attachTooltip(el, label) {
     const tip = document.getElementById('svg-tooltip');
@@ -468,7 +509,7 @@ class Board {
     if (action < 54) {
       const [x, y] = nodes[action];
       const el = this._el('circle', {
-        cx: x, cy: y, r: 8,
+        cx: x, cy: y, r: SETTLEMENT_ACTION_RADIUS,
         fill: 'rgba(255,255,255,0.15)', stroke: 'rgba(255,255,255,0.5)',
         'stroke-width': 1.5, cursor: 'pointer', class: 'action-overlay'
       });
@@ -504,7 +545,7 @@ class Board {
       const nid = action - 126;
       const [x, y] = nodes[nid];
       const el = this._el('circle', {
-        cx: x, cy: y, r: 10,
+        cx: x, cy: y, r: CITY_ACTION_RADIUS,
         fill: 'rgba(255,255,255,0.15)', stroke: 'rgba(255,255,255,0.5)',
         'stroke-width': 1.5, cursor: 'pointer', class: 'action-overlay'
       });
@@ -645,7 +686,10 @@ class Board {
   }
 
   _cityPoints(x, y) {
-    return `${x},${y-9} ${x+7},${y-3} ${x+7},${y+7} ${x-7},${y+7} ${x-7},${y-3}`;
+    const top = 9 * BUILDING_SCALE;
+    const side = 7 * BUILDING_SCALE;
+    const roof = 3 * BUILDING_SCALE;
+    return `${x},${y - top} ${x + side},${y - roof} ${x + side},${y + side} ${x - side},${y + side} ${x - side},${y - roof}`;
   }
 
   _hexPoints(cx, cy, size) {
