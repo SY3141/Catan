@@ -180,6 +180,14 @@ class Board {
       }
     }
 
+    // Port editor click targets must sit above tile hit polygons.
+    const portHitsG = this._g('port-hit-targets');
+    if (this.onPortClick) {
+      for (const port of board.ports) {
+        this._drawPortHit(portHitsG, port, board.nodes);
+      }
+    }
+
     // Overlay for legal actions
     this._g('overlays');
 
@@ -629,35 +637,38 @@ class Board {
     }
   }
 
-  _drawPort(parent, port, nodes) {
+  _portGeometry(port, nodes) {
     const [n0, n1] = port.nodes;
     const [x0, y0] = nodes[n0];
     const [x1, y1] = nodes[n1];
     const mx = (x0 + x1) / 2;
     const my = (y0 + y1) / 2;
-    const color = PORT_COLORS[port.kind] || PORT_COLORS.generic;
-    const ratio = port.kind === 'generic' ? '3:1' : '2:1';
-    const darkText = port.kind === 'grain' || port.kind === 'wool' || port.kind === 'generic';
-    const group = this._el('g', { class: port.selected ? 'port-marker selected' : 'port-marker' });
-    parent.appendChild(group);
 
-    // Normal perpendicular to the port edge, pointing outward
     if (!this._centroid) {
       let sx = 0, sy = 0;
       for (const [x, y] of nodes) { sx += x; sy += y; }
       this._centroid = [sx / nodes.length, sy / nodes.length];
     }
     const [cx, cy] = this._centroid;
-    // Edge direction and its perpendicular
     const ex = x1 - x0, ey = y1 - y0;
     let nx = -ey, ny = ex;
-    // Pick the normal pointing away from board center
     const toCenterX = cx - mx, toCenterY = cy - my;
     if (nx * toCenterX + ny * toCenterY > 0) { nx = -nx; ny = -ny; }
     const nlen = Math.sqrt(nx * nx + ny * ny) || 1;
     const offset = 18;
     const lx = mx + nx / nlen * offset;
     const ly = my + ny / nlen * offset;
+
+    return { x0, y0, x1, y1, lx, ly };
+  }
+
+  _drawPort(parent, port, nodes) {
+    const { x0, y0, x1, y1, lx, ly } = this._portGeometry(port, nodes);
+    const color = PORT_COLORS[port.kind] || PORT_COLORS.generic;
+    const ratio = port.kind === 'generic' ? '3:1' : '2:1';
+    const darkText = port.kind === 'grain' || port.kind === 'wool' || port.kind === 'generic';
+    const group = this._el('g', { class: port.selected ? 'port-marker selected' : 'port-marker' });
+    parent.appendChild(group);
 
     group.appendChild(this._el('path', {
       d: `M ${x0} ${y0} L ${lx} ${ly} L ${x1} ${y1}`,
@@ -687,18 +698,24 @@ class Board {
     });
     txt.textContent = ratio;
     group.appendChild(this._keepUpright(txt, lx, ly));
+  }
 
-    if (this.onPortClick && Number.isInteger(port.index)) {
-      const hit = this._el('circle', {
-        cx: lx, cy: ly, r: 15,
-        fill: 'transparent',
-        cursor: 'pointer',
-        'pointer-events': 'all',
-      });
-      hit.addEventListener('click', () => this.onPortClick?.(port.index));
-      this._attachTooltip(hit, `Port ${port.index + 1}: ${ratio}`);
-      group.appendChild(hit);
-    }
+  _drawPortHit(parent, port, nodes) {
+    if (!Number.isInteger(port.index)) return;
+    const { lx, ly } = this._portGeometry(port, nodes);
+    const ratio = port.kind === 'generic' ? '3:1' : '2:1';
+    const hit = this._el('circle', {
+      cx: lx, cy: ly, r: 18,
+      fill: 'transparent',
+      cursor: 'pointer',
+      'pointer-events': 'all',
+    });
+    hit.addEventListener('click', (event) => {
+      event.stopPropagation();
+      this.onPortClick?.(port.index);
+    });
+    this._attachTooltip(hit, `Port ${port.index + 1}: ${ratio}`);
+    parent.appendChild(hit);
   }
 
   _playerColor(playerIndex) {
