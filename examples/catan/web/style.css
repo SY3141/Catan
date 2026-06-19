@@ -320,14 +320,15 @@
 .board-resource-legend {
   position: absolute;
   z-index: 10;
-  left: var(--board-content-center-x);
+  left: var(--board-content-left);
+  right: var(--board-content-right);
   bottom: var(--board-content-bottom);
   display: flex;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
+  align-items: center;
   justify-content: center;
-  gap: 6px;
+  gap: 4px;
   pointer-events: none;
-  transform: translateX(-50%);
 }
 
 .board-resource-legend.hidden {
@@ -335,6 +336,7 @@
 }
 
 .board-resource-card {
+  flex: 0 0 74px;
   width: 74px;
   height: 36px;
   margin: 0;
@@ -502,6 +504,7 @@
 .editor-terrain-btn,
 .editor-number-btn,
 .editor-port-btn {
+  appearance: none;
   display: flex;
   min-height: 34px;
   align-items: center;
@@ -511,6 +514,7 @@
   background: #0f3460;
   color: #e5e7eb;
   padding: 6px 8px;
+  font-family: inherit;
   font-size: 0.72rem;
   line-height: 1;
   cursor: pointer;
@@ -535,8 +539,11 @@
 }
 
 .editor-swatch {
+  display: inline-block;
   width: 14px;
+  min-width: 14px;
   height: 14px;
+  min-height: 14px;
   flex: 0 0 auto;
   border: 1px solid rgba(255, 255, 255, 0.28);
   border-radius: 3px;

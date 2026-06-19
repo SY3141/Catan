@@ -792,12 +792,7 @@ function resourceAnimationSource(tile) {
 function resourceAnimationTarget(resourceIndex, playerIndex) {
   const target = resourceAnimationTargetElement(resourceIndex, playerIndex);
   if (!target) return null;
-  const rect = target.getBoundingClientRect();
-  if (!rect.width || !rect.height) return null;
-  return {
-    x: rect.left + rect.width / 2,
-    y: rect.top + rect.height / 2,
-  };
+  return visibleElementCenter(target, 20);
 }
 
 function resourceAnimationTargetElement(resourceIndex, playerIndex) {
@@ -805,6 +800,54 @@ function resourceAnimationTargetElement(resourceIndex, playerIndex) {
     return document.getElementById(`player-${playerIndex}`);
   }
   return document.querySelector(`#board-resource-legend [data-resource-index="${resourceIndex}"]`);
+}
+
+function visibleElementCenter(element, margin = 0) {
+  const rect = element.getBoundingClientRect();
+  if (!rect.width || !rect.height) return null;
+
+  let clip = {
+    left: margin,
+    top: margin,
+    right: Math.max(margin, window.innerWidth - margin),
+    bottom: Math.max(margin, window.innerHeight - margin),
+  };
+
+  for (let parent = element.parentElement; parent; parent = parent.parentElement) {
+    const style = window.getComputedStyle(parent);
+    const overflow = `${style.overflow} ${style.overflowX} ${style.overflowY}`;
+    if (!/(auto|scroll|hidden|clip)/.test(overflow)) continue;
+
+    const parentRect = parent.getBoundingClientRect();
+    clip = intersectRects(clip, parentRect) || clip;
+  }
+
+  const visible = intersectRects(rect, clip);
+  if (visible) {
+    return {
+      x: (visible.left + visible.right) / 2,
+      y: (visible.top + visible.bottom) / 2,
+    };
+  }
+
+  return {
+    x: clampNumber(rect.left + rect.width / 2, clip.left, clip.right),
+    y: clampNumber(rect.top + rect.height / 2, clip.top, clip.bottom),
+  };
+}
+
+function intersectRects(a, b) {
+  const left = Math.max(a.left, b.left);
+  const top = Math.max(a.top, b.top);
+  const right = Math.min(a.right, b.right);
+  const bottom = Math.min(a.bottom, b.bottom);
+  if (right <= left || bottom <= top) return null;
+  return { left, top, right, bottom };
+}
+
+function clampNumber(value, min, max) {
+  if (max < min) return min;
+  return Math.min(max, Math.max(min, value));
 }
 
 function updateSearchHighlights(snapshot, labels) {
