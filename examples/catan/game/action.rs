@@ -325,6 +325,27 @@ pub fn legal_actions_without_setup_pip_filter(state: &GameState, actions: &mut V
     }
 }
 
+/// Legal actions for a singleplayer human.
+///
+/// This keeps real game constraints but disables search-only canonical pruning
+/// so the UI can show every immediately legal move.
+pub fn human_legal_actions(state: &GameState, actions: &mut Vec<ActionId>) {
+    match &state.phase {
+        Phase::PlaceSettlement => {
+            actions.clear();
+            populate_place_settlement(state, actions, false);
+        }
+        Phase::Discard {
+            player, remaining, ..
+        } => populate_human_discard(state, *player, *remaining, actions),
+        _ => {
+            let mut relaxed = state.clone();
+            relaxed.canonical_build_order = false;
+            legal_actions(&relaxed, actions);
+        }
+    }
+}
+
 /// Minimum total pips for a setup settlement spot. Spots below this threshold
 /// are dominated — in 1v1 with 50+ spots available, a < 8 pip spot is never
 /// optimal. Disabled during colonist replay (canonical_build_order = false).
@@ -448,6 +469,24 @@ fn populate_discard(
             actions.push(discard_id(r));
         }
         suffix_total -= hand[r];
+    }
+}
+
+fn populate_human_discard(
+    state: &GameState,
+    player: Player,
+    remaining: u8,
+    actions: &mut Vec<ActionId>,
+) {
+    actions.clear();
+    if remaining == 0 {
+        return;
+    }
+    let hand = state.players[player].hand;
+    for &r in &ALL_RESOURCES {
+        if hand[r] > 0 {
+            actions.push(discard_id(r));
+        }
     }
 }
 
@@ -957,11 +996,109 @@ mod tests {
     fn human_setup_actions_do_not_filter_low_pips() {
         let state = make_state();
         let mut actions = Vec::new();
-        legal_actions_without_setup_pip_filter(&state, &mut actions);
+        human_legal_actions(&state, &mut actions);
         assert_eq!(
             actions.len(),
             54,
             "singleplayer human setup should expose every distance-legal node"
+        );
+    }
+
+    #[test]
+    fn human_main_actions_ignore_canonical_order_after_road() {
+        let mut state = make_state();
+        play_setup(&mut state);
+        state.phase = Phase::Main;
+        state.current_player = Player::One;
+        state.players[Player::One].hand = ResourceArray::new(5, 1, 1, 1, 1);
+
+        let mut actions = Vec::new();
+        legal_actions(&state, &mut actions);
+        let road = actions
+            .iter()
+            .copied()
+            .find(|a| a.0 >= ROAD_START && a.0 < ROAD_END)
+            .expect("road should be legal before canonical order advances");
+        game::apply(&mut state, road);
+
+        let mut canonical = Vec::new();
+        legal_actions(&state, &mut canonical);
+        let mut human = Vec::new();
+        human_legal_actions(&state, &mut human);
+
+        assert!(
+            !canonical.contains(&ActionId(BUY_DEV_CARD)),
+            "canonical ordering should hide buy-dev after building a road"
+        );
+        assert!(
+            canonical
+                .iter()
+                .all(|a| a.0 < MARITIME_START || a.0 >= MARITIME_END),
+            "canonical ordering should hide trades after building a road"
+        );
+        assert!(
+            human.contains(&ActionId(BUY_DEV_CARD)),
+            "human actions should still include affordable buy-dev"
+        );
+        assert!(
+            human
+                .iter()
+                .any(|a| a.0 >= MARITIME_START && a.0 < MARITIME_END),
+            "human actions should still include affordable trades"
+        );
+    }
+
+    #[test]
+    fn human_preroll_actions_include_non_knight_dev_cards() {
+        let mut state = make_state();
+        play_setup(&mut state);
+        assert!(matches!(state.phase, Phase::PreRoll));
+        let pid = state.current_player;
+        state.players[pid].dev_cards[DevCardKind::RoadBuilding] = 1;
+
+        let mut canonical = Vec::new();
+        legal_actions(&state, &mut canonical);
+        let mut human = Vec::new();
+        human_legal_actions(&state, &mut human);
+
+        assert!(
+            !canonical.contains(&ActionId(PLAY_ROAD_BUILDING)),
+            "canonical preroll ordering should hide Road Building"
+        );
+        assert!(
+            human.contains(&ActionId(PLAY_ROAD_BUILDING)),
+            "human preroll actions should include playable Road Building"
+        );
+    }
+
+    #[test]
+    fn human_discard_actions_ignore_lexicographic_lower_bound() {
+        let mut state = make_state();
+        state.players[Player::One].hand = ResourceArray::new(1, 1, 1, 0, 0);
+        state.phase = Phase::Discard {
+            player: Player::One,
+            remaining: 1,
+            roller: Player::Two,
+            min_resource: 2,
+        };
+
+        let lumber = discard_id(ALL_RESOURCES[0]);
+        let brick = discard_id(ALL_RESOURCES[1]);
+        let wool = discard_id(ALL_RESOURCES[2]);
+
+        let mut canonical = Vec::new();
+        legal_actions(&state, &mut canonical);
+        let mut human = Vec::new();
+        human_legal_actions(&state, &mut human);
+
+        assert_eq!(
+            canonical,
+            vec![wool],
+            "canonical discard should honor the lexicographic lower bound"
+        );
+        assert!(
+            human.contains(&lumber) && human.contains(&brick) && human.contains(&wool),
+            "human discard should include every resource currently held"
         );
     }
 

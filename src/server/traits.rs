@@ -63,6 +63,8 @@ pub trait GamePresenter<G: Game>: Send + Sync {
         &self,
         _terrains: &[String],
         _numbers: &[Option<u8>],
+        _port_layout: Option<&str>,
+        _ports: Option<&[String]>,
     ) -> Result<G, String> {
         Err("this game presenter does not support edited boards".into())
     }

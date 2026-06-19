@@ -20,6 +20,7 @@
   let activeAuthView = 'sign-in';
   let signInMounted = false;
   let signUpMounted = false;
+  let clerkNavigationGuardInstalled = false;
 
   if (!loginPage || !appShell || !authMount || !signInMount || !signUpMount || !signInTab || !signUpTab || !userButton) {
     return;
@@ -34,6 +35,53 @@
     document.dispatchEvent(new Event(name));
   };
 
+  const currentPageUrl = () => (
+    `${window.location.origin}${window.location.pathname}${window.location.search}`
+  );
+
+  const stripClerkRedirectParams = () => {
+    const hash = window.location.hash;
+    if (!hash) return null;
+
+    const lowerHash = hash.toLowerCase();
+    if (lowerHash.includes('verify-email-address')) {
+      window.history.replaceState(window.history.state, '', `${currentPageUrl()}#/verify-email-address`);
+      return 'sign-up';
+    }
+    if (lowerHash.includes('verify-phone-number')) {
+      window.history.replaceState(window.history.state, '', `${currentPageUrl()}#/verify-phone-number`);
+      return 'sign-up';
+    }
+
+    const [hashPath] = hash.split('?');
+    const lowerHashPath = hashPath.toLowerCase();
+    if (lowerHashPath === '#/sign-up') {
+      window.history.replaceState(window.history.state, '', currentPageUrl());
+      return 'sign-up';
+    }
+    if (lowerHashPath === '#/sign-in') {
+      window.history.replaceState(window.history.state, '', currentPageUrl());
+      return 'sign-in';
+    }
+
+    if (!hash.includes('?')) return null;
+
+    const authHashes = [
+      'continue',
+      'factor-one',
+      'factor-two',
+      'reset-password',
+      'sign-in',
+      'sign-up',
+      'verify-email-address',
+      'verify-phone-number',
+    ];
+    if (!authHashes.some((path) => lowerHashPath.includes(path))) return null;
+
+    window.history.replaceState(window.history.state, '', `${currentPageUrl()}${hashPath}`);
+    return null;
+  };
+
   const setActiveTab = (view) => {
     activeAuthView = view;
     const isSignIn = view === 'sign-in';
@@ -43,6 +91,69 @@
     signUpTab.setAttribute('aria-selected', String(!isSignIn));
     signInMount.classList.toggle('is-hidden', !isSignIn);
     signUpMount.classList.toggle('is-hidden', isSignIn);
+  };
+
+  const syncAuthViewFromHash = () => {
+    const normalizedView = stripClerkRedirectParams();
+    if (normalizedView) {
+      setActiveTab(normalizedView);
+      return;
+    }
+    const hash = window.location.hash.toLowerCase();
+    if (
+      hash.includes('sign-up')
+      || hash.includes('verify-email-address')
+      || hash.includes('verify-phone-number')
+      || hash.includes('continue')
+    ) {
+      setActiveTab('sign-up');
+    } else if (
+      hash.includes('sign-in')
+      || hash.includes('factor-one')
+      || hash.includes('factor-two')
+      || hash.includes('reset-password')
+    ) {
+      setActiveTab('sign-in');
+    }
+  };
+
+  const clearAuthHash = () => {
+    if (!window.location.hash) return;
+    window.history.replaceState(window.history.state, '', currentPageUrl());
+  };
+
+  const getLocalVerificationTarget = (target) => {
+    if (!target) return null;
+    const targetUrl = typeof target === 'string' ? target : String(target);
+    const lowerTarget = targetUrl.toLowerCase();
+    if (
+      lowerTarget.includes('accounts.dev/sign-in')
+      && lowerTarget.includes('verify-email-address')
+    ) {
+      return `${currentPageUrl()}#/verify-email-address`;
+    }
+    if (
+      lowerTarget.includes('accounts.dev/sign-in')
+      && lowerTarget.includes('verify-phone-number')
+    ) {
+      return `${currentPageUrl()}#/verify-phone-number`;
+    }
+    return null;
+  };
+
+  const installClerkNavigationGuard = (clerk) => {
+    if (!clerk || clerkNavigationGuardInstalled) return;
+    if (typeof clerk.navigate !== 'function') return;
+    const originalNavigate = clerk.navigate.bind(clerk);
+    clerk.navigate = async (target, ...args) => {
+      const localTarget = getLocalVerificationTarget(target);
+      if (localTarget) {
+        setActiveTab('sign-up');
+        return originalNavigate(localTarget, ...args);
+      }
+      return originalNavigate(target, ...args);
+    };
+    clerkNavigationGuardInstalled = true;
   };
 
   const showLoginPage = () => {
@@ -97,8 +208,9 @@
   const renderAuthState = () => {
     const clerk = window.Clerk;
     if (!clerk) return;
+    installClerkNavigationGuard(clerk);
 
-    if (clerk.isSignedIn || clerk.user) {
+    if (clerk.isSignedIn || clerk.session || clerk.user) {
       showAppShell();
       mountUserControl(clerk);
       window.hexfishAuthSignedIn = true;
@@ -117,11 +229,18 @@
 
   signInTab.addEventListener('click', () => {
     setActiveTab('sign-in');
+    clearAuthHash();
     renderAuthState();
   });
 
   signUpTab.addEventListener('click', () => {
     setActiveTab('sign-up');
+    clearAuthHash();
+    renderAuthState();
+  });
+
+  window.addEventListener('hashchange', () => {
+    syncAuthViewFromHash();
     renderAuthState();
   });
 
@@ -135,6 +254,8 @@
       await window.Clerk.load({
         ui: { ClerkUI: window.__internal_ClerkUICtor },
       });
+      installClerkNavigationGuard(window.Clerk);
+      syncAuthViewFromHash();
       renderAuthState();
       if (typeof window.Clerk.addListener === 'function') {
         window.Clerk.addListener(renderAuthState);

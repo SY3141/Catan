@@ -21,6 +21,23 @@ const DEV_SHORT = ['Kn', 'VP', 'RB', 'YP', 'Mo'];
 const PLAYER_COLORS = ['#4a9eff', '#ff6b6b'];
 const EDITOR_TERRAINS = ['forest', 'hills', 'pasture', 'fields', 'mountains', 'desert'];
 const EDITOR_NUMBERS = [2, 3, 4, 5, 6, 8, 9, 10, 11, 12];
+const EDITOR_PORT_KINDS = ['generic', 'lumber', 'brick', 'wool', 'grain', 'ore'];
+const EDITOR_PORT_LABELS = {
+  generic: 'Generic',
+  lumber: 'Lumber',
+  brick: 'Brick',
+  wool: 'Wool',
+  grain: 'Grain',
+  ore: 'Ore',
+};
+const EDITOR_PORT_COLORS = {
+  generic: '#ffffff',
+  lumber: '#2d5a27',
+  brick: '#b85c38',
+  wool: '#7ec850',
+  grain: '#e8b430',
+  ore: '#7a7a7a',
+};
 const PLAY_DIFFICULTIES = [
   { level: 1, simulations: 50, depth: 2 },
   { level: 2, simulations: 100, depth: 3 },
@@ -42,6 +59,7 @@ const EDITOR_TERRAIN_BAG = [
   'desert',
 ];
 const EDITOR_NUMBER_BAG = [2, 3, 3, 4, 4, 5, 5, 6, 6, 8, 8, 9, 9, 10, 10, 11, 11, 12];
+const EDITOR_PORT_BAG = ['lumber', 'brick', 'wool', 'grain', 'ore', 'generic', 'generic', 'generic', 'generic'];
 
 function playerColor(playerIndex) {
   return playerIndex === 0 || playerIndex === 1 ? PLAYER_COLORS[playerIndex] : '';
@@ -49,6 +67,10 @@ function playerColor(playerIndex) {
 
 function createBlankEditorTiles() {
   return Array.from({ length: 19 }, () => ({ terrain: null, number: null }));
+}
+
+function isEditorPortKind(kind) {
+  return EDITOR_PORT_KINDS.includes(kind);
 }
 
 function shuffled(values) {
@@ -67,11 +89,14 @@ let currentBoard = null;
 let editorBaseBoard = null;
 let editorTiles = createBlankEditorTiles();
 let selectedEditorTile = null;
+let editorPortLayout = 'primary';
+let editorPorts = [];
+let selectedEditorPort = null;
 let pendingEditorStart = false;
 let pendingNewGameSearch = false;
 let lastActionLogLength = { analysis: null, replay: null };
 let previousFrameHands = { analysis: null, replay: null };
-let activeView = 'analysis';
+let activeView = 'play-setup';
 let selectedPlayHumanPlayer = 0;
 let selectedPlayDifficulty = 5;
 let playMode = {
@@ -322,6 +347,7 @@ function setPlaySide(player) {
 session.on('GameState', (msg) => {
   if (!msg.replay && msg.state?.board) {
     editorBaseBoard = msg.state.board;
+    if (activeView !== 'editor') resetEditorPortsFromBaseBoard();
   }
   if (msg.replay) {
     replayState = msg;
@@ -671,8 +697,8 @@ function showResourceProductionAnimations(roll, beforeHands, afterHands, state) 
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
     const tile = currentBoard.tiles[item.tileIndex];
-    const from = tile ? board.boardPointToShellPoint(tile.cx, tile.cy) : null;
-    const to = resourceAnimationTarget(item.resourceIndex);
+    const from = tile ? resourceAnimationSource(tile) : null;
+    const to = resourceAnimationTarget(item.resourceIndex, item.playerIndex);
     if (!from || !to) continue;
 
     const chip = document.createElement('span');
@@ -710,6 +736,7 @@ function resourceProductionAnimationItems(roll, beforeHands, afterHands, state) 
         const amount = Math.min(source.amount, remaining);
         items.push({
           tileIndex: source.tileIndex,
+          playerIndex,
           resourceIndex,
           amount,
         });
@@ -751,17 +778,33 @@ function tileProductionAmount(tile, buildings) {
   return amount;
 }
 
-function resourceAnimationTarget(resourceIndex) {
-  const card = document.querySelector(`#board-resource-legend [data-resource-index="${resourceIndex}"]`);
+function resourceAnimationSource(tile) {
   const shell = document.getElementById('board-shell');
-  if (!card || !shell) return null;
-  const cardRect = card.getBoundingClientRect();
+  const point = board.boardPointToShellPoint(tile.cx, tile.cy);
+  if (!shell || !point) return null;
   const shellRect = shell.getBoundingClientRect();
-  if (!cardRect.width || !cardRect.height) return null;
   return {
-    x: cardRect.left - shellRect.left + cardRect.width / 2,
-    y: cardRect.top - shellRect.top + cardRect.height / 2,
+    x: shellRect.left + point.x,
+    y: shellRect.top + point.y,
   };
+}
+
+function resourceAnimationTarget(resourceIndex, playerIndex) {
+  const target = resourceAnimationTargetElement(resourceIndex, playerIndex);
+  if (!target) return null;
+  const rect = target.getBoundingClientRect();
+  if (!rect.width || !rect.height) return null;
+  return {
+    x: rect.left + rect.width / 2,
+    y: rect.top + rect.height / 2,
+  };
+}
+
+function resourceAnimationTargetElement(resourceIndex, playerIndex) {
+  if (playViewActive() && playerIndex !== playMode.humanPlayer) {
+    return document.getElementById(`player-${playerIndex}`);
+  }
+  return document.querySelector(`#board-resource-legend [data-resource-index="${resourceIndex}"]`);
 }
 
 function updateSearchHighlights(snapshot, labels) {
@@ -973,7 +1016,14 @@ function setGameHeaderLabelsVisible(visible) {
   document.getElementById('turn-label').classList.toggle('hidden', !visible);
 }
 
+function updateNewGameButtonLabel() {
+  const btn = document.getElementById('btn-new-game');
+  if (!btn) return;
+  btn.textContent = activeView === 'play' ? 'Lobby' : 'New Game';
+}
+
 function setEditorChrome(enabled) {
+  updateNewGameButtonLabel();
   if (enabled) hideRollBadge();
   if (enabled) clearResourceProductionAnimations();
   document.getElementById('left-ad-panel')?.classList.toggle('hidden', enabled);
@@ -988,6 +1038,7 @@ function setEditorChrome(enabled) {
   document.getElementById('phase-label').classList.toggle('hidden', enabled);
   document.getElementById('turn-label').classList.toggle('hidden', enabled);
   board.onTileClick = enabled ? handleEditorTileClick : null;
+  board.onPortClick = enabled ? handleEditorPortClick : null;
 
   const controlsEl = document.getElementById('controls');
   for (const child of controlsEl.children) {
@@ -1006,6 +1057,7 @@ function setMctsMoveDetailsVisible(visible) {
 }
 
 function updateViewChrome(msg) {
+  updateNewGameButtonLabel();
   const inPlay = playViewActive();
   const replay = !!msg?.replay || activeView === 'replay-board';
   setMctsMoveDetailsVisible(!inPlay);
@@ -1242,6 +1294,27 @@ function initEditorControls() {
     numberList.appendChild(btn);
   }
 
+  const portList = document.getElementById('editor-port-buttons');
+  for (const kind of EDITOR_PORT_KINDS) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'editor-port-btn';
+    btn.dataset.portKind = kind;
+
+    const swatch = document.createElement('span');
+    swatch.className = 'editor-swatch';
+    swatch.style.background = EDITOR_PORT_COLORS[kind];
+    btn.appendChild(swatch);
+
+    const label = document.createElement('span');
+    label.className = 'editor-port-label';
+    label.textContent = EDITOR_PORT_LABELS[kind];
+    btn.appendChild(label);
+
+    btn.addEventListener('click', () => applyEditorPort(kind));
+    portList.appendChild(btn);
+  }
+
   updateEditorPanel();
 }
 
@@ -1255,9 +1328,21 @@ function renderEditorBoard() {
     return;
   }
 
+  ensureEditorPorts();
+  const draftPorts = (editorBaseBoard.ports || []).map((port, fallbackIndex) => {
+    const index = Number.isInteger(port.index) ? port.index : fallbackIndex;
+    return {
+      ...port,
+      index,
+      kind: editorPorts[index] || port.kind || 'generic',
+      selected: index === selectedEditorPort,
+    };
+  });
+
   const draftBoard = {
     ...editorBaseBoard,
-    ports: [],
+    port_layout: editorPortLayout,
+    ports: draftPorts,
     tiles: editorBaseBoard.tiles.map((tile, i) => ({
       ...tile,
       terrain: editorTiles[i]?.terrain || null,
@@ -1274,6 +1359,14 @@ function renderEditorBoard() {
 
 function handleEditorTileClick(tileIndex) {
   selectedEditorTile = tileIndex;
+  selectedEditorPort = null;
+  setEditorStatus('');
+  renderEditorBoard();
+}
+
+function handleEditorPortClick(portIndex) {
+  selectedEditorPort = portIndex;
+  selectedEditorTile = null;
   setEditorStatus('');
   renderEditorBoard();
 }
@@ -1313,6 +1406,50 @@ function applyEditorNumber(number) {
   renderEditorBoard();
 }
 
+function applyEditorPort(kind) {
+  if (selectedEditorPort == null) {
+    setEditorStatus('No port selected');
+    return;
+  }
+  if (!isEditorPortKind(kind)) {
+    setEditorStatus('Invalid port');
+    return;
+  }
+  ensureEditorPorts();
+  editorPorts[selectedEditorPort] = kind;
+  setEditorStatus('');
+  renderEditorBoard();
+}
+
+function resetEditorPortsFromBaseBoard() {
+  if (!editorBaseBoard) {
+    editorPortLayout = 'primary';
+    editorPorts = [];
+    selectedEditorPort = null;
+    return;
+  }
+  editorPortLayout = editorBaseBoard.port_layout || 'primary';
+  const sourcePorts = [...(editorBaseBoard.ports || [])]
+    .sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
+  editorPorts = sourcePorts.map(port => isEditorPortKind(port.kind) ? port.kind : 'generic');
+  while (editorPorts.length < EDITOR_PORT_BAG.length) {
+    editorPorts.push(EDITOR_PORT_BAG[editorPorts.length]);
+  }
+  editorPorts = editorPorts.slice(0, EDITOR_PORT_BAG.length);
+  if (selectedEditorPort != null && selectedEditorPort >= editorPorts.length) {
+    selectedEditorPort = null;
+  }
+}
+
+function ensureEditorPorts() {
+  if (editorBaseBoard?.port_layout) {
+    editorPortLayout = editorBaseBoard.port_layout;
+  }
+  if (editorPorts.length !== EDITOR_PORT_BAG.length) {
+    resetEditorPortsFromBaseBoard();
+  }
+}
+
 function randomizeEditorBoard() {
   const terrains = shuffled(EDITOR_TERRAIN_BAG);
   const numbers = shuffled(EDITOR_NUMBER_BAG);
@@ -1322,6 +1459,7 @@ function randomizeEditorBoard() {
     terrain,
     number: terrain === 'desert' ? null : numbers[numberIndex++],
   }));
+  editorPorts = shuffled(EDITOR_PORT_BAG);
   setEditorStatus('');
   renderEditorBoard();
 }
@@ -1329,7 +1467,10 @@ function randomizeEditorBoard() {
 function updateEditorPanel() {
   const selection = document.getElementById('editor-selection');
   const tile = selectedEditorTile == null ? null : editorTiles[selectedEditorTile];
-  if (!tile) {
+  const portKind = selectedEditorPort == null ? null : editorPorts[selectedEditorPort];
+  if (portKind) {
+    selection.textContent = `Port ${selectedEditorPort + 1} - ${EDITOR_PORT_LABELS[portKind]}`;
+  } else if (!tile) {
     selection.textContent = '';
   } else {
     const parts = [`Tile ${selectedEditorTile + 1}`];
@@ -1349,6 +1490,12 @@ function updateEditorPanel() {
     const number = Number(btn.dataset.number);
     btn.disabled = !numbersEnabled;
     btn.classList.toggle('active', tile?.number === number);
+  }
+
+  for (const btn of document.querySelectorAll('.editor-port-btn')) {
+    const kind = btn.dataset.portKind;
+    btn.disabled = selectedEditorPort == null;
+    btn.classList.toggle('active', portKind === kind);
   }
 }
 
@@ -1370,6 +1517,11 @@ function validateEditorDraft() {
       return `Tile ${i + 1} needs a number`;
     }
   }
+  ensureEditorPorts();
+  if (editorPorts.length !== EDITOR_PORT_BAG.length) return 'Ports are still loading';
+  for (let i = 0; i < editorPorts.length; i++) {
+    if (!isEditorPortKind(editorPorts[i])) return `Port ${i + 1} needs a type`;
+  }
   return '';
 }
 
@@ -1389,6 +1541,8 @@ function startEditedGame() {
     type: 'StartEditedGame',
     terrains: editorTiles.map(tile => tile.terrain),
     numbers: editorTiles.map(tile => tile.terrain === 'desert' ? null : tile.number),
+    port_layout: editorPortLayout || editorBaseBoard?.port_layout || 'primary',
+    ports: [...editorPorts],
   });
 }
 
@@ -1408,6 +1562,7 @@ for (const btn of document.querySelectorAll('.play-side-btn')) {
 initPlayDifficultySelect();
 setPlaySide(selectedPlayHumanPlayer);
 initEditorControls();
+showPlaySetupView();
 
 const boardShellEl = document.getElementById('board-shell');
 if (boardShellEl && window.ResizeObserver) {
@@ -1490,26 +1645,39 @@ function updatePlayerPanel(idx, state) {
   // Dev cards
   const devEl = document.getElementById(`p${idx}-dev`);
   devEl.innerHTML = '';
-  for (let d = 0; d < 5; d++) {
-    if (pf.dev_cards[d] > 0) {
+  const hideDevBreakdown = playViewActive() && idx !== playMode.humanPlayer;
+  if (hideDevBreakdown) {
+    const visibleDevCards = pf.dev_cards ? pf.dev_cards.reduce((sum, count) => sum + count, 0) : 0;
+    const hiddenDevCards = pf.hidden_dev_cards || 0;
+    const totalDevCards = visibleDevCards + hiddenDevCards;
+    if (totalDevCards > 0) {
       const chip = document.createElement('span');
-      const bought = pf.dev_cards_bought_this_turn ? pf.dev_cards_bought_this_turn[d] : 0;
-      const playable = pf.dev_cards[d] - bought;
-      if (playable > 0) {
-        chip.className = 'dev-chip';
-        chip.textContent = `${playable} ${DEV_CARD_NAMES[d]}`;
-        devEl.appendChild(chip);
-      }
-      if (bought > 0) {
-        const bchip = document.createElement('span');
-        bchip.className = 'dev-chip bought-this-turn';
-        bchip.textContent = `${bought} ${DEV_CARD_NAMES[d]}`;
-        bchip.title = 'Bought this turn — cannot play yet';
-        devEl.appendChild(bchip);
+      chip.className = 'dev-chip hidden-dev';
+      chip.textContent = `${totalDevCards} unknown`;
+      devEl.appendChild(chip);
+    }
+  } else {
+    for (let d = 0; d < 5; d++) {
+      if (pf.dev_cards[d] > 0) {
+        const chip = document.createElement('span');
+        const bought = pf.dev_cards_bought_this_turn ? pf.dev_cards_bought_this_turn[d] : 0;
+        const playable = pf.dev_cards[d] - bought;
+        if (playable > 0) {
+          chip.className = 'dev-chip';
+          chip.textContent = `${playable} ${DEV_CARD_NAMES[d]}`;
+          devEl.appendChild(chip);
+        }
+        if (bought > 0) {
+          const bchip = document.createElement('span');
+          bchip.className = 'dev-chip bought-this-turn';
+          bchip.textContent = `${bought} ${DEV_CARD_NAMES[d]}`;
+          bchip.title = 'Bought this turn — cannot play yet';
+          devEl.appendChild(bchip);
+        }
       }
     }
   }
-  if (pf.hidden_dev_cards > 0) {
+  if (!hideDevBreakdown && pf.hidden_dev_cards > 0) {
     const est = state.expected_dev && state.expected_dev[idx];
     const hasEstimate = est && est.some(v => v > 0);
     if (hasEstimate) {

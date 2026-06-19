@@ -343,12 +343,18 @@ impl<G: Game> Search<G> {
             }
         }
 
-        // Budget exhausted — search is done.
+        // Ensure the root is expanded at least once. This lets a
+        // zero-simulation search use the evaluator policy instead of
+        // returning the default action 0.
+        if self.root.is_none() && self.sims_done == 0 {
+            return self.expand_root(rng);
+        }
+
+        // Budget exhausted - search is done.
         if self.sims_done >= self.config.num_simulations {
             return Select::Done;
         }
 
-        // Ensure the root is expanded.
         if self.root.is_none() {
             return self.expand_root(rng);
         }
@@ -533,7 +539,7 @@ impl<G: Game> Search<G> {
 
         // Terminal root — immediate result.
         if let Status::Terminal(reward) = self.root_state.status() {
-            self.sims_done = self.config.num_simulations;
+            self.sims_done = self.config.num_simulations.max(1);
             return Select::Terminal(
                 LeafId {
                     inner: LeafInner::Terminal,
@@ -1082,6 +1088,34 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct OnlyActionOneGame {
+        done: bool,
+    }
+
+    impl Game for OnlyActionOneGame {
+        const NUM_ACTIONS: usize = 2;
+
+        fn status(&self) -> Status {
+            if self.done {
+                Status::Terminal(0.0)
+            } else {
+                Status::Decision(1.0)
+            }
+        }
+
+        fn legal_actions(&self, buf: &mut Vec<usize>) {
+            if !self.done {
+                buf.push(1);
+            }
+        }
+
+        fn apply_action(&mut self, action: usize) {
+            assert_eq!(action, 1);
+            self.done = true;
+        }
+    }
+
     #[test]
     fn mcts_finds_winning_action() {
         let evaluator = RolloutEvaluator::default();
@@ -1102,6 +1136,29 @@ mod tests {
             result.policy[0] > result.policy[1],
             "improved policy should favor action 0: policy = {:?}",
             result.policy
+        );
+    }
+
+    #[test]
+    fn zero_budget_expands_root_before_result() {
+        let evaluator = RolloutEvaluator::default();
+        let config = Config {
+            num_simulations: 0,
+            ..Default::default()
+        };
+        let mut rng = fastrand::Rng::new();
+
+        let mut search = Search::new(OnlyActionOneGame { done: false }, config);
+        let result = run_to_completion(&mut search, &evaluator, &mut rng);
+
+        assert_eq!(
+            result.selected_action, 1,
+            "zero-budget search should choose from legal root actions, not default to 0"
+        );
+        assert_eq!(
+            search.root_visits(),
+            0,
+            "root policy evaluation should not count as a simulation visit"
         );
     }
 

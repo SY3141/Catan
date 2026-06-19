@@ -9,13 +9,14 @@ use crate::game::action::ActionId;
 use crate::game::board::Terrain;
 use crate::game::dev_card::{DevCardDeck, DevCardKind};
 use crate::game::dice::Dice;
-use crate::game::resource::ALL_RESOURCES;
+use crate::game::resource::{Resource, ALL_RESOURCES};
 use crate::game::state::{GameState, Phase};
-use crate::game::topology::Topology;
+use crate::game::topology::{PortLayout, Topology, PORT_COUNT};
 use crate::visualize;
 
 const EDITOR_TILE_COUNT: usize = 19;
-const EDITOR_LOG_PREFIX: &str = "editor-v1:";
+const EDITOR_LOG_V1_PREFIX: &str = "editor-v1:";
+const EDITOR_LOG_V2_PREFIX: &str = "editor-v2:";
 
 /// Compute expected hidden dev card distribution for each player.
 ///
@@ -83,10 +84,18 @@ impl CatanPresenter {
         &self,
         terrains: &[String],
         numbers: &[Option<u8>],
+        port_layout: Option<&str>,
+        ports: Option<&[String]>,
     ) -> Result<GameState, String> {
         let (terrains, numbers) = parse_editor_layout(terrains, numbers)?;
+        let (port_layout, port_resources) = parse_editor_ports(port_layout, ports)?;
         Ok(GameState::new(
-            Arc::new(Topology::from_layout(terrains, numbers)),
+            Arc::new(Topology::from_layout_with_port_layout(
+                terrains,
+                numbers,
+                port_resources,
+                port_layout,
+            )),
             DevCardDeck::new(),
             self.dice,
         ))
@@ -160,6 +169,49 @@ fn parse_terrain_name(name: &str) -> Result<Terrain, String> {
     }
 }
 
+fn parse_editor_port_layout(layout: Option<&str>) -> Result<PortLayout, String> {
+    match layout.unwrap_or("primary").trim().to_ascii_lowercase().as_str() {
+        "primary" => Ok(PortLayout::Primary),
+        "alternate" => Ok(PortLayout::Alternate),
+        other => Err(format!("unknown port layout '{other}'")),
+    }
+}
+
+fn parse_port_name(name: &str) -> Result<Option<Resource>, String> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "generic" => Ok(None),
+        "lumber" => Ok(Some(Resource::Lumber)),
+        "brick" => Ok(Some(Resource::Brick)),
+        "wool" => Ok(Some(Resource::Wool)),
+        "grain" => Ok(Some(Resource::Grain)),
+        "ore" => Ok(Some(Resource::Ore)),
+        other => Err(format!("unknown port kind '{other}'")),
+    }
+}
+
+fn parse_editor_ports(
+    port_layout: Option<&str>,
+    ports: Option<&[String]>,
+) -> Result<(PortLayout, [Option<Resource>; PORT_COUNT]), String> {
+    let port_layout = parse_editor_port_layout(port_layout)?;
+    let Some(ports) = ports else {
+        return Ok((port_layout, Topology::default_port_resources()));
+    };
+    if ports.len() != PORT_COUNT {
+        return Err(format!(
+            "edited board must include {PORT_COUNT} ports, got {}",
+            ports.len()
+        ));
+    }
+
+    let mut parsed = [None; PORT_COUNT];
+    for (i, port) in ports.iter().enumerate() {
+        parsed[i] =
+            parse_port_name(port).map_err(|message| format!("port {}: {message}", i + 1))?;
+    }
+    Ok((port_layout, parsed))
+}
+
 fn is_editor_number(number: u8) -> bool {
     (2..=12).contains(&number) && number != 7
 }
@@ -172,6 +224,17 @@ fn terrain_name(terrain: Terrain) -> &'static str {
         Terrain::Fields => "fields",
         Terrain::Mountains => "mountains",
         Terrain::Desert => "desert",
+    }
+}
+
+fn port_name(resource: Option<Resource>) -> &'static str {
+    match resource {
+        Some(Resource::Lumber) => "lumber",
+        Some(Resource::Brick) => "brick",
+        Some(Resource::Wool) => "wool",
+        Some(Resource::Grain) => "grain",
+        Some(Resource::Ore) => "ore",
+        None => "generic",
     }
 }
 
@@ -225,17 +288,78 @@ fn encode_editor_log_state(state: &GameState) -> String {
         })
         .collect::<Vec<_>>()
         .join(",");
-    format!("{EDITOR_LOG_PREFIX}{terrains}:{numbers}")
+    let ports = state
+        .topology
+        .port_resources()
+        .into_iter()
+        .map(port_name)
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "{}{}:{}:{}:{}",
+        EDITOR_LOG_V2_PREFIX,
+        terrains,
+        numbers,
+        state.topology.port_layout().as_str(),
+        ports
+    )
 }
 
-fn decode_editor_log_state(text: &str) -> Result<(Vec<String>, Vec<Option<u8>>), String> {
+struct EditorLogState {
+    terrains: Vec<String>,
+    numbers: Vec<Option<u8>>,
+    port_layout: Option<String>,
+    ports: Option<Vec<String>>,
+}
+
+fn decode_editor_v1_log_state(text: &str) -> Result<EditorLogState, String> {
     let body = text
         .trim()
-        .strip_prefix(EDITOR_LOG_PREFIX)
+        .strip_prefix(EDITOR_LOG_V1_PREFIX)
         .ok_or_else(|| "edited board log state is missing editor-v1 prefix".to_string())?;
     let (terrain_text, number_text) = body
         .split_once(':')
         .ok_or_else(|| "edited board log state is missing number layout".to_string())?;
+    let (terrains, numbers) = decode_editor_tiles(terrain_text, number_text)?;
+    Ok(EditorLogState {
+        terrains,
+        numbers,
+        port_layout: None,
+        ports: None,
+    })
+}
+
+fn decode_editor_v2_log_state(text: &str) -> Result<EditorLogState, String> {
+    let body = text
+        .trim()
+        .strip_prefix(EDITOR_LOG_V2_PREFIX)
+        .ok_or_else(|| "edited board log state is missing editor-v2 prefix".to_string())?;
+    let (terrain_text, rest) = body
+        .split_once(':')
+        .ok_or_else(|| "edited board log state is missing number layout".to_string())?;
+    let (number_text, rest) = rest
+        .split_once(':')
+        .ok_or_else(|| "edited board log state is missing port layout".to_string())?;
+    let (port_layout, port_text) = rest
+        .split_once(':')
+        .ok_or_else(|| "edited board log state is missing ports".to_string())?;
+    let (terrains, numbers) = decode_editor_tiles(terrain_text, number_text)?;
+    let ports = port_text
+        .split(',')
+        .map(|port| port.trim().to_string())
+        .collect::<Vec<_>>();
+    Ok(EditorLogState {
+        terrains,
+        numbers,
+        port_layout: Some(port_layout.trim().to_string()),
+        ports: Some(ports),
+    })
+}
+
+fn decode_editor_tiles(
+    terrain_text: &str,
+    number_text: &str,
+) -> Result<(Vec<String>, Vec<Option<u8>>), String> {
     let terrains = terrain_text
         .split(',')
         .map(|terrain| terrain.trim().to_string())
@@ -316,7 +440,7 @@ impl GamePresenter<GameState> for CatanPresenter {
     fn human_legal_actions(&self, state: &GameState, actions: &mut Vec<usize>) {
         actions.clear();
         let mut catan_actions = Vec::new();
-        game::action::legal_actions_without_setup_pip_filter(state, &mut catan_actions);
+        game::action::human_legal_actions(state, &mut catan_actions);
         actions.extend(catan_actions.iter().map(|a| a.0 as usize));
     }
 
@@ -365,9 +489,23 @@ impl GamePresenter<GameState> for CatanPresenter {
     }
 
     fn deserialize_log_state(&self, text: &str) -> Result<GameState, String> {
-        if text.trim().starts_with(EDITOR_LOG_PREFIX) {
-            let (terrains, numbers) = decode_editor_log_state(text)?;
-            return self.build_edited_game(&terrains, &numbers);
+        if text.trim().starts_with(EDITOR_LOG_V2_PREFIX) {
+            let log_state = decode_editor_v2_log_state(text)?;
+            return self.build_edited_game(
+                &log_state.terrains,
+                &log_state.numbers,
+                log_state.port_layout.as_deref(),
+                log_state.ports.as_deref(),
+            );
+        }
+        if text.trim().starts_with(EDITOR_LOG_V1_PREFIX) {
+            let log_state = decode_editor_v1_log_state(text)?;
+            return self.build_edited_game(
+                &log_state.terrains,
+                &log_state.numbers,
+                log_state.port_layout.as_deref(),
+                log_state.ports.as_deref(),
+            );
         }
         let mut state: GameState = text.parse()?;
         state.dice = self.dice;
@@ -386,8 +524,10 @@ impl GamePresenter<GameState> for CatanPresenter {
         &self,
         terrains: &[String],
         numbers: &[Option<u8>],
+        port_layout: Option<&str>,
+        ports: Option<&[String]>,
     ) -> Result<GameState, String> {
-        self.build_edited_game(terrains, numbers)
+        self.build_edited_game(terrains, numbers, port_layout, ports)
     }
 }
 
@@ -448,35 +588,109 @@ mod tests {
         (terrains, numbers)
     }
 
+    fn valid_editor_ports() -> Vec<String> {
+        [
+            "generic", "lumber", "brick", "wool", "grain", "ore", "generic", "generic", "generic",
+        ]
+        .iter()
+        .map(|port| port.to_string())
+        .collect()
+    }
+
     #[test]
     fn edited_game_validation_rejects_bad_layouts() {
         let presenter = presenter();
         let (terrains, mut numbers) = valid_editor_layout();
         numbers[0] = Some(7);
-        assert!(presenter.new_game_from_editor(&terrains, &numbers).is_err());
+        assert!(presenter
+            .new_game_from_editor(&terrains, &numbers, None, None)
+            .is_err());
 
         let (mut terrains, mut numbers) = valid_editor_layout();
         terrains[5] = "desert".into();
         numbers[5] = Some(8);
-        assert!(presenter.new_game_from_editor(&terrains, &numbers).is_err());
+        assert!(presenter
+            .new_game_from_editor(&terrains, &numbers, None, None)
+            .is_err());
 
         let (mut terrains, numbers) = valid_editor_layout();
         terrains[0] = "swamp".into();
-        assert!(presenter.new_game_from_editor(&terrains, &numbers).is_err());
+        assert!(presenter
+            .new_game_from_editor(&terrains, &numbers, None, None)
+            .is_err());
+
+        let (terrains, numbers) = valid_editor_layout();
+        assert!(presenter
+            .new_game_from_editor(&terrains, &numbers, Some("sideways"), None)
+            .is_err());
+
+        let mut ports = valid_editor_ports();
+        ports.pop();
+        assert!(presenter
+            .new_game_from_editor(&terrains, &numbers, Some("primary"), Some(&ports))
+            .is_err());
+
+        let mut ports = valid_editor_ports();
+        ports[0] = "gold".into();
+        assert!(presenter
+            .new_game_from_editor(&terrains, &numbers, Some("primary"), Some(&ports))
+            .is_err());
     }
 
     #[test]
-    fn edited_log_state_round_trips_custom_numbers() {
+    fn edited_game_accepts_custom_port_types_and_layout() {
         let presenter = presenter();
         let (terrains, numbers) = valid_editor_layout();
+        let ports = [
+            "ore", "ore", "generic", "lumber", "brick", "wool", "grain", "generic", "generic",
+        ]
+        .iter()
+        .map(|port| port.to_string())
+        .collect::<Vec<_>>();
+
         let state = presenter
-            .new_game_from_editor(&terrains, &numbers)
+            .new_game_from_editor(&terrains, &numbers, Some("alternate"), Some(&ports))
+            .expect("valid edited ports");
+
+        assert_eq!(state.topology.port_layout(), PortLayout::Alternate);
+        assert_eq!(state.topology.port_resources()[0], Some(Resource::Ore));
+        assert_eq!(state.topology.port_resources()[1], Some(Resource::Ore));
+        assert_eq!(state.topology.port_resources()[2], None);
+    }
+
+    #[test]
+    fn serialized_board_includes_stable_port_metadata() {
+        let presenter = presenter();
+        let (terrains, numbers) = valid_editor_layout();
+        let ports = valid_editor_ports();
+        let state = presenter
+            .new_game_from_editor(&terrains, &numbers, Some("alternate"), Some(&ports))
+            .expect("valid edited ports");
+
+        let serialized = presenter.serialize_state(&state);
+        assert_eq!(serialized["board"]["port_layout"], "alternate");
+        assert_eq!(serialized["board"]["ports"][0]["index"], 0);
+        assert_eq!(serialized["board"]["ports"][0]["kind"], "generic");
+    }
+
+    #[test]
+    fn edited_v2_log_state_round_trips_custom_numbers_and_ports() {
+        let presenter = presenter();
+        let (terrains, numbers) = valid_editor_layout();
+        let ports = [
+            "ore", "ore", "generic", "lumber", "brick", "wool", "grain", "generic", "generic",
+        ]
+        .iter()
+        .map(|port| port.to_string())
+        .collect::<Vec<_>>();
+        let state = presenter
+            .new_game_from_editor(&terrains, &numbers, Some("alternate"), Some(&ports))
             .expect("valid edited layout");
 
         let encoded = presenter
             .serialize_log_state(&state)
             .expect("edited log state");
-        assert!(encoded.starts_with(EDITOR_LOG_PREFIX));
+        assert!(encoded.starts_with(EDITOR_LOG_V2_PREFIX));
 
         let decoded = presenter
             .deserialize_log_state(&encoded)
@@ -491,5 +705,54 @@ mod tests {
                 tile_number(&decoded.topology, i)
             );
         }
+        assert_eq!(decoded.topology.port_layout(), PortLayout::Alternate);
+        assert_eq!(decoded.topology.port_resources(), state.topology.port_resources());
+    }
+
+    #[test]
+    fn edited_v1_log_state_still_decodes() {
+        let presenter = presenter();
+        let (terrains, numbers) = valid_editor_layout();
+        let terrain_text = terrains.join(",");
+        let number_text = numbers
+            .iter()
+            .map(|number| {
+                number
+                    .map(|number| number.to_string())
+                    .unwrap_or_else(|| "0".to_string())
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let encoded = format!("{EDITOR_LOG_V1_PREFIX}{terrain_text}:{number_text}");
+
+        let decoded = presenter
+            .deserialize_log_state(&encoded)
+            .expect("editor-v1 log state");
+
+        assert_eq!(decoded.topology.port_layout(), PortLayout::Primary);
+        assert_eq!(
+            decoded.topology.port_resources(),
+            Topology::default_port_resources()
+        );
+    }
+
+    #[test]
+    fn presenter_human_legal_actions_use_relaxed_catan_helper() {
+        let presenter = presenter();
+        let state = presenter.new_game(42);
+
+        let mut presenter_actions = Vec::new();
+        presenter.human_legal_actions(&state, &mut presenter_actions);
+
+        let mut expected = Vec::new();
+        game::action::human_legal_actions(&state, &mut expected);
+        let expected = expected.iter().map(|a| a.0 as usize).collect::<Vec<_>>();
+
+        assert_eq!(presenter_actions, expected);
+        assert_eq!(
+            presenter_actions.len(),
+            54,
+            "singleplayer setup should expose every distance-legal settlement"
+        );
     }
 }

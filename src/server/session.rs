@@ -489,8 +489,18 @@ impl<G: Game + 'static> GameSession<G> {
                 self.auto_resolve_chance();
                 vec![self.state_msg()]
             }
-            ClientMsg::StartEditedGame { terrains, numbers } => {
-                let state = match self.presenter.new_game_from_editor(&terrains, &numbers) {
+            ClientMsg::StartEditedGame {
+                terrains,
+                numbers,
+                port_layout,
+                ports,
+            } => {
+                let state = match self.presenter.new_game_from_editor(
+                    &terrains,
+                    &numbers,
+                    port_layout.as_deref(),
+                    ports.as_deref(),
+                ) {
                     Ok(state) => state,
                     Err(message) => return vec![ServerMsg::Error { message }],
                 };
@@ -550,26 +560,7 @@ impl<G: Game + 'static> GameSession<G> {
                 self.apply_search_budget(budget);
 
                 let result = self.run_search();
-                let action = result.selected_action;
-                let label = self.presenter.action_label(self.search.state(), action);
-                let (snapshot, action_labels) = match self.build_snapshot() {
-                    Some(snap) => {
-                        let labels = self.edge_labels(&snap.edges);
-                        (Some(snap), labels)
-                    }
-                    None => (None, Vec::new()),
-                };
-                self.apply_action(action);
-                self.auto_resolve_chance();
-                vec![
-                    ServerMsg::BotAction {
-                        action,
-                        label,
-                        snapshot,
-                        action_labels,
-                    },
-                    self.state_msg(),
-                ]
+                self.finish_bot_move(result)
             }
             ClientMsg::RunSims { count, .. } => {
                 if self.is_terminal() || self.is_chance() {
@@ -990,31 +981,7 @@ impl<G: Game + 'static> GameSession<G> {
     pub fn finish_search(&mut self, msg: &ClientMsg, result: SearchResult) -> Vec<ServerMsg> {
         match msg {
             ClientMsg::BotMove { .. } => {
-                if self.replay.is_some() {
-                    return vec![ServerMsg::Error {
-                        message: "Cannot apply bot moves while viewing a replay".into(),
-                    }];
-                }
-                let action = result.selected_action;
-                let label = self.presenter.action_label(self.search.state(), action);
-                let (snapshot, action_labels) = match self.build_snapshot() {
-                    Some(snap) => {
-                        let labels = self.edge_labels(&snap.edges);
-                        (Some(snap), labels)
-                    }
-                    None => (None, Vec::new()),
-                };
-                self.apply_action(action);
-                self.auto_resolve_chance();
-                vec![
-                    ServerMsg::BotAction {
-                        action,
-                        label,
-                        snapshot,
-                        action_labels,
-                    },
-                    self.state_msg(),
-                ]
+                self.finish_bot_move(result)
             }
             ClientMsg::RunSims { .. } | ClientMsg::RunSearch { .. } => {
                 match self.build_snapshot() {
@@ -1032,6 +999,58 @@ impl<G: Game + 'static> GameSession<G> {
             }
             _ => vec![],
         }
+    }
+
+    fn finish_bot_move(&mut self, result: SearchResult) -> Vec<ServerMsg> {
+        if self.replay.is_some() {
+            return vec![ServerMsg::Error {
+                message: "Cannot apply bot moves while viewing a replay".into(),
+            }];
+        }
+        if self.is_terminal() {
+            return vec![ServerMsg::Error {
+                message: "Game is over".into(),
+            }];
+        }
+        if self.is_chance() {
+            return vec![ServerMsg::Error {
+                message: "Current state is a chance node".into(),
+            }];
+        }
+
+        let action = result.selected_action;
+        let label = if action < G::NUM_ACTIONS {
+            self.presenter.action_label(self.search.state(), action)
+        } else {
+            format!("Action {action}")
+        };
+        let legal = self.legal_actions();
+        if !legal.contains(&action) {
+            let state = self.search.state().clone();
+            self.search.reset(state);
+            return vec![ServerMsg::Error {
+                message: format!("Bot selected illegal action: {label} ({action})"),
+            }];
+        }
+
+        let (snapshot, action_labels) = match self.build_snapshot() {
+            Some(snap) => {
+                let labels = self.edge_labels(&snap.edges);
+                (Some(snap), labels)
+            }
+            None => (None, Vec::new()),
+        };
+        self.apply_action(action);
+        self.auto_resolve_chance();
+        vec![
+            ServerMsg::BotAction {
+                action,
+                label,
+                snapshot,
+                action_labels,
+            },
+            self.state_msg(),
+        ]
     }
 
     /// Generate a Subtree message for the last explored path, if any.
@@ -1363,8 +1382,9 @@ mod tests {
     use std::{path::Path, sync::Arc};
 
     use crate::{
-        eval::{Evaluation, Evaluator},
+        eval::{Evaluation, Evaluator, Wdl},
         game::{Game, Status},
+        mcts::SearchResult,
     };
 
     use super::{
@@ -1451,9 +1471,15 @@ mod tests {
             &self,
             terrains: &[String],
             _numbers: &[Option<u8>],
+            port_layout: Option<&str>,
+            ports: Option<&[String]>,
         ) -> Result<TestGame, String> {
             if terrains.first().map(|terrain| terrain.as_str()) == Some("bad") {
                 Err("bad edited board".into())
+            } else if port_layout == Some("alternate")
+                && ports.and_then(|p| p.first()).map(|p| p.as_str()) == Some("ore")
+            {
+                Ok(TestGame { id: 98, moves: 0 })
             } else {
                 Ok(TestGame { id: 99, moves: 0 })
             }
@@ -1473,6 +1499,38 @@ mod tests {
 
     fn finish_search(session: &mut GameSession<TestGame>) {
         while session.search_tick().is_none() {}
+    }
+
+    #[test]
+    fn bot_move_result_must_be_legal_before_apply() {
+        let mut session = test_session();
+        let result = SearchResult {
+            policy: vec![0.0; TestGame::NUM_ACTIONS],
+            wdl: Wdl::DRAW,
+            selected_action: 2,
+            network_value: 0.0,
+            children_q: Vec::new(),
+            prior_top1_action: 2,
+            pv_depth: 0,
+            max_depth: 0,
+        };
+
+        let msgs = session.finish_search(
+            &ClientMsg::BotMove {
+                simulations: Some(0),
+                budget: None,
+            },
+            result,
+        );
+
+        match msgs.as_slice() {
+            [ServerMsg::Error { message }] => {
+                assert!(message.contains("Bot selected illegal action"));
+            }
+            other => panic!("expected illegal bot action error, got {other:?}"),
+        }
+        assert_eq!(session.cursor(), 0);
+        assert_eq!(session.search.state().moves, 0);
     }
 
     #[test]
@@ -1861,6 +1919,8 @@ mod tests {
         let msgs = session.handle(ClientMsg::StartEditedGame {
             terrains: vec!["forest".into()],
             numbers: vec![Some(5)],
+            port_layout: Some("alternate".into()),
+            ports: Some(vec!["ore".into()]),
         });
         match msgs.as_slice() {
             [
@@ -1872,7 +1932,7 @@ mod tests {
                 },
             ] => {
                 assert!(replay.is_none());
-                assert_eq!(state["id"], serde_json::json!(99));
+                assert_eq!(state["id"], serde_json::json!(98));
                 assert_eq!(state["moves"], serde_json::json!(0));
                 assert!(action_log.is_empty());
             }
@@ -1882,6 +1942,8 @@ mod tests {
         let msgs = session.handle(ClientMsg::StartEditedGame {
             terrains: vec!["bad".into()],
             numbers: vec![Some(5)],
+            port_layout: None,
+            ports: None,
         });
         match msgs.as_slice() {
             [ServerMsg::Error { message }] => assert!(message.contains("bad edited board")),
@@ -1890,7 +1952,7 @@ mod tests {
 
         match session.state_msg() {
             ServerMsg::GameState { state, .. } => {
-                assert_eq!(state["id"], serde_json::json!(99));
+                assert_eq!(state["id"], serde_json::json!(98));
                 assert_eq!(state["moves"], serde_json::json!(0));
             }
             _ => panic!("expected GameState"),

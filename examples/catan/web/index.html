@@ -74,8 +74,8 @@ tailwind.config = {
   <header class="flex items-center gap-4 px-4 py-2 bg-bg-2 border-b border-gray-700">
     <h1 class="text-sm font-semibold text-gray-100">HexFish</h1>
     <div class="flex items-center gap-1 text-xs" role="tablist" aria-label="Main views">
-      <button id="tab-play" class="view-tab px-2 py-1 rounded text-gray-400 hover:text-gray-100 hover:bg-bg-3" type="button" role="tab" aria-selected="false">Play</button>
-      <button id="tab-board" class="view-tab active px-2 py-1 rounded text-gray-100 bg-bg-3" type="button" role="tab" aria-selected="true">Analysis</button>
+      <button id="tab-play" class="view-tab active px-2 py-1 rounded text-gray-100 bg-bg-3" type="button" role="tab" aria-selected="true">Play</button>
+      <button id="tab-board" class="view-tab px-2 py-1 rounded text-gray-400 hover:text-gray-100 hover:bg-bg-3" type="button" role="tab" aria-selected="false">Analysis</button>
       <button id="tab-replay" class="view-tab px-2 py-1 rounded text-gray-400 hover:text-gray-100 hover:bg-bg-3" type="button" role="tab" aria-selected="false">Replay</button>
       <button id="tab-editor" class="view-tab px-2 py-1 rounded text-gray-400 hover:text-gray-100 hover:bg-bg-3" type="button" role="tab" aria-selected="false">Editor</button>
     </div>
@@ -88,7 +88,7 @@ tailwind.config = {
   </header>
 
   <!-- Main board layout -->
-  <div id="main-layout" class="flex flex-1 overflow-hidden">
+  <div id="main-layout" class="hidden flex flex-1 overflow-hidden">
     <!-- Left: Advertisement -->
     <aside id="left-ad-panel" class="w-44 min-w-44 flex flex-col p-2 bg-bg-2 border-r border-gray-700 overflow-hidden">
       <div class="bg-bg rounded-md p-2.5 border border-gray-700 ad-card" id="adsense-panel" aria-label="Advertisement">
@@ -115,7 +115,7 @@ tailwind.config = {
           <button id="btn-rotate-left" class="absolute top-0 left-0 z-10 w-8 h-8 flex items-center justify-center bg-bg-3/90 border border-gray-700 text-gray-100 rounded cursor-pointer hover:bg-accent transition-colors" title="Rotate board counterclockwise" aria-label="Rotate board counterclockwise">&#8634;</button>
           <button id="btn-mirror-board" class="absolute top-0 left-1/2 -translate-x-1/2 z-10 w-8 h-8 flex items-center justify-center bg-bg-3/90 border border-gray-700 text-gray-100 rounded cursor-pointer hover:bg-accent transition-colors" title="Mirror board" aria-label="Mirror board">&#8644;</button>
           <button id="btn-rotate-right" class="absolute top-0 right-0 z-10 w-8 h-8 flex items-center justify-center bg-bg-3/90 border border-gray-700 text-gray-100 rounded cursor-pointer hover:bg-accent transition-colors" title="Rotate board clockwise" aria-label="Rotate board clockwise">&#8635;</button>
-          <div id="board-history-controls" class="absolute z-10 flex items-center gap-1.5">
+          <div id="board-history-controls" class="absolute z-10 flex flex-col items-start gap-1.5">
             <button id="btn-undo" class="py-1.5 px-3 text-xs bg-bg-3/90 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-default" disabled>Undo</button>
             <button id="btn-redo" class="py-1.5 px-3 text-xs bg-bg-3/90 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-default" disabled>Redo</button>
           </div>
@@ -154,6 +154,10 @@ tailwind.config = {
         <h3 class="text-xs font-medium text-gray-400 mb-2">Number</h3>
         <div id="editor-number-buttons" class="grid grid-cols-2 gap-1.5"></div>
       </div>
+      <div class="bg-bg rounded-md p-2.5 border border-gray-700">
+        <h3 class="text-xs font-medium text-gray-400 mb-2">Ports</h3>
+        <div id="editor-port-buttons" class="grid grid-cols-2 gap-1.5"></div>
+      </div>
     </div>
 
     <!-- Side: Bank, players, dice -->
@@ -163,22 +167,26 @@ tailwind.config = {
         <div class="flex flex-wrap gap-1 text-xs" id="bank-dev"></div>
       </div>
       <div class="bg-bg rounded-md p-2.5 border border-gray-700 player-card" id="player-0">
-        <h3 class="text-sm font-medium text-p1 flex items-end gap-1.5 mb-1">
-          <span id="p0-name" class="leading-none">P1</span>
-          <span class="bg-bg-3 px-1.5 py-0.5 rounded text-xs leading-none" id="p0-vp">0</span>
-          <span id="p0-card-count" class="text-xs text-gray-400 font-normal shrink-0 leading-none" title="Total resource cards">0 Cards</span>
-        </h3>
+        <div class="flex items-start justify-between gap-2 mb-1">
+          <h3 class="min-w-0 text-sm font-medium text-p1 flex flex-wrap items-end gap-1.5">
+            <span id="p0-name" class="leading-none">P1</span>
+            <span id="p0-card-count" class="text-xs text-gray-400 font-normal shrink-0 leading-none" title="Total resource cards">0 Cards</span>
+          </h3>
+          <span class="vp-badge text-p1" id="p0-vp">0</span>
+        </div>
         <div class="flex flex-wrap gap-1 text-xs" id="p0-hand"></div>
         <div class="flex flex-wrap gap-1 text-xs mt-1" id="p0-dev"></div>
         <div class="text-xs text-gray-400 mt-1" id="p0-stats"></div>
         <button class="takeover-btn mt-2 w-full py-1 text-xs bg-bg-3 border border-gray-700 text-gray-300 rounded hover:bg-accent transition-colors cursor-pointer" data-player="0">Take Over</button>
       </div>
       <div class="bg-bg rounded-md p-2.5 border border-gray-700 player-card" id="player-1">
-        <h3 class="text-sm font-medium text-p2 flex items-end gap-1.5 mb-1">
-          <span id="p1-name" class="leading-none">P2</span>
-          <span class="bg-bg-3 px-1.5 py-0.5 rounded text-xs leading-none" id="p1-vp">0</span>
-          <span id="p1-card-count" class="text-xs text-gray-400 font-normal shrink-0 leading-none" title="Total resource cards">0 Cards</span>
-        </h3>
+        <div class="flex items-start justify-between gap-2 mb-1">
+          <h3 class="min-w-0 text-sm font-medium text-p2 flex flex-wrap items-end gap-1.5">
+            <span id="p1-name" class="leading-none">P2</span>
+            <span id="p1-card-count" class="text-xs text-gray-400 font-normal shrink-0 leading-none" title="Total resource cards">0 Cards</span>
+          </h3>
+          <span class="vp-badge text-p2" id="p1-vp">0</span>
+        </div>
         <div class="flex flex-wrap gap-1 text-xs" id="p1-hand"></div>
         <div class="flex flex-wrap gap-1 text-xs mt-1" id="p1-dev"></div>
         <div class="text-xs text-gray-400 mt-1" id="p1-stats"></div>
@@ -217,7 +225,7 @@ tailwind.config = {
     </div>
   </div>
 
-  <section id="play-setup-view" class="hidden flex-1 overflow-auto bg-bg p-3">
+  <section id="play-setup-view" class="flex-1 overflow-auto bg-bg p-3">
     <div class="mx-auto w-full max-w-xl">
       <section class="bg-bg-2 border border-gray-700 rounded p-4">
         <div class="flex items-start justify-between gap-3">
@@ -259,7 +267,7 @@ tailwind.config = {
   </section>
 
   <!-- Bottom: Controls -->
-  <div id="controls" class="flex items-center gap-2 px-4 py-2 bg-bg-2 border-t border-gray-700 flex-wrap">
+  <div id="controls" class="hidden flex items-center gap-2 px-4 py-2 bg-bg-2 border-t border-gray-700 flex-wrap">
     <button id="btn-new-game" class="py-1.5 px-3 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors">New Game</button>
     <button id="btn-start-edited-game" class="hidden py-1.5 px-3 text-xs bg-accent border border-accent text-white rounded cursor-pointer hover:bg-red-600 transition-colors">Start Game</button>
     <div id="replay-controls" class="hidden flex items-center gap-1.5 text-xs text-gray-300">
@@ -281,7 +289,7 @@ tailwind.config = {
         <button id="budget-mode-depth" type="button" class="budget-mode-btn px-2 py-0.5 bg-bg-3 text-gray-300 hover:bg-bg" data-budget-mode="pv_depth" aria-pressed="false">Depth</button>
       </div>
       <label id="budget-value-label" class="flex items-center gap-1">Sims:
-        <input type="number" id="sims-input" min="0" max="150000" value="50" step="50" class="w-24 bg-bg-3 border border-gray-700 text-gray-200 rounded px-1.5 py-0.5 text-xs">
+        <input type="number" id="sims-input" min="0" max="2000" value="50" step="50" class="w-24 bg-bg-3 border border-gray-700 text-gray-200 rounded px-1.5 py-0.5 text-xs">
       </label>
     </div>
     <div id="options-menu-control" class="relative">
@@ -304,10 +312,10 @@ tailwind.config = {
 <div id="svg-tooltip"></div>
 
 <script src="session.js?v=play-options-20260614"></script>
-<script src="board.js?v=resource-production-20260618"></script>
+<script src="board.js?v=editor-ports-20260619"></script>
 <script src="mcts.js?v=mcts-rank-colors-20260618"></script>
-<script src="controls.js?v=play-new-game-menu-20260615"></script>
-<script src="auth.js?v=user-sessions-20260610"></script>
-<script src="app.js?v=singleplayer-difficulty-20260618"></script>
+<script src="controls.js?v=bottom-hover-tips-20260619"></script>
+<script src="auth.js?v=clerk-stable-tabs-local-verify-20260619"></script>
+<script src="app.js?v=default-play-tab-20260619"></script>
 </body>
 </html>

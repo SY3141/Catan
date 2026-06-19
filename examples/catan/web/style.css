@@ -194,6 +194,21 @@
   border-color: #e94560 !important;
 }
 
+.vp-badge {
+  min-width: 24px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  border: 1px solid currentColor;
+  border-radius: 5px;
+  background: rgba(15, 52, 96, 0.55);
+  font-size: 0.75rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
 .ad-card {
   width: 100%;
   min-height: 110px;
@@ -337,9 +352,9 @@
 }
 
 .resource-animation-layer {
-  position: absolute;
+  position: fixed;
   inset: 0;
-  z-index: 12;
+  z-index: 60;
   overflow: visible;
   pointer-events: none;
 }
@@ -485,7 +500,8 @@
 }
 
 .editor-terrain-btn,
-.editor-number-btn {
+.editor-number-btn,
+.editor-port-btn {
   display: flex;
   min-height: 34px;
   align-items: center;
@@ -503,14 +519,17 @@
 
 .editor-terrain-btn:hover,
 .editor-number-btn:hover,
+.editor-port-btn:hover,
 .editor-terrain-btn.active,
-.editor-number-btn.active {
+.editor-number-btn.active,
+.editor-port-btn.active {
   border-color: #e94560;
   background: #223b68;
 }
 
 .editor-terrain-btn:disabled,
-.editor-number-btn:disabled {
+.editor-number-btn:disabled,
+.editor-port-btn:disabled {
   cursor: default;
   opacity: 0.42;
 }
@@ -523,11 +542,13 @@
   border-radius: 3px;
 }
 
-.editor-number-btn {
+.editor-number-btn,
+.editor-port-btn {
   justify-content: space-between;
 }
 
-.editor-number-label {
+.editor-number-label,
+.editor-port-label {
   min-width: 18px;
   font-weight: 700;
 }

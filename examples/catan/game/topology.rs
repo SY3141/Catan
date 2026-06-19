@@ -130,8 +130,25 @@ pub const PORT_SPECS_ALT: [(Hex, Direction); 9] = [
     (Hex::new(-1, -2), Direction::Southeast), // land: (-1,-1)
 ];
 
+pub const PORT_COUNT: usize = 9;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PortLayout {
+    Primary,
+    Alternate,
+}
+
+impl PortLayout {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PortLayout::Primary => "primary",
+            PortLayout::Alternate => "alternate",
+        }
+    }
+}
+
 /// Port resource pool: 5 specific + 4 generic.
-const PORT_POOL: [Option<Resource>; 9] = [
+const PORT_POOL: [Option<Resource>; PORT_COUNT] = [
     Some(Resource::Lumber),
     Some(Resource::Brick),
     Some(Resource::Wool),
@@ -153,6 +170,13 @@ fn port_direction_to_corners(dir: Direction) -> (u8, u8) {
         Direction::West => (4, 5),
         Direction::Northwest => (5, 0),
         Direction::Northeast => (0, 1),
+    }
+}
+
+fn port_specs_for_layout(layout: PortLayout) -> &'static [(Hex, Direction); PORT_COUNT] {
+    match layout {
+        PortLayout::Primary => &PORT_SPECS,
+        PortLayout::Alternate => &PORT_SPECS_ALT,
     }
 }
 
@@ -280,6 +304,57 @@ fn symbol_to_port_resource(s: u8) -> Option<Resource> {
 }
 
 impl Topology {
+    pub fn default_port_resources() -> [Option<Resource>; PORT_COUNT] {
+        PORT_POOL
+    }
+
+    pub fn port_layout(&self) -> PortLayout {
+        if self.matches_port_specs(&PORT_SPECS) {
+            PortLayout::Primary
+        } else {
+            PortLayout::Alternate
+        }
+    }
+
+    pub fn port_resources(&self) -> [Option<Resource>; PORT_COUNT] {
+        let mut resources = [None; PORT_COUNT];
+        for (i, (_, port)) in self.indexed_ports().into_iter().enumerate() {
+            resources[i] = match port {
+                Port::Generic => None,
+                Port::Specific(resource) => Some(resource),
+            };
+        }
+        resources
+    }
+
+    pub fn indexed_ports(&self) -> Vec<([NodeId; 2], Port)> {
+        let specs = port_specs_for_layout(self.port_layout());
+        let mut ports = Vec::with_capacity(PORT_COUNT);
+        for &(water_hex, dir) in specs {
+            if let Some(nodes) = self.port_nodes_for_spec(water_hex, dir) {
+                let port = self.nodes[nodes[0].0 as usize]
+                    .port
+                    .expect("port spec position has no port");
+                ports.push((nodes, port));
+            }
+        }
+        ports
+    }
+
+    pub fn from_layout_with_port_layout(
+        terrains: [Terrain; 19],
+        numbers: [Option<u8>; 19],
+        port_resources: [Option<Resource>; PORT_COUNT],
+        port_layout: PortLayout,
+    ) -> Self {
+        Self::from_layout_with_ports(
+            terrains,
+            numbers,
+            port_resources,
+            port_specs_for_layout(port_layout),
+        )
+    }
+
     pub fn from_seed(seed: u64) -> Self {
         let mut rng = fastrand::Rng::with_seed(seed);
         Self::build(&mut rng)
@@ -342,11 +417,11 @@ impl Topology {
         // --- Port type permutation rank ---
         // We need to recover the port_resources array: for each port spec
         // position, find what port type was assigned.
-        let port_specs = if port_spec_bit == 0 {
-            &PORT_SPECS
+        let port_specs = port_specs_for_layout(if port_spec_bit == 0 {
+            PortLayout::Primary
         } else {
-            &PORT_SPECS_ALT
-        };
+            PortLayout::Alternate
+        });
         let hex_set: HashMap<Hex, usize> = LAND_HEXES
             .iter()
             .enumerate()
@@ -403,36 +478,37 @@ impl Topology {
         }
 
         // --- Select port spec set ---
-        let port_specs = if port_spec_bit == 0 {
-            &PORT_SPECS
+        let port_specs = port_specs_for_layout(if port_spec_bit == 0 {
+            PortLayout::Primary
         } else {
-            &PORT_SPECS_ALT
-        };
+            PortLayout::Alternate
+        });
 
         Self::from_layout_with_ports(terrains, numbers, port_resources, port_specs)
     }
 
     /// Check whether this topology's port positions match the given port specs.
     fn matches_port_specs(&self, specs: &[(Hex, Direction); 9]) -> bool {
-        let hex_set: HashMap<Hex, usize> = LAND_HEXES
-            .iter()
-            .enumerate()
-            .map(|(i, &h)| (h, i))
-            .collect();
-
         for &(water_hex, dir) in specs {
-            let land_hex = water_hex.neighbor(dir);
-            if let Some(&land_idx) = hex_set.get(&land_hex) {
-                let (c0, _) = port_direction_to_corners(dir.opposite());
-                let node_id = self.tiles[land_idx].nodes[c0 as usize];
-                if self.nodes[node_id.0 as usize].port.is_none() {
+            if let Some(nodes) = self.port_nodes_for_spec(water_hex, dir) {
+                if self.nodes[nodes[0].0 as usize].port.is_none() {
                     return false;
                 }
-            } else {
-                return false;
+                continue;
             }
+            return false;
         }
         true
+    }
+
+    fn port_nodes_for_spec(&self, water_hex: Hex, dir: Direction) -> Option<[NodeId; 2]> {
+        let land_hex = water_hex.neighbor(dir);
+        let land_idx = LAND_HEXES.iter().position(|&hex| hex == land_hex)?;
+        let (c0, c1) = port_direction_to_corners(dir.opposite());
+        Some([
+            self.tiles[land_idx].nodes[c0 as usize],
+            self.tiles[land_idx].nodes[c1 as usize],
+        ])
     }
 
     /// Build a topology from an explicit board layout.

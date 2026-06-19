@@ -20,6 +20,7 @@ pub struct ReplayBoard {
     tiles: Vec<ReplayTile>,
     nodes: Vec<[f64; 2]>,
     edges: Vec<[u8; 2]>,
+    port_layout: &'static str,
     ports: Vec<ReplayPort>,
 }
 
@@ -34,6 +35,7 @@ pub struct ReplayTile {
 
 #[derive(Serialize)]
 pub struct ReplayPort {
+    index: usize,
     nodes: [u8; 2],
     kind: String,
 }
@@ -123,6 +125,13 @@ fn terrain_name(terrain: crate::game::board::Terrain) -> &'static str {
     }
 }
 
+fn port_kind_name(port: Port) -> String {
+    match port {
+        Port::Generic => "generic".to_string(),
+        Port::Specific(resource) => resource.to_string(),
+    }
+}
+
 pub fn build_board(state: &GameState) -> ReplayBoard {
     let node_positions = compute_node_positions(state);
     let topo = &state.topology;
@@ -149,30 +158,22 @@ pub fn build_board(state: &GameState) -> ReplayBoard {
         .map(|e| [e.nodes[0].0, e.nodes[1].0])
         .collect();
 
-    // Find port pairs: an edge where both endpoints have the same port type
-    let mut ports = Vec::new();
-    for edge in &topo.edges {
-        let [n0, n1] = edge.nodes;
-        let p0 = &topo.nodes[n0.0 as usize].port;
-        let p1 = &topo.nodes[n1.0 as usize].port;
-        if let (Some(p0), Some(p1)) = (p0, p1) {
-            if p0 == p1 {
-                let kind = match p0 {
-                    Port::Generic => "generic".to_string(),
-                    Port::Specific(r) => r.to_string(),
-                };
-                ports.push(ReplayPort {
-                    nodes: [n0.0, n1.0],
-                    kind,
-                });
-            }
-        }
-    }
+    let ports = topo
+        .indexed_ports()
+        .into_iter()
+        .enumerate()
+        .map(|(index, (nodes, port))| ReplayPort {
+            index,
+            nodes: [nodes[0].0, nodes[1].0],
+            kind: port_kind_name(port),
+        })
+        .collect();
 
     ReplayBoard {
         tiles,
         nodes: node_positions,
         edges,
+        port_layout: topo.port_layout().as_str(),
         ports,
     }
 }

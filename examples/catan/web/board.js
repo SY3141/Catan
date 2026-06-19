@@ -10,6 +10,14 @@ const TERRAIN_COLORS = {
   mountains: '#7a7a7a',
   desert: '#d4c088',
 };
+const PORT_COLORS = {
+  lumber: '#2d5a27',
+  brick: '#b85c38',
+  wool: '#7ec850',
+  grain: '#e8b430',
+  ore: '#7a7a7a',
+  generic: '#ffffff',
+};
 
 const HEX_SIZE = 50;
 const SQRT3 = Math.sqrt(3);
@@ -33,6 +41,7 @@ class Board {
     this.boardData = null;
     this.onActionClick = null;
     this.onTileClick = null;
+    this.onPortClick = null;
     this.rotationStep = 0;
     this.mirrored = false;
     this.boardCenter = [0, 0];
@@ -621,10 +630,6 @@ class Board {
   }
 
   _drawPort(parent, port, nodes) {
-    const PORT_COLORS = {
-      lumber: '#2d5a27', brick: '#b85c38', wool: '#7ec850',
-      grain: '#e8b430', ore: '#7a7a7a', generic: '#ffffff',
-    };
     const [n0, n1] = port.nodes;
     const [x0, y0] = nodes[n0];
     const [x1, y1] = nodes[n1];
@@ -633,6 +638,8 @@ class Board {
     const color = PORT_COLORS[port.kind] || PORT_COLORS.generic;
     const ratio = port.kind === 'generic' ? '3:1' : '2:1';
     const darkText = port.kind === 'grain' || port.kind === 'wool' || port.kind === 'generic';
+    const group = this._el('g', { class: port.selected ? 'port-marker selected' : 'port-marker' });
+    parent.appendChild(group);
 
     // Normal perpendicular to the port edge, pointing outward
     if (!this._centroid) {
@@ -652,7 +659,7 @@ class Board {
     const lx = mx + nx / nlen * offset;
     const ly = my + ny / nlen * offset;
 
-    parent.appendChild(this._el('path', {
+    group.appendChild(this._el('path', {
       d: `M ${x0} ${y0} L ${lx} ${ly} L ${x1} ${y1}`,
       fill: 'none',
       stroke: '#d2b48c',
@@ -665,10 +672,11 @@ class Board {
 
     // Circle label with ratio
     const isGeneric = port.kind === 'generic';
-    parent.appendChild(this._el('circle', {
+    group.appendChild(this._el('circle', {
       cx: lx, cy: ly, r: 10,
       fill: isGeneric ? '#334' : color,
-      stroke: isGeneric ? color : 'none', 'stroke-width': 1.5,
+      stroke: port.selected ? '#e94560' : (isGeneric ? color : 'none'),
+      'stroke-width': port.selected ? 2.5 : 1.5,
       opacity: 0.85
     }));
     const txt = this._el('text', {
@@ -678,7 +686,19 @@ class Board {
       'font-weight': '600'
     });
     txt.textContent = ratio;
-    parent.appendChild(this._keepUpright(txt, lx, ly));
+    group.appendChild(this._keepUpright(txt, lx, ly));
+
+    if (this.onPortClick && Number.isInteger(port.index)) {
+      const hit = this._el('circle', {
+        cx: lx, cy: ly, r: 15,
+        fill: 'transparent',
+        cursor: 'pointer',
+        'pointer-events': 'all',
+      });
+      hit.addEventListener('click', () => this.onPortClick?.(port.index));
+      this._attachTooltip(hit, `Port ${port.index + 1}: ${ratio}`);
+      group.appendChild(hit);
+    }
   }
 
   _playerColor(playerIndex) {

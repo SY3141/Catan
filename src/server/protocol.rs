@@ -111,6 +111,8 @@ pub enum ClientMsg {
     StartEditedGame {
         terrains: Vec<String>,
         numbers: Vec<Option<u8>>,
+        port_layout: Option<String>,
+        ports: Option<Vec<String>>,
     },
     /// List saved game logs for this authenticated web session.
     ListReplays,

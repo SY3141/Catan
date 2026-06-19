@@ -4,6 +4,54 @@
 // RunSims adds to the budget; SetAutoSearch sets auto-refill on state
 // change. The client just sends commands and renders server updates.
 
+const BOTTOM_CONTROL_HOVER_TIPS = [
+  ['btn-new-game', 'Start a fresh game from the standard board setup.'],
+  ['btn-start-edited-game', 'Start a game from the board currently configured in the editor.'],
+  ['btn-replay-first', 'Jump to the initial position in this replay.'],
+  ['btn-replay-prev', 'Step back one position in this replay.'],
+  ['replay-slider', 'Drag to jump to a specific position in this replay.'],
+  ['btn-replay-next', 'Step forward one position in this replay.'],
+  ['btn-replay-last', 'Jump to the final position in this replay.'],
+  ['btn-bot-move', 'Ask the bot to choose and play a move using the current search budget.'],
+  ['btn-run-sims', 'Run analysis from the current position using the selected budget.'],
+  ['btn-pause-search', 'Stop the running search and keep the current analysis results.'],
+  ['budget-mode-sims', 'Use a simulation-count budget for search.'],
+  ['budget-mode-depth', 'Use a principal-variation depth target for search.'],
+  ['budget-value-label', 'Set the search budget value for the selected mode.'],
+  ['sims-input', 'Set the search budget value for the selected mode.'],
+  ['btn-options-menu', 'Open search and move automation options.'],
+  ['apply-control', 'After a manual search finishes, automatically play the best move from that search.'],
+  ['autoplay-control', 'Keep searching and playing moves automatically until the game stops or this is turned off.'],
+  ['autosearch-control', 'Automatically keep analysis search running on each new position.'],
+];
+
+function attachInstantDomTooltip(el, text) {
+  const tip = document.getElementById('svg-tooltip');
+  if (!el || !tip) return;
+
+  const show = (event) => {
+    tip.textContent = text;
+    tip.style.display = 'block';
+    const x = event.clientX ?? el.getBoundingClientRect().left;
+    const y = event.clientY ?? el.getBoundingClientRect().top;
+    tip.style.left = x + 10 + 'px';
+    tip.style.top = y + 10 + 'px';
+  };
+  const move = (event) => {
+    tip.style.left = event.clientX + 10 + 'px';
+    tip.style.top = event.clientY + 10 + 'px';
+  };
+  const hide = () => {
+    tip.style.display = 'none';
+  };
+
+  el.addEventListener('mouseenter', show);
+  el.addEventListener('mousemove', move);
+  el.addEventListener('mouseleave', hide);
+  el.addEventListener('focus', show);
+  el.addEventListener('blur', hide);
+}
+
 class Controls {
   constructor(session) {
     this.session = session;
@@ -24,6 +72,7 @@ class Controls {
     this.onNewGame = null;
     this._setBudgetMode(this.budgetMode);
     this._bind();
+    this._initHoverTips();
     this._updateSearchButtons();
     this._updateOptionsVisibility();
     // Tell the server our initial auto-search state.
@@ -66,7 +115,7 @@ class Controls {
     } else {
       label.firstChild.textContent = 'Sims:';
       input.min = '0';
-      input.max = '150000';
+      input.max = '2000';
       input.step = '50';
       input.value = this.budgetValues.simulations;
     }
@@ -301,6 +350,12 @@ class Controls {
     this.pendingAutoplay = true;
     this.session.send({ type: 'PlayAction', action: forced.action });
     return true;
+  }
+
+  _initHoverTips() {
+    for (const [id, text] of BOTTOM_CONTROL_HOVER_TIPS) {
+      attachInstantDomTooltip(document.getElementById(id), text);
+    }
   }
 
   _bind() {
