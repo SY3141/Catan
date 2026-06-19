@@ -55,20 +55,21 @@
 .login-mark {
   width: 28px;
   height: 28px;
-  border: 1px solid rgba(255, 255, 255, 0.16);
-  border-radius: 6px;
-  background:
-    linear-gradient(135deg, #2d5a27 0 50%, transparent 50%),
-    linear-gradient(45deg, #e8b430 0 50%, #b85c38 50%);
+  background: #2d5a27;
+  clip-path: polygon(25% 6%, 75% 6%, 100% 50%, 75% 94%, 25% 94%, 0 50%);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.18),
+    0 8px 20px rgba(45, 90, 39, 0.3);
 }
 
 .login-copy h1 {
-  max-width: 650px;
+  max-width: 100%;
   margin-bottom: 18px;
   color: #ffffff;
-  font-size: clamp(2.2rem, 5vw, 4.75rem);
+  font-size: 3.65rem;
   font-weight: 700;
-  line-height: 0.98;
+  line-height: 1;
+  white-space: nowrap;
 }
 
 .login-copy p {
@@ -81,7 +82,9 @@
 
 .login-preview {
   width: min(640px, 100%);
-  overflow: hidden;
+  display: flex;
+  justify-content: center;
+  overflow: visible;
   border: 1px solid rgba(148, 163, 184, 0.24);
   border-radius: 8px;
   background: #16213e;
@@ -90,7 +93,7 @@
 
 .login-preview img {
   display: block;
-  width: 100%;
+  width: 50%;
   height: auto;
 }
 
@@ -177,7 +180,7 @@
   }
 
   .login-copy h1 {
-    font-size: 2.4rem;
+    font-size: 2.1rem;
   }
 
   .login-copy p {
@@ -189,24 +192,58 @@
   }
 }
 
+@media (max-width: 420px) {
+  .login-copy h1 {
+    font-size: 1.75rem;
+  }
+}
+
 /* Active player highlight */
+.player-card {
+  position: relative;
+}
+
 .player-card.active {
   border-color: #e94560 !important;
 }
 
+.player-card-header {
+  min-height: 22px;
+  padding-right: 30px;
+}
+
 .vp-badge {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  display: inline-flex;
+  box-sizing: border-box;
+  width: 24px;
   min-width: 24px;
   height: 22px;
-  display: inline-flex;
   align-items: center;
   justify-content: center;
   flex: 0 0 auto;
   border: 1px solid currentColor;
   border-radius: 5px;
   background: rgba(15, 52, 96, 0.55);
+  padding: 0;
+  font-family: inherit;
   font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
   font-weight: 700;
+  letter-spacing: 0;
   line-height: 1;
+  text-align: center;
+  white-space: nowrap;
+}
+
+#player-0 .vp-badge {
+  color: #4a9eff;
+}
+
+#player-1 .vp-badge {
+  color: #ff6b6b;
 }
 
 .ad-card {
