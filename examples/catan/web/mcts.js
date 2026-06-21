@@ -209,6 +209,10 @@ class MCTSPanel {
     this._updateAnalysisBar([0, 1, 0]);
   }
 
+  updateAnalysisBar(rootWdl) {
+    this._updateAnalysisBar(rootWdl);
+  }
+
   _updateAnalysisBar(rootWdl) {
     if (!this.analysisBarEl || !this.analysisP1El || !this.analysisP2El) return;
     let [w, d, l] = Array.isArray(rootWdl) ? rootWdl : [0, 1, 0];

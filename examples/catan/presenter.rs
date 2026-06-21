@@ -5,7 +5,7 @@ use hexfish::player::Player;
 use hexfish::server::GamePresenter;
 
 use crate::game;
-use crate::game::action::{ActionId, ROLL};
+use crate::game::action::{ActionId, DISCARD_END, DISCARD_START, ROLL};
 use crate::game::board::Terrain;
 use crate::game::dev_card::{DevCardDeck, DevCardKind};
 use crate::game::dice::Dice;
@@ -387,55 +387,16 @@ fn decode_editor_tiles(
 
 impl GamePresenter<GameState> for CatanPresenter {
     fn serialize_state(&self, state: &GameState) -> serde_json::Value {
-        let board = visualize::build_board(state);
-        let frame = visualize::capture_frame(state, "", state.current_player as u8, None);
+        self.serialize_state_with_perspective(state, None)
+    }
 
-        let (expected_dev, expected_bank_dev) = expected_hidden_dev_cards(state);
-
-        // Balanced dice info: normalized probabilities for the next roll.
-        // If the current player already rolled (main phase), the next roller
-        // is the opponent; otherwise it's the current player.
-        let dice_info = match &state.dice {
-            Dice::Balanced(b) => {
-                let next_roller = if state.pre_roll || state.setup_count < 4 {
-                    state.current_player
-                } else {
-                    state.current_player.opponent()
-                };
-                let ws = b.weights(next_roller);
-                let total: f64 = ws.iter().map(|(_, w)| *w as f64).sum();
-                let probs: Vec<f64> = ws
-                    .iter()
-                    .map(|(_, w)| if total > 0.0 { *w as f64 / total } else { 0.0 })
-                    .collect();
-                Some(serde_json::json!({
-                    "probs": probs,
-                    "cards_left": b.cards_left(),
-                    "total_cards": 36,
-                }))
-            }
-            Dice::Random => None,
+    fn serialize_state_for_player(&self, state: &GameState, player: usize) -> serde_json::Value {
+        let perspective = match player {
+            0 => Some(Player::One),
+            1 => Some(Player::Two),
+            _ => None,
         };
-
-        let mut v = serde_json::json!({
-            "board": board,
-            "frame": frame,
-            "turn": state.turn_number,
-            "current_player": state.current_player as u8,
-            "p1_vp": state.total_vps(Player::One),
-            "p2_vp": state.total_vps(Player::Two),
-            "expected_dev": expected_dev,
-        });
-        if let Some(bank_dev) = expected_bank_dev {
-            v["expected_bank_dev"] = serde_json::json!(bank_dev);
-        }
-        if let Some(dice) = dice_info {
-            v["dice"] = dice;
-        }
-        if let Some(ref names) = self.player_names {
-            v["player_names"] = serde_json::json!(names);
-        }
-        v
+        self.serialize_state_with_perspective(state, perspective)
     }
 
     fn action_label(&self, state: &GameState, action: usize) -> String {
@@ -479,6 +440,36 @@ impl GamePresenter<GameState> for CatanPresenter {
             }
             _ => String::new(),
         }
+    }
+
+    fn action_log_label_for_player(
+        &self,
+        state: &GameState,
+        action: usize,
+        _is_chance: bool,
+        label: &str,
+        player: usize,
+    ) -> String {
+        let perspective = match player {
+            0 => Player::One,
+            1 => Player::Two,
+            _ => return label.to_string(),
+        };
+
+        if matches!(state.phase, Phase::DevCardDraw) && state.current_player != perspective {
+            return "Drew dev".into();
+        }
+
+        if (DISCARD_START..DISCARD_END).contains(&(action as u8)) {
+            if let Phase::Discard { player, .. } = state.phase {
+                if player != perspective {
+                    let player_num = if player == Player::One { 1 } else { 2 };
+                    return format!("P{player_num}: Discard");
+                }
+            }
+        }
+
+        label.to_string()
     }
 
     fn phase_label(&self, state: &GameState) -> String {
@@ -537,6 +528,74 @@ impl GamePresenter<GameState> for CatanPresenter {
         ports: Option<&[String]>,
     ) -> Result<GameState, String> {
         self.build_edited_game(terrains, numbers, port_layout, ports)
+    }
+}
+
+impl CatanPresenter {
+    fn serialize_state_with_perspective(
+        &self,
+        state: &GameState,
+        perspective: Option<Player>,
+    ) -> serde_json::Value {
+        let board = visualize::build_board(state);
+        let frame = visualize::capture_frame_with_perspective(
+            state,
+            "",
+            state.current_player as u8,
+            None,
+            perspective,
+        );
+
+        let (expected_dev, expected_bank_dev) = expected_hidden_dev_cards(state);
+
+        // Balanced dice info: normalized probabilities for the next roll.
+        // If the current player already rolled (main phase), the next roller
+        // is the opponent; otherwise it's the current player.
+        let dice_info = match &state.dice {
+            Dice::Balanced(b) => {
+                let next_roller = if state.pre_roll || state.setup_count < 4 {
+                    state.current_player
+                } else {
+                    state.current_player.opponent()
+                };
+                let ws = b.weights(next_roller);
+                let total: f64 = ws.iter().map(|(_, w)| *w as f64).sum();
+                let probs: Vec<f64> = ws
+                    .iter()
+                    .map(|(_, w)| if total > 0.0 { *w as f64 / total } else { 0.0 })
+                    .collect();
+                Some(serde_json::json!({
+                    "probs": probs,
+                    "cards_left": b.cards_left(),
+                    "total_cards": 36,
+                }))
+            }
+            Dice::Random => None,
+        };
+
+        let mut v = serde_json::json!({
+            "board": board,
+            "frame": frame,
+            "turn": state.turn_number,
+            "current_player": state.current_player as u8,
+            "p1_vp": state.total_vps(Player::One),
+            "p2_vp": state.total_vps(Player::Two),
+            "expected_dev": expected_dev,
+        });
+        if let Some(bank_dev) = expected_bank_dev {
+            v["expected_bank_dev"] = serde_json::json!(bank_dev);
+        }
+        if let Some(dice) = dice_info {
+            v["dice"] = dice;
+        }
+        if let Some(ref names) = self.player_names {
+            v["player_names"] = serde_json::json!(names);
+        }
+        if let Some(player) = perspective {
+            v["private_view"] = serde_json::json!(true);
+            v["local_player"] = serde_json::json!(player as u8);
+        }
+        v
     }
 }
 
@@ -757,6 +816,40 @@ mod tests {
         assert_eq!(
             decoded.topology.port_resources(),
             Topology::default_port_resources()
+        );
+    }
+
+    #[test]
+    fn multiplayer_log_redacts_opponent_private_card_labels() {
+        let presenter = presenter();
+        let mut state = presenter.new_game(42);
+
+        state.current_player = Player::One;
+        state.phase = Phase::DevCardDraw;
+        assert_eq!(
+            presenter.action_log_label_for_player(&state, 0, true, "Drew Knight", 0),
+            "Drew Knight"
+        );
+        assert_eq!(
+            presenter.action_log_label_for_player(&state, 0, true, "Drew Knight", 1),
+            "Drew dev"
+        );
+
+        state.phase = Phase::Discard {
+            player: Player::One,
+            remaining: 1,
+            roller: Player::Two,
+            min_resource: 0,
+        };
+        assert_eq!(
+            presenter.action_log_label_for_player(
+                &state,
+                DISCARD_START as usize,
+                false,
+                "P1: Drop ore",
+                1,
+            ),
+            "P1: Discard"
         );
     }
 

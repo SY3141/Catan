@@ -54,6 +54,24 @@ pub struct ReplayState {
     pub len: usize,
 }
 
+/// Seat summary for an invite-code multiplayer room.
+#[derive(Clone, Debug, Serialize)]
+pub struct MultiplayerPlayer {
+    pub occupied: bool,
+    pub connected: bool,
+    pub you: bool,
+}
+
+/// Public lobby summary for an invite-code multiplayer room.
+#[derive(Clone, Debug, Serialize)]
+pub struct MultiplayerLobbyRoom {
+    pub code: String,
+    pub status: String,
+    pub occupied: u8,
+    pub connected: u8,
+    pub last_activity_ms: u64,
+}
+
 /// Which board state a read-only analysis request should run against.
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -126,6 +144,16 @@ pub enum ClientMsg {
     SetReplayCursor { cursor: usize },
     /// Human plays an action.
     PlayAction { action: usize },
+    /// Create an invite-code multiplayer room.
+    CreateMultiplayerRoom { preferred_player: Option<u8> },
+    /// List visible invite-code multiplayer rooms.
+    ListMultiplayerRooms,
+    /// Join an existing invite-code multiplayer room.
+    JoinMultiplayerRoom { code: String },
+    /// Leave the current multiplayer room on this socket.
+    LeaveMultiplayerRoom,
+    /// Human plays an action in the current multiplayer room.
+    PlayMultiplayerAction { action: usize },
     /// Request the bot to play an action.
     BotMove {
         simulations: Option<u32>,
@@ -205,6 +233,17 @@ pub enum ServerMsg {
     },
     /// Saved replays for the current web user.
     ReplayList { entries: Vec<ReplayEntry> },
+    /// Current invite-code multiplayer room state for this socket.
+    MultiplayerRoom {
+        code: String,
+        status: String,
+        local_player: Option<u8>,
+        players: Vec<MultiplayerPlayer>,
+    },
+    /// Public multiplayer lobby room list.
+    MultiplayerLobby { rooms: Vec<MultiplayerLobbyRoom> },
+    /// Public multiplayer analysis bar update. Contains no action policy details.
+    MultiplayerAnalysis { root_wdl: [f32; 3] },
     /// MCTS search snapshot.
     Snapshot {
         snapshot: SearchSnapshot,

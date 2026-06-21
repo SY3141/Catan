@@ -397,14 +397,24 @@ impl<G: Game + 'static> GameSession<G> {
         }
     }
 
-    fn action_log_with_cursors(&self) -> (Vec<String>, Vec<usize>) {
+    fn action_log_with_cursors(&self, perspective: Option<usize>) -> (Vec<String>, Vec<usize>) {
         let mut action_log = Vec::new();
         let mut action_log_cursors = Vec::new();
         for (i, entry) in self.history.iter().enumerate() {
-            if entry.label.is_empty() {
+            let label = match perspective {
+                Some(player) => self.presenter.action_log_label_for_player(
+                    &entry.state,
+                    entry.action,
+                    entry.is_chance,
+                    &entry.label,
+                    player,
+                ),
+                None => entry.label.clone(),
+            };
+            if label.is_empty() {
                 continue;
             }
-            action_log.push(entry.label.clone());
+            action_log.push(label);
             action_log_cursors.push(i + 1);
         }
         (action_log, action_log_cursors)
@@ -445,12 +455,47 @@ impl<G: Game + 'static> GameSession<G> {
 
     /// Build a GameState server message for the current state (public for live push).
     pub fn state_msg(&self) -> ServerMsg {
+        self.state_msg_with_perspective(None)
+    }
+
+    /// Build a GameState server message for one multiplayer player.
+    pub fn state_msg_for_player(&self, player: usize) -> ServerMsg {
+        self.state_msg_with_perspective(Some(player))
+    }
+
+    /// Create a lightweight analysis-only session from the current state.
+    pub fn fork_analysis_session(&self) -> Self {
+        Self::with_state(
+            self.search.state().clone(),
+            Arc::clone(&self.evaluator),
+            self.eval_name.clone(),
+            Arc::clone(&self.presenter),
+            [true, true],
+            Config::default(),
+        )
+    }
+
+    fn state_msg_with_perspective(&self, perspective: Option<usize>) -> ServerMsg {
         let state = self.search.state();
         let is_terminal = matches!(state.status(), Status::Terminal(_));
         let is_chance = self.is_chance();
 
         let legal = if is_terminal || is_chance {
             Vec::new()
+        } else if let Some(player) = perspective {
+            if self.current_player_idx() == player {
+                let mut actions = Vec::new();
+                self.presenter.human_legal_actions(state, &mut actions);
+                actions
+                    .iter()
+                    .map(|&a| ActionInfo {
+                        action: a,
+                        label: self.presenter.action_label(state, a),
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            }
         } else {
             let actions = self.legal_actions();
             actions
@@ -474,10 +519,13 @@ impl<G: Game + 'static> GameSession<G> {
             None
         };
 
-        let (action_log, action_log_cursors) = self.action_log_with_cursors();
+        let (action_log, action_log_cursors) = self.action_log_with_cursors(perspective);
 
         ServerMsg::GameState {
-            state: self.presenter.serialize_state(state),
+            state: match perspective {
+                Some(player) => self.presenter.serialize_state_for_player(state, player),
+                None => self.presenter.serialize_state(state),
+            },
             legal_actions: legal,
             current_player: self.current_player_idx() as u8,
             phase: self.presenter.phase_label(state),
@@ -487,14 +535,36 @@ impl<G: Game + 'static> GameSession<G> {
             action_log,
             history_cursor: self.cursor,
             action_log_cursors,
-            can_undo: self.undo_target_cursor().is_some(),
-            can_redo: self.cursor < self.history.len(),
+            can_undo: perspective.is_none() && self.undo_target_cursor().is_some(),
+            can_redo: perspective.is_none() && self.cursor < self.history.len(),
             replay: self.replay.as_ref().map(|replay| ReplayState {
                 id: replay.id.clone(),
                 cursor: self.cursor,
                 len: self.history.len(),
             }),
         }
+    }
+
+    /// Apply a human-owned action from a multiplayer seat.
+    pub fn play_human_action(&mut self, player: usize, action: usize) -> Result<(), String> {
+        if self.replay.is_some() {
+            return Err("Cannot play actions while viewing a replay".into());
+        }
+        if self.is_terminal() {
+            return Err("Game is over".into());
+        }
+        if self.current_player_idx() != player {
+            return Err("It is not your turn".into());
+        }
+        let mut legal = Vec::new();
+        self.presenter
+            .human_legal_actions(self.search.state(), &mut legal);
+        if !legal.contains(&action) {
+            return Err(format!("Illegal action: {action}"));
+        }
+        self.apply_action(action);
+        self.auto_resolve_chance();
+        Ok(())
     }
 
     /// Process a client message and return response messages.
@@ -508,7 +578,12 @@ impl<G: Game + 'static> GameSession<G> {
             ClientMsg::ListReplays
             | ClientMsg::LoadReplay { .. }
             | ClientMsg::DeleteReplay { .. }
-            | ClientMsg::SetReplayFavorite { .. } => vec![ServerMsg::Error {
+            | ClientMsg::SetReplayFavorite { .. }
+            | ClientMsg::CreateMultiplayerRoom { .. }
+            | ClientMsg::ListMultiplayerRooms
+            | ClientMsg::JoinMultiplayerRoom { .. }
+            | ClientMsg::LeaveMultiplayerRoom
+            | ClientMsg::PlayMultiplayerAction { .. } => vec![ServerMsg::Error {
                 message: "Replay storage is not available in this session".into(),
             }],
             ClientMsg::NewGame { seed } => {
@@ -1097,6 +1172,49 @@ impl<G: Game + 'static> GameSession<G> {
             let labels = self.edge_labels(&snap.edges);
             (snap, labels)
         })
+    }
+
+    /// Current root WDL for compact analysis displays.
+    pub fn root_wdl(&self) -> [f32; 3] {
+        match self.search.state().status() {
+            Status::Terminal(reward) if reward > 0.0 => [1.0, 0.0, 0.0],
+            Status::Terminal(reward) if reward < 0.0 => [0.0, 0.0, 1.0],
+            Status::Terminal(_) => [0.0, 1.0, 0.0],
+            _ => self
+                .build_snapshot()
+                .map(|snap| snap.root_wdl)
+                .unwrap_or([0.0, 1.0, 0.0]),
+        }
+    }
+
+    /// Run a compact search and return only the root WDL.
+    pub fn run_analysis_bar_search(&mut self, budget: SearchBudget) -> Result<[f32; 3], String> {
+        if !self.can_search() {
+            return Ok(self.root_wdl());
+        }
+
+        let msg = ClientMsg::RunSearch {
+            budget,
+            target: None,
+        };
+        if let Err(messages) = self.begin_search(&msg) {
+            let message = messages
+                .into_iter()
+                .find_map(|msg| match msg {
+                    ServerMsg::Error { message } => Some(message),
+                    _ => None,
+                })
+                .unwrap_or_else(|| "Could not run analysis".into());
+            return Err(message);
+        }
+
+        let result = loop {
+            if let Some(result) = self.search_tick() {
+                break result;
+            }
+        };
+        let _ = self.finish_search(&msg, result);
+        Ok(self.root_wdl())
     }
 
     /// Build a `SearchSnapshot` from the current tree state.

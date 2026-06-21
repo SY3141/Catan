@@ -58,6 +58,7 @@ pub struct ReplayFrame {
 #[derive(Serialize)]
 pub struct PlayerFrame {
     hand: [u8; 5],
+    hand_total: u8,
     vp: u8,
     dev_cards: [u8; 5],
     dev_cards_bought_this_turn: [u8; 5],
@@ -202,10 +203,30 @@ fn player_frame(state: &GameState, pid: Player) -> PlayerFrame {
     let ps = &state.players[pid];
     PlayerFrame {
         hand: ps.hand.0,
+        hand_total: ps.hand.total(),
         vp: state.total_vps(pid),
         dev_cards: ps.dev_cards.0,
         dev_cards_bought_this_turn: ps.dev_cards_bought_this_turn.0,
         hidden_dev_cards: ps.hidden_dev_cards,
+        knights: ps.knights_played,
+        trade_ratios: ps.trade_ratios,
+    }
+}
+
+fn private_player_frame(state: &GameState, pid: Player, perspective: Player) -> PlayerFrame {
+    let ps = &state.players[pid];
+    if pid == perspective {
+        return player_frame(state, pid);
+    }
+
+    let known_dev_cards: u8 = ps.dev_cards.0.iter().sum();
+    PlayerFrame {
+        hand: [0; 5],
+        hand_total: ps.hand.total(),
+        vp: state.public_vps(pid),
+        dev_cards: [0; 5],
+        dev_cards_bought_this_turn: [0; 5],
+        hidden_dev_cards: known_dev_cards + ps.hidden_dev_cards,
         knights: ps.knights_played,
         trade_ratios: ps.trade_ratios,
     }
@@ -225,6 +246,27 @@ pub fn capture_frame(
     player: u8,
     last_roll: Option<u8>,
 ) -> ReplayFrame {
+    capture_frame_with_perspective(state, action, player, last_roll, None)
+}
+
+pub fn capture_frame_with_perspective(
+    state: &GameState,
+    action: &str,
+    player: u8,
+    last_roll: Option<u8>,
+    perspective: Option<Player>,
+) -> ReplayFrame {
+    let players = match perspective {
+        Some(perspective) => [
+            private_player_frame(state, Player::One, perspective),
+            private_player_frame(state, Player::Two, perspective),
+        ],
+        None => [
+            player_frame(state, Player::One),
+            player_frame(state, Player::Two),
+        ],
+    };
+
     ReplayFrame {
         action: action.to_string(),
         player,
@@ -232,17 +274,18 @@ pub fn capture_frame(
         turn: state.turn_number,
         robber: state.robber.0,
         last_roll,
-        players: [
-            player_frame(state, Player::One),
-            player_frame(state, Player::Two),
-        ],
+        players,
         buildings: [
             buildings_frame(state, Player::One),
             buildings_frame(state, Player::Two),
         ],
         longest_road: state.longest_road.map(|(p, len)| [p as u8, len]),
         largest_army: state.largest_army.map(|(p, cnt)| [p as u8, cnt]),
-        dev_pool: state.unknown_dev_pool(),
+        dev_pool: if perspective.is_some() {
+            [0; 5]
+        } else {
+            state.unknown_dev_pool()
+        },
     }
 }
 

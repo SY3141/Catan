@@ -66,6 +66,7 @@ const EDITOR_TERRAIN_BAG = [
 ];
 const EDITOR_NUMBER_BAG = [2, 3, 3, 4, 4, 5, 5, 6, 6, 8, 8, 9, 9, 10, 10, 11, 11, 12];
 const EDITOR_PORT_BAG = ['lumber', 'brick', 'wool', 'grain', 'ore', 'generic', 'generic', 'generic', 'generic'];
+const LAST_MULTIPLAYER_ROOM_KEY = 'hexfish-last-multiplayer-room-code';
 
 function playerColor(playerIndex) {
   return playerIndex === 0 || playerIndex === 1 ? PLAYER_COLORS[playerIndex] : '';
@@ -104,13 +105,24 @@ let lastActionLogLength = { analysis: null, replay: null };
 let previousFrameHands = { analysis: null, replay: null };
 let activeView = 'play-setup';
 let selectedPlayHumanPlayer = 0;
+let selectedPlayMode = 'bot';
 let selectedPlayDifficulty = 5;
+const initialUrlRoomCode = normalizeRoomCode(new URLSearchParams(window.location.search).get('room'));
+let pendingAutoJoinRoomCode = initialUrlRoomCode;
+if (pendingAutoJoinRoomCode) selectedPlayMode = 'multiplayer';
+let autoJoinRoomAttempted = false;
+let multiplayerLobbyRooms = [];
+let lastMultiplayerRoomCode = normalizeRoomCode(initialUrlRoomCode || readLastMultiplayerRoomCode());
 let playMode = {
   active: false,
+  mode: 'bot',
   humanPlayer: 0,
   botThinking: false,
   forcedMoveKey: null,
   pendingHumanMove: false,
+  multiplayerRoom: null,
+  multiplayerStatus: '',
+  rejoiningRoom: false,
 };
 let serverSingleplayerHumanPlayer = undefined;
 
@@ -123,11 +135,18 @@ function setServerSingleplayerHumanPlayer(player) {
 
 controls.onNewGame = () => {
   if (activeView === 'play') {
+    if (playMultiplayerActive()) {
+      leaveMultiplayerRoom(false, true);
+    }
     pendingNewGameSearch = false;
     playMode.active = false;
+    playMode.mode = selectedPlayMode;
     playMode.botThinking = false;
     playMode.forcedMoveKey = null;
     playMode.pendingHumanMove = false;
+    playMode.multiplayerRoom = null;
+    playMode.multiplayerStatus = '';
+    playMode.rejoiningRoom = false;
     setServerSingleplayerHumanPlayer(null);
     mctsPanel.clear();
     board.clearSearchHighlights();
@@ -136,6 +155,7 @@ controls.onNewGame = () => {
   }
   pendingNewGameSearch = true;
   playMode.active = false;
+  playMode.mode = selectedPlayMode;
   playMode.botThinking = false;
   playMode.forcedMoveKey = null;
   playMode.pendingHumanMove = false;
@@ -218,9 +238,19 @@ function playViewActive() {
   return activeView === 'play' && playMode.active;
 }
 
+function playMultiplayerActive() {
+  return playViewActive() && playMode.mode === 'multiplayer';
+}
+
+function playBotActive() {
+  return playViewActive() && playMode.mode !== 'multiplayer';
+}
+
+window.hexfishIsMultiplayerActive = playMultiplayerActive;
+
 function isPlayBotTurn(msg = currentState) {
   return !!(
-    playViewActive() &&
+    playBotActive() &&
     msg &&
     !msg.replay &&
     !msg.is_terminal &&
@@ -240,6 +270,9 @@ function updatePlayBotLabels() {
 
 function playNameForPlayer(idx) {
   if (!playViewActive()) return null;
+  if (playMultiplayerActive()) {
+    return idx === playMode.humanPlayer ? 'You' : 'Opponent';
+  }
   return idx === playMode.humanPlayer ? 'You' : playBotName();
 }
 
@@ -279,7 +312,7 @@ function playDifficultyBudget() {
 
 function playCanPonder(msg = currentState) {
   return !!(
-    playViewActive() &&
+    playBotActive() &&
     msg &&
     !msg.replay &&
     !msg.is_terminal &&
@@ -295,11 +328,13 @@ function playForcedMoveKey(msg, action) {
 }
 
 function sendPlayAction(action) {
-  const msg = { type: 'PlayAction', action };
+  const msg = playMultiplayerActive()
+    ? { type: 'PlayMultiplayerAction', action }
+    : { type: 'PlayAction', action };
   if (playViewActive()) {
     if (playMode.pendingHumanMove) return;
     playMode.pendingHumanMove = true;
-    if (controls.searchRunning && controls.interruptSearchForCommand(msg)) return;
+    if (playBotActive() && controls.searchRunning && controls.interruptSearchForCommand(msg)) return;
   }
   session.send(msg);
 }
@@ -350,10 +385,343 @@ function setPlaySide(player) {
 
 // ── Message handlers ─────────────────────────────────────────────────
 
+function normalizeRoomCode(code) {
+  return String(code || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 12);
+}
+
+function readLastMultiplayerRoomCode() {
+  try {
+    return window.localStorage?.getItem(LAST_MULTIPLAYER_ROOM_KEY) || '';
+  } catch (_error) {
+    return '';
+  }
+}
+
+function writeLastMultiplayerRoomCode(code) {
+  const normalized = normalizeRoomCode(code);
+  lastMultiplayerRoomCode = normalized;
+  try {
+    if (normalized) {
+      window.localStorage?.setItem(LAST_MULTIPLAYER_ROOM_KEY, normalized);
+    } else {
+      window.localStorage?.removeItem(LAST_MULTIPLAYER_ROOM_KEY);
+    }
+  } catch (_error) {
+    // Storage may be unavailable in private or embedded contexts.
+  }
+  updateMultiplayerReconnectUi();
+}
+
+function reconnectRoomCode() {
+  return normalizeRoomCode(
+    pendingAutoJoinRoomCode ||
+    lastMultiplayerRoomCode ||
+    readLastMultiplayerRoomCode()
+  );
+}
+
+function setPlayModeChoice(mode) {
+  selectedPlayMode = mode === 'multiplayer' ? 'multiplayer' : 'bot';
+  if (!playMode.active) playMode.mode = selectedPlayMode;
+  for (const btn of document.querySelectorAll('.play-mode-btn')) {
+    const active = btn.dataset.playMode === selectedPlayMode;
+    btn.classList.toggle('bg-accent', active);
+    btn.classList.toggle('text-white', active);
+    btn.classList.toggle('bg-bg-3', !active);
+    btn.classList.toggle('text-gray-300', !active);
+    btn.classList.toggle('hover:bg-bg', !active);
+    btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+  }
+  updatePlayBotLabels();
+  updateMultiplayerRoomUi();
+}
+
+function multiplayerRoomFull(room = playMode.multiplayerRoom) {
+  return !!(room?.players?.[0]?.occupied && room?.players?.[1]?.occupied);
+}
+
+function multiplayerOpponentConnected(room = playMode.multiplayerRoom) {
+  if (!room || (playMode.humanPlayer !== 0 && playMode.humanPlayer !== 1)) return false;
+  return !!room.players?.[playMode.humanPlayer === 0 ? 1 : 0]?.connected;
+}
+
+function roomInviteUrl(code) {
+  const url = new URL(window.location.href);
+  url.searchParams.set('room', normalizeRoomCode(code));
+  return url.toString();
+}
+
+function setRoomCodeInUrl(code) {
+  const normalized = normalizeRoomCode(code);
+  const url = new URL(window.location.href);
+  if (normalized) {
+    url.searchParams.set('room', normalized);
+  } else {
+    url.searchParams.delete('room');
+  }
+  window.history.replaceState(window.history.state, '', url.toString());
+  pendingAutoJoinRoomCode = normalized;
+}
+
+function setMultiplayerSetupStatus(text) {
+  const status = document.getElementById('multiplayer-room-status');
+  if (!status) return;
+  status.textContent = text || '';
+  status.classList.toggle('hidden', !text);
+}
+
+function multiplayerLobbySeatCount(value) {
+  const count = Number(value);
+  if (!Number.isFinite(count)) return 0;
+  return Math.max(0, Math.min(2, Math.round(count)));
+}
+
+function multiplayerLobbyRoomFull(room) {
+  return multiplayerLobbySeatCount(room?.occupied) >= 2 || room?.status === 'active';
+}
+
+function multiplayerLobbyStatusText(room) {
+  const occupied = multiplayerLobbySeatCount(room?.occupied);
+  const connected = multiplayerLobbySeatCount(room?.connected);
+  if (occupied >= 2) {
+    return connected >= 2 ? 'Full' : `Full, ${connected} online`;
+  }
+  return `${occupied}/2 seats, ${connected} online`;
+}
+
+function requestMultiplayerLobby() {
+  session.send({ type: 'ListMultiplayerRooms' });
+}
+
+function renderMultiplayerLobby(rooms = multiplayerLobbyRooms) {
+  const list = document.getElementById('multiplayer-lobby-list');
+  if (!list) return;
+  list.innerHTML = '';
+
+  const entries = (Array.isArray(rooms) ? rooms : [])
+    .map(room => ({ room, code: normalizeRoomCode(room?.code) }))
+    .filter(entry => entry.code);
+  if (!entries.length) {
+    const empty = document.createElement('div');
+    empty.className = 'px-2.5 py-2 text-xs text-gray-500';
+    empty.textContent = 'No rooms';
+    list.appendChild(empty);
+    return;
+  }
+
+  const currentCode = normalizeRoomCode(playMode.multiplayerRoom?.code);
+  for (const { room, code } of entries) {
+    const isCurrent = code && code === currentCode;
+    const isFull = multiplayerLobbyRoomFull(room);
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'flex w-full items-center justify-between gap-2 border-b border-gray-700 px-2.5 py-2 text-left text-xs text-gray-200 hover:bg-bg-3 disabled:cursor-default disabled:opacity-50';
+    row.disabled = isFull && !isCurrent;
+    row.title = isCurrent ? `Current room ${code}` : isFull ? `Room ${code} is full` : `Join room ${code}`;
+    if (isCurrent) row.classList.add('bg-bg-3');
+    row.addEventListener('click', () => {
+      const input = document.getElementById('multiplayer-room-code-input');
+      if (input) input.value = code;
+      if (!isCurrent) joinMultiplayerRoom(code);
+    });
+
+    const roomInfo = document.createElement('span');
+    roomInfo.className = 'flex min-w-0 flex-col gap-0.5';
+    const codeText = document.createElement('span');
+    codeText.className = 'font-mono text-gray-100';
+    codeText.textContent = code;
+    const metaText = document.createElement('span');
+    metaText.className = 'text-[11px] text-gray-500';
+    metaText.textContent = multiplayerLobbyStatusText(room);
+    roomInfo.append(codeText, metaText);
+
+    const actionText = document.createElement('span');
+    actionText.className = 'shrink-0 text-[11px] text-gray-400';
+    actionText.textContent = isCurrent ? 'Current' : isFull ? 'Full' : 'Join';
+
+    row.append(roomInfo, actionText);
+    list.appendChild(row);
+  }
+}
+
+function updateMultiplayerReconnectUi() {
+  const row = document.getElementById('multiplayer-reconnect-row');
+  const codeEl = document.getElementById('multiplayer-reconnect-code');
+  const btn = document.getElementById('btn-reconnect-multiplayer-room');
+  if (!row || !codeEl || !btn) return;
+  const code = reconnectRoomCode();
+  const currentCode = normalizeRoomCode(playMode.multiplayerRoom?.code);
+  const show = !!code && code !== currentCode;
+  codeEl.textContent = code || '-';
+  btn.disabled = !show;
+  btn.title = code ? `Reconnect to room ${code}` : '';
+  row.classList.toggle('hidden', !show);
+}
+
+function updateMultiplayerRoomUi() {
+  const room = playMode.multiplayerRoom;
+  const code = normalizeRoomCode(room?.code);
+  const codeEl = document.getElementById('multiplayer-room-code');
+  const linkEl = document.getElementById('multiplayer-room-link');
+  const copyBtn = document.getElementById('btn-copy-room-link');
+  const leaveBtn = document.getElementById('btn-leave-multiplayer-room');
+
+  if (codeEl) codeEl.textContent = code || '-';
+  if (linkEl) linkEl.value = code ? roomInviteUrl(code) : '';
+  if (copyBtn) copyBtn.disabled = !code;
+  if (leaveBtn) leaveBtn.classList.toggle('hidden', !code);
+  renderMultiplayerLobby();
+  updateMultiplayerReconnectUi();
+
+  if (!room) {
+    if (selectedPlayMode === 'multiplayer') {
+      setMultiplayerSetupStatus(pendingAutoJoinRoomCode && !autoJoinRoomAttempted ? `Ready to join ${pendingAutoJoinRoomCode}` : '');
+    }
+    return;
+  }
+
+  const side = playMode.humanPlayer === 1 ? 'P2' : 'P1';
+  if (room.status === 'waiting' || !multiplayerRoomFull(room)) {
+    setMultiplayerSetupStatus(`Room ${code} is waiting. You are ${side}.`);
+  } else if (!multiplayerOpponentConnected(room)) {
+    setMultiplayerSetupStatus(`Room ${code}. Opponent disconnected.`);
+  } else {
+    setMultiplayerSetupStatus(`Room ${code}. You are ${side}.`);
+  }
+}
+
+function resetMultiplayerState(statusText = '') {
+  playMode.active = false;
+  playMode.mode = 'multiplayer';
+  playMode.botThinking = false;
+  playMode.forcedMoveKey = null;
+  playMode.pendingHumanMove = false;
+  playMode.multiplayerRoom = null;
+  playMode.multiplayerStatus = statusText;
+  playMode.rejoiningRoom = false;
+  updateMultiplayerRoomUi();
+  if (statusText) setMultiplayerSetupStatus(statusText);
+}
+
+function createMultiplayerRoom() {
+  setPlayModeChoice('multiplayer');
+  resetMultiplayerState('Creating room...');
+  session.send({ type: 'CreateMultiplayerRoom', preferred_player: selectedPlayHumanPlayer });
+}
+
+function joinMultiplayerRoom(code = null) {
+  const input = document.getElementById('multiplayer-room-code-input');
+  const roomCode = normalizeRoomCode(code ?? input?.value);
+  setPlayModeChoice('multiplayer');
+  if (!roomCode) {
+    setMultiplayerSetupStatus('Enter an invite code.');
+    return;
+  }
+  if (input) input.value = roomCode;
+  resetMultiplayerState(`Joining ${roomCode}...`);
+  session.send({ type: 'JoinMultiplayerRoom', code: roomCode });
+}
+
+function reconnectMultiplayerRoom() {
+  const code = reconnectRoomCode();
+  if (!code) {
+    setMultiplayerSetupStatus('No room to reconnect.');
+    updateMultiplayerReconnectUi();
+    return;
+  }
+  const input = document.getElementById('multiplayer-room-code-input');
+  if (input) input.value = code;
+  joinMultiplayerRoom(code);
+}
+
+function leaveMultiplayerRoom(showSetup = true, preserveReconnect = false) {
+  const code = normalizeRoomCode(playMode.multiplayerRoom?.code);
+  if (preserveReconnect && code) {
+    writeLastMultiplayerRoomCode(code);
+  } else if (!preserveReconnect) {
+    writeLastMultiplayerRoomCode('');
+  }
+  if (playMode.mode === 'multiplayer' && code) {
+    session.send({ type: 'LeaveMultiplayerRoom' });
+  }
+  setRoomCodeInUrl('');
+  resetMultiplayerState('');
+  if (showSetup) showPlaySetupView();
+}
+
+async function copyMultiplayerInviteLink() {
+  const code = normalizeRoomCode(playMode.multiplayerRoom?.code);
+  if (!code) return;
+  const link = roomInviteUrl(code);
+  const input = document.getElementById('multiplayer-room-link');
+  try {
+    await navigator.clipboard.writeText(link);
+    setMultiplayerSetupStatus(`Copied invite link for ${code}.`);
+  } catch (_error) {
+    if (input) {
+      input.focus();
+      input.select();
+    }
+    setMultiplayerSetupStatus('Invite link selected.');
+  }
+}
+
+function maybeAutoJoinRoomFromUrl() {
+  if (!pendingAutoJoinRoomCode || autoJoinRoomAttempted) return;
+  autoJoinRoomAttempted = true;
+  setPlayModeChoice('multiplayer');
+  const input = document.getElementById('multiplayer-room-code-input');
+  if (input) input.value = pendingAutoJoinRoomCode;
+  joinMultiplayerRoom(pendingAutoJoinRoomCode);
+}
+
+function handleMultiplayerRoomMessage(msg) {
+  setPlayModeChoice('multiplayer');
+
+  if (msg.status === 'left') {
+    setRoomCodeInUrl('');
+    resetMultiplayerState('');
+    if (activeView === 'play') showPlaySetupView();
+    return;
+  }
+
+  const localPlayer = Number(msg.local_player);
+  if (localPlayer !== 0 && localPlayer !== 1) {
+    resetMultiplayerState('Room joined, but no seat was assigned.');
+    return;
+  }
+
+  playMode.active = true;
+  playMode.mode = 'multiplayer';
+  playMode.humanPlayer = localPlayer;
+  playMode.botThinking = false;
+  playMode.forcedMoveKey = null;
+  playMode.pendingHumanMove = false;
+  playMode.rejoiningRoom = false;
+  playMode.multiplayerRoom = {
+    code: normalizeRoomCode(msg.code),
+    status: msg.status,
+    players: Array.isArray(msg.players) ? msg.players : [],
+  };
+  writeLastMultiplayerRoomCode(playMode.multiplayerRoom.code);
+  setRoomCodeInUrl(playMode.multiplayerRoom.code);
+  setPlaySide(localPlayer);
+  updateMultiplayerRoomUi();
+
+  if (activeView === 'play-setup' || activeView === 'play') {
+    showPlayView();
+  }
+  updateActionPanelStatus(currentState, false);
+}
+
 session.on('GameState', (msg) => {
   if (!msg.replay && msg.state?.board) {
     editorBaseBoard = msg.state.board;
     if (activeView !== 'editor') resetEditorPortsFromBaseBoard();
+  }
+  if (!msg.replay && playMultiplayerActive() && !msg.state?.private_view) {
+    analysisState = msg;
+    return;
   }
   if (msg.replay) {
     replayState = msg;
@@ -381,6 +749,8 @@ session.on('GameState', (msg) => {
     }
   }
 });
+
+session.on('MultiplayerRoom', handleMultiplayerRoomMessage);
 
 function runPendingNewGameSearch(msg) {
   if (!pendingNewGameSearch || msg.replay) return;
@@ -434,9 +804,14 @@ function renderGameState(msg) {
   actionList.innerHTML = '';
   board.clearOverlays();
   const playBotTurn = isPlayBotTurn(msg);
+  const playMultiplayerBlocked = playMultiplayerActive() && (
+    !multiplayerRoomFull() ||
+    !multiplayerOpponentConnected() ||
+    msg.current_player !== playMode.humanPlayer
+  );
   updateActionPanelStatus(msg, playBotTurn);
 
-  if (!msg.replay && !msg.is_terminal && !msg.is_chance && !playBotTurn) {
+  if (!msg.replay && !msg.is_terminal && !msg.is_chance && !playBotTurn && !playMultiplayerBlocked) {
     // Board overlays for spatial actions
     if (currentBoard) {
       board.showLegalActions(msg.legal_actions, currentBoard, msg.current_player);
@@ -485,17 +860,21 @@ function renderGameState(msg) {
       }
       const parts = text.split('\n');
       line.textContent = `${i + 1}. ${parts[0]}`;
-      line.style.cursor = 'pointer';
-      line.addEventListener('click', () => {
-        controls.stopAutoplay();
-        controls._disableAutoSearch();
-        const cursor = cursors[i] ?? i + 1;
-        if (msg.replay) {
-          session.send({ type: 'SetReplayCursor', cursor });
-        } else {
-          session.send({ type: 'SetLogCursor', cursor });
-        }
-      });
+      if (playMultiplayerActive()) {
+        line.style.cursor = 'default';
+      } else {
+        line.style.cursor = 'pointer';
+        line.addEventListener('click', () => {
+          controls.stopAutoplay();
+          controls._disableAutoSearch();
+          const cursor = cursors[i] ?? i + 1;
+          if (msg.replay) {
+            session.send({ type: 'SetReplayCursor', cursor });
+          } else {
+            session.send({ type: 'SetLogCursor', cursor });
+          }
+        });
+      }
       logView.appendChild(line);
       for (let p = 1; p < parts.length; p++) {
         const sub = document.createElement('div');
@@ -516,8 +895,8 @@ function renderGameState(msg) {
   updateRollBadge(msg, state, viewKey);
 
   // Undo/Redo button states
-  document.getElementById('btn-undo').disabled = playBotTurn || !msg.can_undo;
-  document.getElementById('btn-redo').disabled = playBotTurn || !msg.can_redo;
+  document.getElementById('btn-undo').disabled = playBotTurn || playMultiplayerActive() || !msg.can_undo;
+  document.getElementById('btn-redo').disabled = playBotTurn || playMultiplayerActive() || !msg.can_redo;
 
   // Result banner
   const banner = document.getElementById('result-banner');
@@ -550,6 +929,29 @@ function updateActionPanelStatus(msg, playBotTurn) {
     return;
   }
 
+  if (playMultiplayerActive()) {
+    title.textContent = 'Play';
+    status.title = '';
+    if (msg?.is_terminal) {
+      status.textContent = '';
+      status.classList.add('hidden');
+      return;
+    }
+    if (playMode.rejoiningRoom) {
+      status.textContent = 'Reconnecting room';
+    } else if (!multiplayerRoomFull()) {
+      status.textContent = 'Waiting for opponent';
+    } else if (!multiplayerOpponentConnected()) {
+      status.textContent = 'Opponent disconnected';
+    } else if (msg?.current_player === playMode.humanPlayer) {
+      status.textContent = 'Your turn';
+    } else {
+      status.textContent = 'Waiting for opponent';
+    }
+    status.classList.toggle('hidden', !status.textContent);
+    return;
+  }
+
   if (playBotTurn) {
     title.textContent = 'Play';
     status.textContent = `${playBotName()} thinking`;
@@ -567,6 +969,11 @@ function updateActionPanelStatus(msg, playBotTurn) {
 function showLegalActionPreview(action) {
   if (!currentBoard || !currentState) return;
   if (isPlayBotTurn()) return;
+  if (playMultiplayerActive() && (
+    !multiplayerRoomFull() ||
+    !multiplayerOpponentConnected() ||
+    currentState.current_player !== playMode.humanPlayer
+  )) return;
   board.showActionPreview(action, currentBoard, currentState.current_player);
 }
 
@@ -606,8 +1013,18 @@ function updateRollBadge(msg, state, viewKey) {
       findRecentRoller(entries, entryIndex - 1) ??
       msg.current_player;
 
+    const alwaysShowRollBadge = playMultiplayerActive();
     if (total === 7) {
-      hideRollBadge();
+      if (alwaysShowRollBadge) {
+        showRollBadge(total, roller);
+      } else {
+        hideRollBadge();
+      }
+    } else if (alwaysShowRollBadge) {
+      showRollBadge(total, roller);
+      if (rollLogHasExplicitGain(newEntries[i]) || handGained) {
+        showResourceProductionAnimations(total, previousFrameHands[viewKey], currentHands, state);
+      }
     } else if (rollLogHasExplicitGain(newEntries[i]) || handGained) {
       showRollBadge(total, roller);
       showResourceProductionAnimations(total, previousFrameHands[viewKey], currentHands, state);
@@ -899,6 +1316,16 @@ session.on('SearchProgress', (msg) => {
   updateSearchHighlights(msg.snapshot, msg.action_labels);
 });
 
+session.on('MultiplayerAnalysis', (msg) => {
+  if (!playMultiplayerActive()) return;
+  mctsPanel.updateAnalysisBar(msg.root_wdl);
+});
+
+session.on('MultiplayerLobby', (msg) => {
+  multiplayerLobbyRooms = Array.isArray(msg.rooms) ? msg.rooms : [];
+  renderMultiplayerLobby();
+});
+
 session.on('BotAction', (msg) => {
   playMode.botThinking = false;
   playMode.forcedMoveKey = null;
@@ -920,6 +1347,9 @@ session.on('Error', (msg) => {
   playMode.forcedMoveKey = null;
   playMode.pendingHumanMove = false;
   updateActionPanelStatus(currentState, isPlayBotTurn(currentState));
+  if (selectedPlayMode === 'multiplayer' || playMode.mode === 'multiplayer') {
+    setMultiplayerSetupStatus(msg.message);
+  }
   setReplayStatus(msg.message);
   console.error('Server error:', msg.message);
 });
@@ -929,6 +1359,13 @@ session.on('Disconnected', () => {
   playMode.botThinking = false;
   playMode.forcedMoveKey = null;
   playMode.pendingHumanMove = false;
+  if (playMode.mode === 'multiplayer' && playMode.multiplayerRoom?.code && appStarted) {
+    writeLastMultiplayerRoomCode(playMode.multiplayerRoom.code);
+    playMode.rejoiningRoom = true;
+    setMultiplayerSetupStatus(`Reconnecting ${playMode.multiplayerRoom.code}...`);
+    updateActionPanelStatus(currentState, false);
+    session.send({ type: 'JoinMultiplayerRoom', code: playMode.multiplayerRoom.code });
+  }
 });
 
 // ── View tabs / replay list ────────────────────────────────────────────────
@@ -960,7 +1397,9 @@ function showPlayView() {
     showPlaySetupView();
     return;
   }
-  setServerSingleplayerHumanPlayer(playMode.humanPlayer);
+  if (playBotActive()) {
+    setServerSingleplayerHumanPlayer(playMode.humanPlayer);
+  }
   activeView = 'play';
   setTabState('play');
   setEditorChrome(false);
@@ -972,7 +1411,7 @@ function showPlayView() {
   controls.stopAutoplay();
   controls._disableAutoSearch();
   controls.setOptionsAvailable(false);
-  if (analysisState) {
+  if (analysisState && (!playMultiplayerActive() || analysisState.state?.private_view)) {
     renderGameState(analysisState);
     runPlayAutomation(analysisState);
   } else {
@@ -988,6 +1427,7 @@ function showPlaySetupView() {
   controls.stopAutoplay();
   controls._disableAutoSearch();
   controls.setOptionsAvailable(false);
+  setPlayModeChoice(selectedPlayMode);
   setPlaySide(selectedPlayHumanPlayer);
   setGameHeaderLabelsVisible(false);
   document.getElementById('main-layout').classList.add('hidden');
@@ -997,6 +1437,7 @@ function showPlaySetupView() {
 }
 
 function showAnalysisView() {
+  if (playMultiplayerActive()) leaveMultiplayerRoom(false, true);
   activeView = 'analysis';
   setServerSingleplayerHumanPlayer(null);
   setTabState('analysis');
@@ -1013,6 +1454,7 @@ function showAnalysisView() {
 }
 
 function showReplayView() {
+  if (playMultiplayerActive()) leaveMultiplayerRoom(false, true);
   activeView = 'replay-list';
   setServerSingleplayerHumanPlayer(null);
   setTabState('replay');
@@ -1044,6 +1486,7 @@ function showReplayBoardView() {
 }
 
 function showEditorView() {
+  if (playMultiplayerActive()) leaveMultiplayerRoom(false, true);
   activeView = 'editor';
   setServerSingleplayerHumanPlayer(null);
   setTabState('editor');
@@ -1116,6 +1559,7 @@ function updateViewChrome(msg) {
   document.getElementById('analysis-bar-panel')?.classList.toggle('hidden', activeView === 'editor');
   document.getElementById('board-resource-legend')?.classList.toggle('hidden', activeView === 'editor');
   document.getElementById('board-piece-counts')?.classList.toggle('hidden', activeView === 'editor');
+  document.getElementById('board-history-controls')?.classList.toggle('hidden', activeView === 'editor' || playMultiplayerActive());
   document.getElementById('resource-animation-layer')?.classList.toggle('hidden', activeView === 'editor');
 
   document.getElementById('search-action-control')?.classList.toggle('hidden', inPlay);
@@ -1141,11 +1585,16 @@ function updateViewChrome(msg) {
 }
 
 function startPlayGame() {
+  setPlayModeChoice('bot');
   playMode.active = true;
+  playMode.mode = 'bot';
   playMode.humanPlayer = selectedPlayHumanPlayer;
   playMode.botThinking = false;
   playMode.forcedMoveKey = null;
   playMode.pendingHumanMove = false;
+  playMode.multiplayerRoom = null;
+  playMode.multiplayerStatus = '';
+  playMode.rejoiningRoom = false;
   pendingNewGameSearch = false;
   controls.stopAutoplay();
   controls._disableAutoSearch();
@@ -1168,6 +1617,12 @@ function startPlayGame() {
 }
 
 function runPlayAutomation(msg) {
+  if (playMultiplayerActive()) {
+    playMode.botThinking = false;
+    playMode.forcedMoveKey = null;
+    updateActionPanelStatus(msg, false);
+    return;
+  }
   if (!isPlayBotTurn(msg)) {
     if (playViewActive() && (msg?.is_terminal || msg?.current_player === playMode.humanPlayer)) {
       playMode.botThinking = false;
@@ -1609,12 +2064,30 @@ document.getElementById('tab-replay').addEventListener('click', showReplayView);
 document.getElementById('tab-editor').addEventListener('click', showEditorView);
 document.getElementById('btn-refresh-replays').addEventListener('click', requestReplayList);
 document.getElementById('btn-start-play-game').addEventListener('click', startPlayGame);
+document.getElementById('btn-create-multiplayer-room')?.addEventListener('click', createMultiplayerRoom);
+document.getElementById('btn-join-multiplayer-room')?.addEventListener('click', () => joinMultiplayerRoom());
+document.getElementById('btn-reconnect-multiplayer-room')?.addEventListener('click', reconnectMultiplayerRoom);
+document.getElementById('btn-copy-room-link')?.addEventListener('click', copyMultiplayerInviteLink);
+document.getElementById('btn-leave-multiplayer-room')?.addEventListener('click', () => leaveMultiplayerRoom(true));
+document.getElementById('btn-refresh-multiplayer-lobby')?.addEventListener('click', requestMultiplayerLobby);
+document.getElementById('multiplayer-room-code-input')?.addEventListener('input', (event) => {
+  const input = event.target;
+  const normalized = normalizeRoomCode(input.value);
+  if (input.value !== normalized) input.value = normalized;
+});
+document.getElementById('multiplayer-room-code-input')?.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') joinMultiplayerRoom();
+});
 document.getElementById('btn-start-edited-game').addEventListener('click', startEditedGame);
 document.getElementById('btn-random-editor-board').addEventListener('click', randomizeEditorBoard);
+for (const btn of document.querySelectorAll('.play-mode-btn')) {
+  btn.addEventListener('click', () => setPlayModeChoice(btn.dataset.playMode));
+}
 for (const btn of document.querySelectorAll('.play-side-btn')) {
   btn.addEventListener('click', () => setPlaySide(Number(btn.dataset.player)));
 }
 initPlayDifficultySelect();
+setPlayModeChoice(selectedPlayMode);
 setPlaySide(selectedPlayHumanPlayer);
 initEditorControls();
 showPlaySetupView();
@@ -1630,6 +2103,11 @@ board.onActionClick = (action) => {
   if (activeView === 'editor') return;
   if (currentState?.replay) return;
   if (isPlayBotTurn()) return;
+  if (playMultiplayerActive() && (
+    !multiplayerRoomFull() ||
+    !multiplayerOpponentConnected() ||
+    currentState?.current_player !== playMode.humanPlayer
+  )) return;
   sendPlayAction(action);
 };
 
@@ -1677,7 +2155,9 @@ function updatePlayerPanel(idx, state) {
   document.getElementById(`p${idx}-name`).textContent = displayName;
 
   // Total resource cards
-  const resourceCount = pf.hand ? pf.hand.reduce((sum, count) => sum + count, 0) : 0;
+  const resourceCount = Number.isFinite(Number(pf.hand_total))
+    ? Number(pf.hand_total)
+    : (pf.hand ? pf.hand.reduce((sum, count) => sum + count, 0) : 0);
   document.getElementById(`p${idx}-card-count`).textContent =
     `${resourceCount} ${resourceCount === 1 ? 'Card' : 'Cards'}`;
 
@@ -1845,7 +2325,9 @@ function updateBank(state) {
   const est = state.expected_bank_dev;
   const hasEstimate = est && est.some(v => v > 0);
 
-  if (est) {
+  if (state.private_view && !est) {
+    bankEl.textContent = 'Unknown';
+  } else if (est) {
     // Colonist mode: bank contents are uncertain, show estimates.
     for (let d = 0; d < 5; d++) {
       if (est[d] >= 0.05) {
@@ -1985,6 +2467,8 @@ window.hexfishStartApp = () => {
   if (appStarted) return;
   appStarted = true;
   session.connect();
+  requestMultiplayerLobby();
+  maybeAutoJoinRoomFromUrl();
 };
 
 window.hexfishStopApp = () => {
