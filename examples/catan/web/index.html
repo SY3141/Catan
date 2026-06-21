@@ -21,7 +21,7 @@ tailwind.config = {
   }
 }
 </script>
-<link rel="stylesheet" href="style.css?v=login-title-catan-analysis-20260619">
+<link rel="stylesheet" href="style.css?v=board-piece-icons-20260620">
 <script
   defer
   crossorigin="anonymous"
@@ -113,6 +113,20 @@ tailwind.config = {
             </div>
           </aside>
           <button id="btn-rotate-left" class="absolute top-0 left-0 z-10 w-8 h-8 flex items-center justify-center bg-bg-3/90 border border-gray-700 text-gray-100 rounded cursor-pointer hover:bg-accent transition-colors" title="Rotate board counterclockwise" aria-label="Rotate board counterclockwise">&#8634;</button>
+          <div id="board-piece-counts" class="board-piece-counts hidden" aria-label="Pieces remaining">
+            <div class="piece-count" title="Settlements remaining">
+              <span class="piece-icon settlement-icon" aria-hidden="true"></span>
+              <span id="piece-count-settlements">5</span>
+            </div>
+            <div class="piece-count" title="Cities remaining">
+              <span class="piece-icon city-icon" aria-hidden="true"></span>
+              <span id="piece-count-cities">4</span>
+            </div>
+            <div class="piece-count" title="Roads remaining">
+              <span class="piece-icon road-icon" aria-hidden="true"></span>
+              <span id="piece-count-roads">15</span>
+            </div>
+          </div>
           <button id="btn-mirror-board" class="absolute top-0 left-1/2 -translate-x-1/2 z-10 w-8 h-8 flex items-center justify-center bg-bg-3/90 border border-gray-700 text-gray-100 rounded cursor-pointer hover:bg-accent transition-colors" title="Mirror board" aria-label="Mirror board">&#8644;</button>
           <button id="btn-rotate-right" class="absolute top-0 right-0 z-10 w-8 h-8 flex items-center justify-center bg-bg-3/90 border border-gray-700 text-gray-100 rounded cursor-pointer hover:bg-accent transition-colors" title="Rotate board clockwise" aria-label="Rotate board clockwise">&#8635;</button>
           <div id="board-history-controls" class="absolute z-10 flex flex-col items-start gap-1.5">
@@ -177,7 +191,7 @@ tailwind.config = {
         <div class="flex flex-wrap gap-1 text-xs" id="p0-hand"></div>
         <div class="flex flex-wrap gap-1 text-xs mt-1" id="p0-dev"></div>
         <div class="text-xs text-gray-400 mt-1" id="p0-stats"></div>
-        <button class="takeover-btn mt-2 w-full py-1 text-xs bg-bg-3 border border-gray-700 text-gray-300 rounded hover:bg-accent transition-colors cursor-pointer" data-player="0">Take Over</button>
+        <button class="takeover-btn hidden mt-2 w-full py-1 text-xs bg-bg-3 border border-gray-700 text-gray-300 rounded hover:bg-accent transition-colors cursor-pointer" data-player="0">Take Over</button>
       </div>
       <div class="bg-bg rounded-md p-2.5 border border-gray-700 player-card" id="player-1">
         <div class="player-card-header flex items-start justify-between gap-2 mb-1">
@@ -190,7 +204,7 @@ tailwind.config = {
         <div class="flex flex-wrap gap-1 text-xs" id="p1-hand"></div>
         <div class="flex flex-wrap gap-1 text-xs mt-1" id="p1-dev"></div>
         <div class="text-xs text-gray-400 mt-1" id="p1-stats"></div>
-        <button class="takeover-btn mt-2 w-full py-1 text-xs bg-bg-3 border border-gray-700 text-gray-300 rounded hover:bg-accent transition-colors cursor-pointer" data-player="1">Take Over</button>
+        <button class="takeover-btn hidden mt-2 w-full py-1 text-xs bg-bg-3 border border-gray-700 text-gray-300 rounded hover:bg-accent transition-colors cursor-pointer" data-player="1">Take Over</button>
       </div>
       <div class="bg-bg rounded-md p-2.5 border border-gray-700" id="dice-panel" style="display:none">
         <h3 class="text-sm font-medium text-gray-400 mb-1">Dice <span id="dice-cards" class="text-gray-500 font-normal"></span></h3>
@@ -312,10 +326,10 @@ tailwind.config = {
 <div id="svg-tooltip"></div>
 
 <script src="session.js?v=play-options-20260614"></script>
-<script src="board.js?v=editor-ports-20260619"></script>
+<script src="board.js?v=building-icons-20260620"></script>
 <script src="mcts.js?v=mcts-rank-colors-20260618"></script>
-<script src="controls.js?v=bottom-hover-tips-20260619"></script>
+<script src="controls.js?v=replay-slider-20260620"></script>
 <script src="auth.js?v=clerk-stable-tabs-local-verify-20260619"></script>
-<script src="app.js?v=resource-animation-bounds-20260619"></script>
+<script src="app.js?v=piece-vp-replay-20260620"></script>
 </body>
 </html>

@@ -218,7 +218,6 @@
   right: 7px;
   display: inline-flex;
   box-sizing: border-box;
-  width: 24px;
   min-width: 24px;
   height: 22px;
   align-items: center;
@@ -227,7 +226,7 @@
   border: 1px solid currentColor;
   border-radius: 5px;
   background: rgba(15, 52, 96, 0.55);
-  padding: 0;
+  padding: 0 4px;
   font-family: inherit;
   font-size: 0.75rem;
   font-variant-numeric: tabular-nums;
@@ -260,6 +259,92 @@
 #board-play-area {
   min-width: 0;
   min-height: 0;
+}
+
+.board-piece-counts {
+  position: absolute;
+  z-index: 10;
+  top: calc(var(--board-content-top) + 40px);
+  left: var(--board-content-left);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: #d1d5db;
+  pointer-events: none;
+}
+
+.board-piece-counts.hidden {
+  display: none;
+}
+
+.board-piece-counts.p1 {
+  color: #4a9eff;
+}
+
+.board-piece-counts.p2 {
+  color: #ff6b6b;
+}
+
+.piece-count {
+  display: inline-flex;
+  box-sizing: border-box;
+  width: 48px;
+  height: 24px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 5px;
+  border: 1px solid rgba(75, 85, 99, 0.95);
+  border-radius: 5px;
+  background: rgba(26, 26, 46, 0.9);
+  padding: 0 6px;
+  color: inherit;
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  line-height: 1;
+  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.24);
+}
+
+.piece-icon {
+  position: relative;
+  display: inline-block;
+  flex: 0 0 auto;
+  color: inherit;
+}
+
+.settlement-icon {
+  width: 14px;
+  height: 13px;
+  background: currentColor;
+  clip-path: polygon(50% 0, 100% 43%, 100% 100%, 0 100%, 0 43%);
+}
+
+.city-icon {
+  width: 15px;
+  height: 14px;
+  background: currentColor;
+  clip-path: polygon(
+    0 100%,
+    0 38%,
+    18% 38%,
+    18% 16%,
+    38% 16%,
+    38% 38%,
+    62% 38%,
+    62% 16%,
+    82% 16%,
+    82% 38%,
+    100% 38%,
+    100% 100%
+  );
+}
+
+.road-icon {
+  width: 17px;
+  height: 5px;
+  border-radius: 999px;
+  background: currentColor;
+  transform: rotate(-22deg);
 }
 
 .analysis-bar-panel {

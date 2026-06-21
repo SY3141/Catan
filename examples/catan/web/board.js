@@ -22,8 +22,10 @@ const PORT_COLORS = {
 const HEX_SIZE = 50;
 const SQRT3 = Math.sqrt(3);
 const BUILDING_SCALE = 1.5;
-const SETTLEMENT_SIZE = 10 * BUILDING_SCALE;
-const SETTLEMENT_HALF = SETTLEMENT_SIZE / 2;
+const SETTLEMENT_ICON_WIDTH = 12 * BUILDING_SCALE;
+const SETTLEMENT_ICON_HEIGHT = 11 * BUILDING_SCALE;
+const CITY_ICON_WIDTH = 15 * BUILDING_SCALE;
+const CITY_ICON_HEIGHT = 14 * BUILDING_SCALE;
 const SETTLEMENT_ACTION_RADIUS = 8 * BUILDING_SCALE;
 const SETTLEMENT_HIGHLIGHT_RADIUS = 9 * BUILDING_SCALE;
 const CITY_ACTION_RADIUS = 10 * BUILDING_SCALE;
@@ -236,9 +238,8 @@ class Board {
       const color = p === 0 ? '#4a9eff' : '#ff6b6b';
       for (const nid of frame.buildings[p].settlements) {
         const [x, y] = nodes[nid];
-        const settlement = this._el('rect', {
-          x: x - SETTLEMENT_HALF, y: y - SETTLEMENT_HALF,
-          width: SETTLEMENT_SIZE, height: SETTLEMENT_SIZE,
+        const settlement = this._el('polygon', {
+          points: this._settlementPoints(x, y),
           fill: color, stroke: '#111', 'stroke-width': 1
         });
         buildG.appendChild(this._keepUpright(settlement, x, y));
@@ -300,9 +301,8 @@ class Board {
     // Settlement: action 0..54 -> node
     if (action < 54) {
       const [x, y] = nodes[action];
-      el = this._el('rect', {
-        x: x - SETTLEMENT_HALF, y: y - SETTLEMENT_HALF,
-        width: SETTLEMENT_SIZE, height: SETTLEMENT_SIZE,
+      el = this._el('polygon', {
+        points: this._settlementPoints(x, y),
         fill: color, stroke: '#fff', 'stroke-width': 1.5
       });
       uprightAt = [x, y];
@@ -722,11 +722,39 @@ class Board {
     return playerIndex === 0 ? '#4a9eff' : '#ff6b6b';
   }
 
+  _settlementPoints(x, y) {
+    const w = SETTLEMENT_ICON_WIDTH;
+    const h = SETTLEMENT_ICON_HEIGHT;
+    const left = x - w / 2;
+    const top = y - h / 2;
+    return [
+      [left + w * 0.5, top],
+      [left + w, top + h * 0.43],
+      [left + w, top + h],
+      [left, top + h],
+      [left, top + h * 0.43],
+    ].map(([px, py]) => `${px},${py}`).join(' ');
+  }
+
   _cityPoints(x, y) {
-    const top = 9 * BUILDING_SCALE;
-    const side = 7 * BUILDING_SCALE;
-    const roof = 3 * BUILDING_SCALE;
-    return `${x},${y - top} ${x + side},${y - roof} ${x + side},${y + side} ${x - side},${y + side} ${x - side},${y - roof}`;
+    const w = CITY_ICON_WIDTH;
+    const h = CITY_ICON_HEIGHT;
+    const left = x - w / 2;
+    const top = y - h / 2;
+    return [
+      [left, top + h],
+      [left, top + h * 0.38],
+      [left + w * 0.18, top + h * 0.38],
+      [left + w * 0.18, top + h * 0.16],
+      [left + w * 0.38, top + h * 0.16],
+      [left + w * 0.38, top + h * 0.38],
+      [left + w * 0.62, top + h * 0.38],
+      [left + w * 0.62, top + h * 0.16],
+      [left + w * 0.82, top + h * 0.16],
+      [left + w * 0.82, top + h * 0.38],
+      [left + w, top + h * 0.38],
+      [left + w, top + h],
+    ].map(([px, py]) => `${px},${py}`).join(' ');
   }
 
   _hexPoints(cx, cy, size) {

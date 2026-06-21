@@ -330,6 +330,19 @@ class Controls {
     if (this.searchRunning) this._updateSearchButtons();
   }
 
+  showReplayLoading(id, len) {
+    const replayLen = Number.isFinite(Number(len)) ? Math.max(0, Number(len)) : 0;
+    this.replayMode = true;
+    this.lastState = {
+      replay: {
+        id: String(id || ''),
+        cursor: 0,
+        len: replayLen,
+      },
+    };
+    this._updateReplayControls(this.lastState);
+  }
+
   isPausePending() {
     return this.pauseRequested;
   }
@@ -486,16 +499,24 @@ class Controls {
     });
     document.getElementById('replay-slider').addEventListener('input', (e) => {
       const replay = this.lastState?.replay;
-      if (!replay) return;
-      const cursor = Math.max(0, Math.min(replay.len, parseInt(e.target.value) || 0));
-      document.getElementById('replay-counter').textContent = `${cursor} / ${replay.len}`;
+      const sliderLen = parseInt(e.target.max) || 0;
+      const replayLen = Number.isFinite(Number(replay?.len)) ? Number(replay.len) : 0;
+      const len = Math.max(0, replayLen, sliderLen);
+      if (len <= 0) return;
+      const cursor = Math.max(0, Math.min(len, parseInt(e.target.value) || 0));
+      document.getElementById('replay-counter').textContent = `${cursor} / ${len}`;
       this._setReplayCursor(cursor);
     });
   }
 
   _setReplayCursor(cursor) {
-    if (!this.lastState?.replay) return;
-    this.session.send({ type: 'SetReplayCursor', cursor });
+    const replay = this.lastState?.replay;
+    const slider = document.getElementById('replay-slider');
+    const sliderLen = parseInt(slider?.max) || 0;
+    const replayLen = Number.isFinite(Number(replay?.len)) ? Number(replay.len) : 0;
+    const len = Math.max(0, replayLen, sliderLen);
+    if (len <= 0) return;
+    this.session.send({ type: 'SetReplayCursor', cursor: Math.max(0, Math.min(len, cursor)) });
   }
 
   _updateReplayControls(msg) {
@@ -520,8 +541,8 @@ class Controls {
     document.getElementById('autoplay-toggle').disabled = !!replay;
     document.getElementById('autosearch-toggle').disabled = !!replay;
     for (const btn of document.querySelectorAll('.takeover-btn')) {
-      btn.disabled = !!replay;
-      btn.classList.toggle('hidden', !!replay);
+      btn.disabled = true;
+      btn.classList.add('hidden');
     }
     if (replay) {
       document.getElementById('apply-toggle').checked = false;
@@ -531,16 +552,20 @@ class Controls {
     this._updateOptionsVisibility();
 
     if (!replay) return;
-    document.getElementById('replay-counter').textContent = `${replay.cursor} / ${replay.len}`;
+    const len = Number.isFinite(Number(replay.len)) ? Math.max(0, Number(replay.len)) : 0;
+    const cursor = Number.isFinite(Number(replay.cursor))
+      ? Math.max(0, Math.min(len, Number(replay.cursor)))
+      : 0;
+    document.getElementById('replay-counter').textContent = `${cursor} / ${len}`;
     const slider = document.getElementById('replay-slider');
     slider.min = '0';
-    slider.max = String(replay.len);
-    slider.value = String(replay.cursor);
-    slider.disabled = replay.len <= 0;
-    document.getElementById('btn-replay-first').disabled = replay.cursor <= 0;
-    document.getElementById('btn-replay-prev').disabled = replay.cursor <= 0;
-    document.getElementById('btn-replay-next').disabled = replay.cursor >= replay.len;
-    document.getElementById('btn-replay-last').disabled = replay.cursor >= replay.len;
+    slider.max = String(len);
+    slider.value = String(cursor);
+    slider.disabled = len <= 0;
+    document.getElementById('btn-replay-first').disabled = cursor <= 0;
+    document.getElementById('btn-replay-prev').disabled = cursor <= 0;
+    document.getElementById('btn-replay-next').disabled = cursor >= len;
+    document.getElementById('btn-replay-last').disabled = cursor >= len;
   }
 
   startAutoplay() {

@@ -825,18 +825,26 @@ fn apply_discard_resource(state: &mut GameState, resource: Resource) {
                 .iter()
                 .map(|&r| state.players[player].hand[r])
                 .sum();
-            assert!(
-                suffix >= new_remaining,
-                "discard invariant broken after discard: player={player:?} resource={resource:?} \
-                 hand={:?}({}) remaining={new_remaining} min_resource={min_r} suffix={suffix}",
-                state.players[player].hand.0,
-                state.players[player].hand.total(),
-            );
+            let next_min_resource = if suffix >= new_remaining {
+                min_r
+            } else {
+                // Singleplayer human discards can intentionally ignore the
+                // search-only lexicographic ordering. Keep the discard applied
+                // and relax the lower bound so the remaining count can advance.
+                assert!(
+                    state.players[player].hand.total() >= new_remaining,
+                    "discard invariant broken after discard: player={player:?} resource={resource:?} \
+                     hand={:?}({}) remaining={new_remaining} min_resource={min_r} suffix={suffix}",
+                    state.players[player].hand.0,
+                    state.players[player].hand.total(),
+                );
+                0
+            };
             state.phase = Phase::Discard {
                 player,
                 remaining: new_remaining,
                 roller,
-                min_resource: min_r,
+                min_resource: next_min_resource,
             };
         } else {
             // Current discard player finished — check if the other player
@@ -1530,6 +1538,76 @@ mod tests {
         assert!(
             matches!(state.phase, Phase::MoveRobber),
             "after discarding, should move robber, got {:?}",
+            state.phase
+        );
+    }
+
+    #[test]
+    fn human_discard_high_resource_first_advances_remaining() {
+        let mut state = make_state_with_seed(42);
+        state.current_player = Player::One;
+        state.players[Player::One].hand = ResourceArray::new(1, 6, 2, 1, 1);
+        state.phase = Phase::Discard {
+            player: Player::One,
+            remaining: 5,
+            roller: Player::One,
+            min_resource: 0,
+        };
+
+        let ore = action::discard_id(Resource::Ore);
+        let grain = action::discard_id(Resource::Grain);
+
+        let mut canonical = Vec::new();
+        action::legal_actions(&state, &mut canonical);
+        assert!(
+            !canonical.contains(&ore),
+            "canonical discard pruning should still hide high resources that cannot finish"
+        );
+
+        let mut human = Vec::new();
+        action::human_legal_actions(&state, &mut human);
+        assert!(
+            human.contains(&ore),
+            "singleplayer human discards should expose every resource in hand"
+        );
+
+        apply(&mut state, ore);
+        assert_eq!(
+            state.players[Player::One].hand,
+            ResourceArray::new(1, 6, 2, 1, 0)
+        );
+        assert!(
+            matches!(
+                state.phase,
+                Phase::Discard {
+                    player: Player::One,
+                    remaining: 4,
+                    min_resource: 0,
+                    ..
+                }
+            ),
+            "ore-first human discard should decrement remaining, got {:?}",
+            state.phase
+        );
+
+        action::human_legal_actions(&state, &mut human);
+        assert!(human.contains(&grain));
+        apply(&mut state, grain);
+        assert_eq!(
+            state.players[Player::One].hand,
+            ResourceArray::new(1, 6, 2, 0, 0)
+        );
+        assert!(
+            matches!(
+                state.phase,
+                Phase::Discard {
+                    player: Player::One,
+                    remaining: 3,
+                    min_resource: 0,
+                    ..
+                }
+            ),
+            "grain after ore should also decrement remaining, got {:?}",
             state.phase
         );
     }

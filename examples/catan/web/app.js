@@ -18,6 +18,12 @@ const TERRAIN_RESOURCE_INDEX = {
 };
 const DEV_CARD_NAMES = ['Knight', 'VP', 'Road Building', 'Year of Plenty', 'Monopoly'];
 const DEV_SHORT = ['Kn', 'VP', 'RB', 'YP', 'Mo'];
+const DEV_VP_INDEX = 1;
+const PIECE_LIMITS = {
+  settlements: 5,
+  cities: 4,
+  roads: 15,
+};
 const PLAYER_COLORS = ['#4a9eff', '#ff6b6b'];
 const EDITOR_TERRAINS = ['forest', 'hills', 'pasture', 'fields', 'mountains', 'desert'];
 const EDITOR_NUMBERS = [2, 3, 4, 5, 6, 8, 9, 10, 11, 12];
@@ -415,6 +421,7 @@ function renderGameState(msg) {
   updatePlayerPanel(0, state);
   updatePlayerPanel(1, state);
   updateBoardResourceLegend(msg, state);
+  updateBoardPieceCounts(msg, state);
   updateBank(state);
   updateDice(state);
 
@@ -1009,6 +1016,7 @@ function showReplayView() {
   activeView = 'replay-list';
   setServerSingleplayerHumanPlayer(null);
   setTabState('replay');
+  controls.pauseBeforeCommand();
   setEditorChrome(false);
   setGameHeaderLabelsVisible(false);
   document.getElementById('main-layout').classList.add('hidden');
@@ -1103,9 +1111,11 @@ function updateViewChrome(msg) {
   updateNewGameButtonLabel();
   const inPlay = playViewActive();
   const replay = !!msg?.replay || activeView === 'replay-board';
+  document.getElementById('btn-new-game')?.classList.toggle('hidden', replay);
   setMctsMoveDetailsVisible(!inPlay);
   document.getElementById('analysis-bar-panel')?.classList.toggle('hidden', activeView === 'editor');
   document.getElementById('board-resource-legend')?.classList.toggle('hidden', activeView === 'editor');
+  document.getElementById('board-piece-counts')?.classList.toggle('hidden', activeView === 'editor');
   document.getElementById('resource-animation-layer')?.classList.toggle('hidden', activeView === 'editor');
 
   document.getElementById('search-action-control')?.classList.toggle('hidden', inPlay);
@@ -1122,9 +1132,8 @@ function updateViewChrome(msg) {
     }
   }
   for (const btn of document.querySelectorAll('.takeover-btn')) {
-    const hide = inPlay || replay || activeView === 'editor';
-    btn.classList.toggle('hidden', hide);
-    btn.disabled = hide;
+    btn.classList.add('hidden');
+    btn.disabled = true;
   }
 
   controls.setOptionsAvailable(activeView === 'analysis' && !replay);
@@ -1262,6 +1271,9 @@ function renderReplaySection(list, entries, emptyText) {
     load.addEventListener('click', () => {
       controls.stopAutoplay();
       controls._disableAutoSearch();
+      controls.pauseBeforeCommand();
+      replayState = null;
+      controls.showReplayLoading(entry.id, entry.action_count);
       session.send({ type: 'LoadReplay', id: entry.id });
       showReplayBoardView();
     });
@@ -1670,7 +1682,13 @@ function updatePlayerPanel(idx, state) {
     `${resourceCount} ${resourceCount === 1 ? 'Card' : 'Cards'}`;
 
   // VP
-  document.getElementById(`p${idx}-vp`).textContent = pf.vp;
+  const vpEl = document.getElementById(`p${idx}-vp`);
+  const publicVp = publicVictoryPoints(pf);
+  const totalVp = Number(pf.vp) || 0;
+  vpEl.textContent = formatVictoryPoints(idx, publicVp, totalVp);
+  vpEl.title = totalVp > publicVp
+    ? `${publicVp} public VP, ${totalVp} total VP`
+    : `${totalVp} VP`;
 
   // Hand — always show all 5 resources as colored rectangles
   const handEl = document.getElementById(`p${idx}-hand`);
@@ -1754,6 +1772,19 @@ function updatePlayerPanel(idx, state) {
   statsEl.textContent = parts.join(' · ');
 }
 
+function publicVictoryPoints(playerFrame) {
+  const total = Number(playerFrame?.vp) || 0;
+  const vpCards = Number(playerFrame?.dev_cards?.[DEV_VP_INDEX]) || 0;
+  return Math.max(0, total - vpCards);
+}
+
+function formatVictoryPoints(playerIndex, publicVp, totalVp) {
+  if (playViewActive() && playerIndex !== playMode.humanPlayer) {
+    return String(publicVp);
+  }
+  return totalVp > publicVp ? `${publicVp}(${totalVp})` : String(totalVp);
+}
+
 function updateBoardResourceLegend(msg, state) {
   const legend = document.getElementById('board-resource-legend');
   if (!legend || !state?.frame?.players) return;
@@ -1770,6 +1801,35 @@ function updateBoardResourceLegend(msg, state) {
     const name = RESOURCE_NAMES[resourceIndex] || '';
     card.textContent = `${count} ${capitalizeResourceName(name)}`;
   }
+}
+
+function updateBoardPieceCounts(msg, state) {
+  const panel = document.getElementById('board-piece-counts');
+  if (!panel || !state?.frame?.buildings) return;
+
+  const playerIndex = playViewActive()
+    ? playMode.humanPlayer
+    : (msg.current_player === 0 || msg.current_player === 1 ? msg.current_player : 0);
+  const buildings = state.frame.buildings[playerIndex];
+  if (!buildings) {
+    panel.classList.add('hidden');
+    return;
+  }
+
+  const settlements = Math.max(0, PIECE_LIMITS.settlements - (buildings.settlements?.length || 0));
+  const cities = Math.max(0, PIECE_LIMITS.cities - (buildings.cities?.length || 0));
+  const roads = Math.max(0, PIECE_LIMITS.roads - (buildings.roads?.length || 0));
+
+  document.getElementById('piece-count-settlements').textContent = settlements;
+  document.getElementById('piece-count-cities').textContent = cities;
+  document.getElementById('piece-count-roads').textContent = roads;
+
+  panel.classList.remove('hidden', 'p1', 'p2');
+  panel.classList.add(playerIndex === 0 ? 'p1' : 'p2');
+  panel.setAttribute(
+    'aria-label',
+    `${playerDisplayName(playerIndex)} pieces remaining: ${settlements} settlements, ${cities} cities, ${roads} roads`
+  );
 }
 
 function capitalizeResourceName(name) {
