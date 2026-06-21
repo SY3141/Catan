@@ -5,13 +5,13 @@ use hexfish::player::Player;
 use hexfish::server::GamePresenter;
 
 use crate::game;
-use crate::game::action::ActionId;
+use crate::game::action::{ActionId, ROLL};
 use crate::game::board::Terrain;
 use crate::game::dev_card::{DevCardDeck, DevCardKind};
 use crate::game::dice::Dice;
-use crate::game::resource::{Resource, ALL_RESOURCES};
+use crate::game::resource::{ALL_RESOURCES, Resource};
 use crate::game::state::{GameState, Phase};
-use crate::game::topology::{PortLayout, Topology, PORT_COUNT};
+use crate::game::topology::{PORT_COUNT, PortLayout, Topology};
 use crate::visualize;
 
 const EDITOR_TILE_COUNT: usize = 19;
@@ -170,7 +170,12 @@ fn parse_terrain_name(name: &str) -> Result<Terrain, String> {
 }
 
 fn parse_editor_port_layout(layout: Option<&str>) -> Result<PortLayout, String> {
-    match layout.unwrap_or("primary").trim().to_ascii_lowercase().as_str() {
+    match layout
+        .unwrap_or("primary")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "primary" => Ok(PortLayout::Primary),
         "alternate" => Ok(PortLayout::Alternate),
         other => Err(format!("unknown port layout '{other}'")),
@@ -444,6 +449,10 @@ impl GamePresenter<GameState> for CatanPresenter {
         actions.extend(catan_actions.iter().map(|a| a.0 as usize));
     }
 
+    fn is_singleplayer_undo_barrier(&self, _state: &GameState, action: usize) -> bool {
+        action == ROLL as usize
+    }
+
     fn action_description(&self, state: &GameState, action: usize) -> String {
         visualize::format_action_desc(ActionId(action as u8), state)
     }
@@ -602,39 +611,51 @@ mod tests {
         let presenter = presenter();
         let (terrains, mut numbers) = valid_editor_layout();
         numbers[0] = Some(7);
-        assert!(presenter
-            .new_game_from_editor(&terrains, &numbers, None, None)
-            .is_err());
+        assert!(
+            presenter
+                .new_game_from_editor(&terrains, &numbers, None, None)
+                .is_err()
+        );
 
         let (mut terrains, mut numbers) = valid_editor_layout();
         terrains[5] = "desert".into();
         numbers[5] = Some(8);
-        assert!(presenter
-            .new_game_from_editor(&terrains, &numbers, None, None)
-            .is_err());
+        assert!(
+            presenter
+                .new_game_from_editor(&terrains, &numbers, None, None)
+                .is_err()
+        );
 
         let (mut terrains, numbers) = valid_editor_layout();
         terrains[0] = "swamp".into();
-        assert!(presenter
-            .new_game_from_editor(&terrains, &numbers, None, None)
-            .is_err());
+        assert!(
+            presenter
+                .new_game_from_editor(&terrains, &numbers, None, None)
+                .is_err()
+        );
 
         let (terrains, numbers) = valid_editor_layout();
-        assert!(presenter
-            .new_game_from_editor(&terrains, &numbers, Some("sideways"), None)
-            .is_err());
+        assert!(
+            presenter
+                .new_game_from_editor(&terrains, &numbers, Some("sideways"), None)
+                .is_err()
+        );
 
         let mut ports = valid_editor_ports();
         ports.pop();
-        assert!(presenter
-            .new_game_from_editor(&terrains, &numbers, Some("primary"), Some(&ports))
-            .is_err());
+        assert!(
+            presenter
+                .new_game_from_editor(&terrains, &numbers, Some("primary"), Some(&ports))
+                .is_err()
+        );
 
         let mut ports = valid_editor_ports();
         ports[0] = "gold".into();
-        assert!(presenter
-            .new_game_from_editor(&terrains, &numbers, Some("primary"), Some(&ports))
-            .is_err());
+        assert!(
+            presenter
+                .new_game_from_editor(&terrains, &numbers, Some("primary"), Some(&ports))
+                .is_err()
+        );
     }
 
     #[test]
@@ -706,7 +727,10 @@ mod tests {
             );
         }
         assert_eq!(decoded.topology.port_layout(), PortLayout::Alternate);
-        assert_eq!(decoded.topology.port_resources(), state.topology.port_resources());
+        assert_eq!(
+            decoded.topology.port_resources(),
+            state.topology.port_resources()
+        );
     }
 
     #[test]

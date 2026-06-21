@@ -22,6 +22,11 @@ pub trait GamePresenter<G: Game>: Send + Sync {
         state.legal_actions(actions);
     }
 
+    /// Game-specific actions that should not be undone in singleplayer.
+    fn is_singleplayer_undo_barrier(&self, _state: &G, _action: usize) -> bool {
+        false
+    }
+
     /// Action description without player prefix (for tree explorer where
     /// the acting player varies by depth).
     fn action_description(&self, state: &G, action: usize) -> String {

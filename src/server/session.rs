@@ -410,6 +410,39 @@ impl<G: Game + 'static> GameSession<G> {
         (action_log, action_log_cursors)
     }
 
+    fn undo_target_cursor(&self) -> Option<usize> {
+        if self.cursor == 0 {
+            return None;
+        }
+
+        let mut target = self.cursor;
+        while target > 0 {
+            target -= 1;
+            if !self.history[target].is_chance {
+                break;
+            }
+        }
+
+        let entry = self.history.get(target)?;
+        if entry.is_chance {
+            return None;
+        }
+
+        if let Some(human_player) = self.singleplayer_human_player {
+            if action_player_idx(&entry.state) != Some(human_player) {
+                return None;
+            }
+            if self
+                .presenter
+                .is_singleplayer_undo_barrier(&entry.state, entry.action)
+            {
+                return None;
+            }
+        }
+
+        Some(target)
+    }
+
     /// Build a GameState server message for the current state (public for live push).
     pub fn state_msg(&self) -> ServerMsg {
         let state = self.search.state();
@@ -454,7 +487,7 @@ impl<G: Game + 'static> GameSession<G> {
             action_log,
             history_cursor: self.cursor,
             action_log_cursors,
-            can_undo: self.cursor > 0,
+            can_undo: self.undo_target_cursor().is_some(),
             can_redo: self.cursor < self.history.len(),
             replay: self.replay.as_ref().map(|replay| ReplayState {
                 id: replay.id.clone(),
@@ -675,15 +708,9 @@ impl<G: Game + 'static> GameSession<G> {
                 Vec::new()
             }
             ClientMsg::Undo => {
-                if self.cursor > 0 {
-                    // Skip back over chance entries to the previous decision point.
-                    loop {
-                        self.cursor -= 1;
-                        if self.cursor == 0 || !self.history[self.cursor].is_chance {
-                            break;
-                        }
-                    }
-                    self.search.reset(self.history[self.cursor].state.clone());
+                if let Some(target) = self.undo_target_cursor() {
+                    self.cursor = target;
+                    self.search.reset(self.history[target].state.clone());
                     vec![self.state_msg()]
                 } else {
                     vec![ServerMsg::Error {
@@ -980,9 +1007,7 @@ impl<G: Game + 'static> GameSession<G> {
     /// Finish a streaming search: apply action (BotMove) or return snapshot.
     pub fn finish_search(&mut self, msg: &ClientMsg, result: SearchResult) -> Vec<ServerMsg> {
         match msg {
-            ClientMsg::BotMove { .. } => {
-                self.finish_bot_move(result)
-            }
+            ClientMsg::BotMove { .. } => self.finish_bot_move(result),
             ClientMsg::RunSims { .. } | ClientMsg::RunSearch { .. } => {
                 match self.build_snapshot() {
                     Some(snap) => {
@@ -1258,6 +1283,14 @@ fn validate_replay_log<G: Game>(mut state: G, log: &GameLog) -> Result<(), Strin
     Ok(())
 }
 
+fn action_player_idx<G: Game>(state: &G) -> Option<usize> {
+    match state.status() {
+        Status::Decision(sign) if sign > 0.0 => Some(0),
+        Status::Decision(_) => Some(1),
+        _ => None,
+    }
+}
+
 /// Walk the tree along an action path, returning the final node if reachable.
 fn walk_tree_path(tree: &Tree, start: NodeId, path: &[usize]) -> Option<NodeId> {
     let mut node = start;
@@ -1404,8 +1437,10 @@ mod tests {
         fn status(&self) -> Status {
             if self.moves >= 2 {
                 Status::Terminal(1.0)
-            } else {
+            } else if self.moves % 2 == 0 {
                 Status::Decision(1.0)
+            } else {
+                Status::Decision(-1.0)
             }
         }
 
@@ -1442,6 +1477,10 @@ mod tests {
 
         fn action_label(&self, _state: &TestGame, action: usize) -> String {
             format!("Action {action}")
+        }
+
+        fn is_singleplayer_undo_barrier(&self, _state: &TestGame, action: usize) -> bool {
+            action == 1
         }
 
         fn phase_label(&self, _state: &TestGame) -> String {
@@ -1568,6 +1607,130 @@ mod tests {
             .export_unsaved_current_log()
             .expect("terminal log should differ from saved prefix");
         assert_eq!(terminal_log.actions, vec![0, 0]);
+    }
+
+    #[test]
+    fn singleplayer_can_undo_human_non_barrier_action() {
+        let mut session = test_session();
+        session.handle(ClientMsg::SetSingleplayer {
+            human_player: Some(0),
+        });
+
+        match session
+            .handle(ClientMsg::PlayAction { action: 0 })
+            .as_slice()
+        {
+            [
+                ServerMsg::GameState {
+                    can_undo,
+                    history_cursor,
+                    ..
+                },
+            ] => {
+                assert!(*can_undo);
+                assert_eq!(*history_cursor, 1);
+            }
+            other => panic!("expected GameState after human action, got {other:?}"),
+        }
+
+        match session.handle(ClientMsg::Undo).as_slice() {
+            [
+                ServerMsg::GameState {
+                    state,
+                    history_cursor,
+                    can_undo,
+                    ..
+                },
+            ] => {
+                assert_eq!(state["moves"], serde_json::json!(0));
+                assert_eq!(*history_cursor, 0);
+                assert!(!*can_undo);
+            }
+            other => panic!("expected undo GameState, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn singleplayer_cannot_undo_bot_move() {
+        let mut session = test_session();
+        session.handle(ClientMsg::SetSingleplayer {
+            human_player: Some(0),
+        });
+        session.handle(ClientMsg::PlayAction { action: 0 });
+
+        let result = SearchResult {
+            policy: vec![0.0; TestGame::NUM_ACTIONS],
+            wdl: Wdl::DRAW,
+            selected_action: 0,
+            network_value: 0.0,
+            children_q: Vec::new(),
+            prior_top1_action: 0,
+            pv_depth: 0,
+            max_depth: 0,
+        };
+        let msgs = session.finish_search(
+            &ClientMsg::BotMove {
+                simulations: Some(0),
+                budget: None,
+            },
+            result,
+        );
+
+        match msgs.as_slice() {
+            [
+                ServerMsg::BotAction { .. },
+                ServerMsg::GameState {
+                    state,
+                    history_cursor,
+                    can_undo,
+                    ..
+                },
+            ] => {
+                assert_eq!(state["moves"], serde_json::json!(2));
+                assert_eq!(*history_cursor, 2);
+                assert!(!*can_undo);
+            }
+            other => panic!("expected bot action and GameState, got {other:?}"),
+        }
+
+        match session.handle(ClientMsg::Undo).as_slice() {
+            [ServerMsg::Error { message }] => assert_eq!(message.as_str(), "Nothing to undo"),
+            other => panic!("expected undo error, got {other:?}"),
+        }
+        assert_eq!(session.cursor(), 2);
+        assert_eq!(session.search.state().moves, 2);
+    }
+
+    #[test]
+    fn singleplayer_cannot_undo_roll_barrier_action() {
+        let mut session = test_session();
+        session.handle(ClientMsg::SetSingleplayer {
+            human_player: Some(0),
+        });
+
+        match session
+            .handle(ClientMsg::PlayAction { action: 1 })
+            .as_slice()
+        {
+            [
+                ServerMsg::GameState {
+                    history_cursor,
+                    can_undo,
+                    ..
+                },
+            ] => {
+                assert_eq!(*history_cursor, 1);
+                assert!(!*can_undo);
+            }
+            other => panic!("expected GameState after barrier action, got {other:?}"),
+        }
+
+        match session.handle(ClientMsg::Undo).as_slice() {
+            [ServerMsg::Error { message }] => assert_eq!(message.as_str(), "Nothing to undo"),
+            other => panic!("expected undo error, got {other:?}"),
+        }
+        assert_eq!(session.cursor(), 1);
+        assert_eq!(session.search.state().moves, 1);
     }
 
     #[test]
