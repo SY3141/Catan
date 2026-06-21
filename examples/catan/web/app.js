@@ -67,6 +67,7 @@ const EDITOR_TERRAIN_BAG = [
 const EDITOR_NUMBER_BAG = [2, 3, 3, 4, 4, 5, 5, 6, 6, 8, 8, 9, 9, 10, 10, 11, 11, 12];
 const EDITOR_PORT_BAG = ['lumber', 'brick', 'wool', 'grain', 'ore', 'generic', 'generic', 'generic', 'generic'];
 const LAST_MULTIPLAYER_ROOM_KEY = 'hexfish-last-multiplayer-room-code';
+const PENDING_SHARED_REPLAY_KEY = 'hexfish-pending-shared-replay-slug';
 
 function playerColor(playerIndex) {
   return playerIndex === 0 || playerIndex === 1 ? PLAYER_COLORS[playerIndex] : '';
@@ -93,6 +94,7 @@ let currentState = null;
 let analysisState = null;
 let replayState = null;
 let currentBoard = null;
+let replayBoardStatusText = '';
 let editorBaseBoard = null;
 let editorTiles = createBlankEditorTiles();
 let selectedEditorTile = null;
@@ -104,14 +106,16 @@ let pendingNewGameSearch = false;
 let lastActionLogLength = { analysis: null, replay: null };
 let previousFrameHands = { analysis: null, replay: null };
 let activeView = 'play-setup';
-let selectedPlayHumanPlayer = 0;
+let selectedSingleplayerHumanPlayer = 0;
+let selectedMultiplayerHumanPlayer = 0;
 let selectedPlayMode = 'bot';
 let selectedPlayDifficulty = 5;
 const initialUrlParams = new URLSearchParams(window.location.search);
 const initialSharedReplaySlug = normalizeReplaySlug(initialUrlParams.get('replay'));
 const initialUrlRoomCode = normalizeRoomCode(initialUrlParams.get('room'));
-let pendingSharedReplaySlug = initialSharedReplaySlug;
-let pendingAutoJoinRoomCode = initialSharedReplaySlug ? '' : initialUrlRoomCode;
+let pendingSharedReplaySlug = initialSharedReplaySlug || readPendingSharedReplaySlug();
+let loadingSharedReplaySlug = '';
+let pendingAutoJoinRoomCode = pendingSharedReplaySlug ? '' : initialUrlRoomCode;
 if (pendingAutoJoinRoomCode) selectedPlayMode = 'multiplayer';
 let autoJoinRoomAttempted = false;
 let multiplayerLobbyRooms = [];
@@ -268,7 +272,7 @@ function playBotName(level = selectedPlayDifficulty) {
 
 function updatePlayBotLabels() {
   const heading = document.getElementById('play-setup-title');
-  if (heading) heading.textContent = `You vs ${playBotName()}`;
+  if (heading) heading.textContent = 'You Vs HexFish';
 }
 
 function playNameForPlayer(idx) {
@@ -373,10 +377,21 @@ function initPlayDifficultySelect() {
   setPlayDifficulty(selectedPlayDifficulty);
 }
 
-function setPlaySide(player) {
-  selectedPlayHumanPlayer = player === 1 ? 1 : 0;
+function normalizePlaySide(player) {
+  return player === 1 ? 1 : 0;
+}
+
+function playSideScope(btn) {
+  return btn?.dataset?.playScope === 'multiplayer' ? 'multiplayer' : 'singleplayer';
+}
+
+function selectedPlaySideForScope(scope) {
+  return scope === 'multiplayer' ? selectedMultiplayerHumanPlayer : selectedSingleplayerHumanPlayer;
+}
+
+function updatePlaySideButtons() {
   for (const btn of document.querySelectorAll('.play-side-btn')) {
-    const active = Number(btn.dataset.player) === selectedPlayHumanPlayer;
+    const active = Number(btn.dataset.player) === selectedPlaySideForScope(playSideScope(btn));
     btn.classList.toggle('bg-accent', active);
     btn.classList.toggle('text-white', active);
     btn.classList.toggle('bg-bg-3', !active);
@@ -384,6 +399,16 @@ function setPlaySide(player) {
     btn.classList.toggle('hover:bg-bg', !active);
     btn.setAttribute('aria-pressed', active ? 'true' : 'false');
   }
+}
+
+function setPlaySide(player, scope = 'singleplayer') {
+  const side = normalizePlaySide(player);
+  if (scope === 'multiplayer') {
+    selectedMultiplayerHumanPlayer = side;
+  } else {
+    selectedSingleplayerHumanPlayer = side;
+  }
+  updatePlaySideButtons();
 }
 
 // ── Message handlers ─────────────────────────────────────────────────
@@ -394,6 +419,31 @@ function normalizeRoomCode(code) {
 
 function normalizeReplaySlug(slug) {
   return String(slug || '').trim().replace(/[^A-Za-z0-9_-]/g, '').slice(0, 128);
+}
+
+function currentSharedReplaySlugFromUrl() {
+  return normalizeReplaySlug(new URLSearchParams(window.location.search).get('replay'));
+}
+
+function readPendingSharedReplaySlug() {
+  try {
+    return normalizeReplaySlug(window.sessionStorage?.getItem(PENDING_SHARED_REPLAY_KEY));
+  } catch (_error) {
+    return '';
+  }
+}
+
+function writePendingSharedReplaySlug(slug) {
+  const normalized = normalizeReplaySlug(slug);
+  try {
+    if (normalized) {
+      window.sessionStorage?.setItem(PENDING_SHARED_REPLAY_KEY, normalized);
+    } else {
+      window.sessionStorage?.removeItem(PENDING_SHARED_REPLAY_KEY);
+    }
+  } catch (_error) {
+    // Session storage may be unavailable in private or embedded contexts.
+  }
 }
 
 function readLastMultiplayerRoomCode() {
@@ -440,6 +490,7 @@ function setPlayModeChoice(mode) {
     btn.setAttribute('aria-pressed', active ? 'true' : 'false');
   }
   updatePlayBotLabels();
+  updatePlaySideButtons();
   updateMultiplayerRoomUi();
 }
 
@@ -621,7 +672,7 @@ function resetMultiplayerState(statusText = '') {
 function createMultiplayerRoom() {
   setPlayModeChoice('multiplayer');
   resetMultiplayerState('Creating room...');
-  session.send({ type: 'CreateMultiplayerRoom', preferred_player: selectedPlayHumanPlayer });
+  session.send({ type: 'CreateMultiplayerRoom', preferred_player: selectedMultiplayerHumanPlayer });
 }
 
 function joinMultiplayerRoom(code = null) {
@@ -689,21 +740,42 @@ function maybeAutoJoinRoomFromUrl() {
 }
 
 function sharedReplayUrl(slug) {
-  return `${window.location.origin}/r/${normalizeReplaySlug(slug)}`;
+  const url = new URL(window.location.origin);
+  url.searchParams.set('replay', normalizeReplaySlug(slug));
+  return url.toString();
+}
+
+function sessionReadyForSharedReplay() {
+  return !!(
+    session.connected &&
+    session.authenticated &&
+    session.ws &&
+    session.ws.readyState === WebSocket.OPEN
+  );
 }
 
 function maybeLoadSharedReplayFromUrl() {
-  const slug = normalizeReplaySlug(pendingSharedReplaySlug);
-  if (!slug) return;
-  pendingSharedReplaySlug = '';
+  const slug = normalizeReplaySlug(
+    pendingSharedReplaySlug ||
+    currentSharedReplaySlugFromUrl() ||
+    readPendingSharedReplaySlug()
+  );
+  if (!slug) return false;
+  pendingSharedReplaySlug = slug;
+  writePendingSharedReplaySlug(slug);
   controls.stopAutoplay();
   controls._disableAutoSearch();
   controls.pauseBeforeCommand();
-  replayState = null;
+  if (!loadingSharedReplaySlug) replayState = null;
   controls.showReplayLoading(slug, 0);
   setReplayStatus('Loading shared replay...');
-  session.send({ type: 'LoadSharedReplay', slug });
   showReplayBoardView();
+  setReplayBoardStatus('Loading shared replay...');
+  if (!sessionReadyForSharedReplay()) return true;
+  if (loadingSharedReplaySlug === slug) return true;
+  loadingSharedReplaySlug = slug;
+  session.send({ type: 'LoadSharedReplay', slug });
+  return true;
 }
 
 async function copyReplayShareLink(entry) {
@@ -712,10 +784,49 @@ async function copyReplayShareLink(entry) {
   const link = sharedReplayUrl(slug);
   try {
     await navigator.clipboard.writeText(link);
-    setReplayStatus('Copied replay link.');
+    showReplayShareModal(link, true);
   } catch (_error) {
-    window.prompt('Replay link', link);
-    setReplayStatus('Replay link ready.');
+    showReplayShareModal(link, false);
+  }
+}
+
+function showReplayShareModal(link, copied) {
+  const modal = document.getElementById('replay-share-modal');
+  const title = document.getElementById('replay-share-modal-title');
+  const input = document.getElementById('replay-share-link');
+  const copyBtn = document.getElementById('btn-copy-replay-share-link');
+  if (!modal || !title || !input || !copyBtn) return;
+
+  title.textContent = copied ? 'Replay link copied' : 'Copy replay link';
+  copyBtn.textContent = copied ? 'Copy Again' : 'Copy';
+  input.value = link || '';
+  modal.classList.remove('hidden');
+  modal.classList.add('flex');
+  if (!copied) {
+    input.focus();
+    input.select();
+  } else {
+    copyBtn.focus();
+  }
+}
+
+function hideReplayShareModal() {
+  const modal = document.getElementById('replay-share-modal');
+  if (!modal) return;
+  modal.classList.add('hidden');
+  modal.classList.remove('flex');
+}
+
+async function copyReplayShareModalLink() {
+  const input = document.getElementById('replay-share-link');
+  const link = input?.value || '';
+  if (!link) return;
+  try {
+    await navigator.clipboard.writeText(link);
+    showReplayShareModal(link, true);
+  } catch (_error) {
+    input?.focus();
+    input?.select();
   }
 }
 
@@ -749,7 +860,7 @@ function handleMultiplayerRoomMessage(msg) {
   };
   writeLastMultiplayerRoomCode(playMode.multiplayerRoom.code);
   setRoomCodeInUrl(playMode.multiplayerRoom.code);
-  setPlaySide(localPlayer);
+  setPlaySide(localPlayer, 'multiplayer');
   updateMultiplayerRoomUi();
 
   if (activeView === 'play-setup' || activeView === 'play') {
@@ -768,10 +879,28 @@ session.on('GameState', (msg) => {
     return;
   }
   if (msg.replay) {
+    const fromSharedReplayLink = !!(
+      pendingSharedReplaySlug ||
+      loadingSharedReplaySlug ||
+      currentSharedReplaySlugFromUrl() ||
+      readPendingSharedReplaySlug()
+    );
     replayState = msg;
-    if (activeView === 'replay-board') renderGameState(msg);
+    setReplayBoardStatus('');
+    pendingSharedReplaySlug = '';
+    loadingSharedReplaySlug = '';
+    writePendingSharedReplaySlug('');
+    if (activeView === 'replay-board') {
+      renderGameState(msg);
+    } else if (fromSharedReplayLink) {
+      showReplayBoardView();
+    }
   } else {
     analysisState = msg;
+    if (pendingSharedReplaySlug && !loadingSharedReplaySlug) {
+      maybeLoadSharedReplayFromUrl();
+      return;
+    }
     if (pendingEditorStart) {
       pendingEditorStart = false;
       setEditorStatus('');
@@ -965,6 +1094,14 @@ function updateActionPanelStatus(msg, playBotTurn) {
   const status = document.getElementById('play-status');
   if (!title || !status) return;
 
+  if (activeView === 'replay-board') {
+    title.textContent = 'Replay';
+    status.textContent = replayBoardStatusText;
+    status.title = '';
+    status.classList.toggle('hidden', !replayBoardStatusText);
+    return;
+  }
+
   if (!playViewActive()) {
     title.textContent = 'Legal Moves';
     status.textContent = '';
@@ -1008,6 +1145,13 @@ function updateActionPanelStatus(msg, playBotTurn) {
   status.textContent = '';
   status.title = '';
   status.classList.add('hidden');
+}
+
+function setReplayBoardStatus(text) {
+  replayBoardStatusText = text || '';
+  if (activeView === 'replay-board') {
+    updateActionPanelStatus(currentState, false);
+  }
 }
 
 function showLegalActionPreview(action) {
@@ -1382,6 +1526,13 @@ session.on('BotAction', (msg) => {
 });
 
 session.on('Error', (msg) => {
+  if (loadingSharedReplaySlug) {
+    loadingSharedReplaySlug = '';
+    if (/shared replay|replay share/i.test(String(msg.message || ''))) {
+      pendingSharedReplaySlug = '';
+      writePendingSharedReplaySlug('');
+    }
+  }
   if (pendingEditorStart) {
     pendingEditorStart = false;
     setEditorStatus(msg.message);
@@ -1391,6 +1542,7 @@ session.on('Error', (msg) => {
   playMode.forcedMoveKey = null;
   playMode.pendingHumanMove = false;
   updateActionPanelStatus(currentState, isPlayBotTurn(currentState));
+  if (activeView === 'replay-board') setReplayBoardStatus(msg.message);
   if (selectedPlayMode === 'multiplayer' || playMode.mode === 'multiplayer') {
     setMultiplayerSetupStatus(msg.message);
   }
@@ -1399,6 +1551,7 @@ session.on('Error', (msg) => {
 });
 
 session.on('Disconnected', () => {
+  loadingSharedReplaySlug = '';
   controls.onSearchError();
   playMode.botThinking = false;
   playMode.forcedMoveKey = null;
@@ -1409,6 +1562,12 @@ session.on('Disconnected', () => {
     setMultiplayerSetupStatus(`Reconnecting ${playMode.multiplayerRoom.code}...`);
     updateActionPanelStatus(currentState, false);
     session.send({ type: 'JoinMultiplayerRoom', code: playMode.multiplayerRoom.code });
+  }
+});
+
+session.on('Connected', () => {
+  if (pendingSharedReplaySlug || currentSharedReplaySlugFromUrl() || readPendingSharedReplaySlug()) {
+    maybeLoadSharedReplayFromUrl();
   }
 });
 
@@ -1473,7 +1632,7 @@ function showPlaySetupView() {
   controls._disableAutoSearch();
   controls.setOptionsAvailable(false);
   setPlayModeChoice(selectedPlayMode);
-  setPlaySide(selectedPlayHumanPlayer);
+  updatePlaySideButtons();
   setGameHeaderLabelsVisible(false);
   document.getElementById('main-layout').classList.add('hidden');
   document.getElementById('play-setup-view').classList.remove('hidden');
@@ -1638,7 +1797,7 @@ function startPlayGame() {
   setPlayModeChoice('bot');
   playMode.active = true;
   playMode.mode = 'bot';
-  playMode.humanPlayer = selectedPlayHumanPlayer;
+  playMode.humanPlayer = selectedSingleplayerHumanPlayer;
   playMode.botThinking = false;
   playMode.forcedMoveKey = null;
   playMode.pendingHumanMove = false;
@@ -1781,6 +1940,7 @@ function renderReplaySection(list, entries, emptyText) {
       controls.showReplayLoading(entry.id, entry.action_count);
       session.send({ type: 'LoadReplay', id: entry.id });
       showReplayBoardView();
+      setReplayBoardStatus('Loading replay...');
     });
 
     const share = document.createElement('button');
@@ -2132,6 +2292,11 @@ document.getElementById('btn-join-multiplayer-room')?.addEventListener('click', 
 document.getElementById('btn-reconnect-multiplayer-room')?.addEventListener('click', reconnectMultiplayerRoom);
 document.getElementById('btn-copy-multiplayer-invite')?.addEventListener('click', copyMultiplayerInviteLink);
 document.getElementById('btn-refresh-multiplayer-lobby')?.addEventListener('click', requestMultiplayerLobby);
+document.getElementById('btn-close-replay-share-modal')?.addEventListener('click', hideReplayShareModal);
+document.getElementById('btn-copy-replay-share-link')?.addEventListener('click', copyReplayShareModalLink);
+document.getElementById('replay-share-modal')?.addEventListener('click', (event) => {
+  if (event.target === event.currentTarget) hideReplayShareModal();
+});
 document.getElementById('multiplayer-room-code-input')?.addEventListener('input', (event) => {
   const input = event.target;
   const normalized = normalizeRoomCode(input.value);
@@ -2146,11 +2311,11 @@ for (const btn of document.querySelectorAll('.play-mode-btn')) {
   btn.addEventListener('click', () => setPlayModeChoice(btn.dataset.playMode));
 }
 for (const btn of document.querySelectorAll('.play-side-btn')) {
-  btn.addEventListener('click', () => setPlaySide(Number(btn.dataset.player)));
+  btn.addEventListener('click', () => setPlaySide(Number(btn.dataset.player), playSideScope(btn)));
 }
 initPlayDifficultySelect();
 setPlayModeChoice(selectedPlayMode);
-setPlaySide(selectedPlayHumanPlayer);
+updatePlaySideButtons();
 initEditorControls();
 showPlaySetupView();
 
@@ -2497,6 +2662,7 @@ function updateDice(state) {
 // ── Keyboard shortcuts ────────────────────────────────────────────────
 
 document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') hideReplayShareModal();
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
   if (activeView === 'replay-list' || activeView === 'editor' || activeView === 'play-setup') return;
   if (isPlayBotTurn()) return;
@@ -2529,9 +2695,11 @@ window.hexfishStartApp = () => {
   if (appStarted) return;
   appStarted = true;
   session.connect();
-  maybeLoadSharedReplayFromUrl();
-  requestMultiplayerLobby();
-  maybeAutoJoinRoomFromUrl();
+  const loadingSharedReplay = maybeLoadSharedReplayFromUrl();
+  if (!loadingSharedReplay) {
+    requestMultiplayerLobby();
+    maybeAutoJoinRoomFromUrl();
+  }
 };
 
 window.hexfishStopApp = () => {

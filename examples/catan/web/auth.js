@@ -14,6 +14,8 @@
   const signUpMount = document.getElementById('clerk-sign-up-mount');
   const signInTab = document.getElementById('login-tab-sign-in');
   const signUpTab = document.getElementById('login-tab-sign-up');
+  const loginPanelTitle = document.getElementById('login-panel-title');
+  const loginPanelCopy = document.getElementById('login-panel-copy');
   const userButton = document.getElementById('clerk-user-button');
   const loginStatus = document.getElementById('clerk-login-status');
   const status = document.getElementById('clerk-status');
@@ -26,9 +28,39 @@
     return;
   }
 
+  const authCopy = {
+    'sign-in': {
+      title: 'Welcome back',
+      panel: 'Sign in to access your saved replays, rooms, and analysis tools.',
+    },
+    'sign-up': {
+      title: 'Create your account',
+      panel: 'Create a free account to save replay history, copy share links, and continue games across devices.',
+    },
+  };
+
+  const syncAuthMountHeight = () => {
+    const update = () => {
+      const current = parseFloat(authMount.style.minHeight) || 0;
+      const next = Math.max(
+        430,
+        current,
+        signInMount.scrollHeight || 0,
+        signUpMount.scrollHeight || 0
+      );
+      authMount.style.minHeight = `${Math.ceil(next)}px`;
+    };
+    requestAnimationFrame(update);
+    window.setTimeout(update, 250);
+    window.setTimeout(update, 1000);
+  };
+
   const setStatus = (message) => {
     if (status) status.textContent = message;
-    if (loginStatus) loginStatus.textContent = message;
+    if (loginStatus) {
+      loginStatus.textContent = message || '\u00a0';
+      loginStatus.classList.toggle('login-status-empty', !message);
+    }
   };
 
   const emitAuthEvent = (name) => {
@@ -91,6 +123,11 @@
     signUpTab.setAttribute('aria-selected', String(!isSignIn));
     signInMount.classList.toggle('is-hidden', !isSignIn);
     signUpMount.classList.toggle('is-hidden', isSignIn);
+
+    const copy = authCopy[view] || authCopy['sign-in'];
+    if (loginPanelTitle) loginPanelTitle.textContent = copy.title;
+    if (loginPanelCopy) loginPanelCopy.textContent = copy.panel;
+    syncAuthMountHeight();
   };
 
   const syncAuthViewFromHash = () => {
@@ -186,6 +223,7 @@
       setStatus('Sign-up is unavailable from Clerk right now.');
     }
     setActiveTab(activeAuthView);
+    syncAuthMountHeight();
   };
 
   const mountUserControl = (clerk) => {
@@ -224,7 +262,7 @@
     showLoginPage();
     mountCurrentAuthForm(clerk);
     emitAuthEvent('hexfish-auth-signed-out');
-    setStatus(activeAuthView === 'sign-up' ? 'Create your account to continue.' : 'Sign in to continue.');
+    if (activeAuthView !== 'sign-up' || signUpMounted) setStatus('');
   };
 
   signInTab.addEventListener('click', () => {

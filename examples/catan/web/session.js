@@ -65,6 +65,8 @@ class Session {
           ws.send(queued);
         }
         this.queue = [];
+        const connectedHandler = this.handlers.Connected;
+        if (connectedHandler) connectedHandler({ type: 'Connected' });
         return;
       }
 

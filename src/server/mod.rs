@@ -480,6 +480,7 @@ impl PostgresReplayStore {
         if !safe_share_slug(slug) {
             return Err("invalid replay share link".into());
         }
+        tracing::info!(share_slug = %slug, "loading shared replay from Postgres");
         let row = self
             .client
             .query_opt(
@@ -2368,6 +2369,11 @@ async fn handle_replay_message<G: Game + 'static>(
         ClientMsg::LoadSharedReplay { slug } => match &user_session.replay_store {
             Some(store) => match store.load_shared(&slug).await {
                 Ok(loaded) => {
+                    tracing::info!(
+                        share_slug = %slug,
+                        replay_id = %loaded.id,
+                        "loaded shared replay"
+                    );
                     let mut replay_session = user_session.factory.create_session();
                     match replay_session.load_saved_replay_log(loaded.id.clone(), &loaded.log) {
                         Ok(()) => {
@@ -2378,11 +2384,17 @@ async fn handle_replay_message<G: Game + 'static>(
                         Err(message) => Ok(vec![ServerMsg::Error { message }]),
                     }
                 }
-                Err(message) => Ok(vec![ServerMsg::Error { message }]),
+                Err(message) => {
+                    tracing::warn!(share_slug = %slug, error = %message, "failed to load shared replay");
+                    Ok(vec![ServerMsg::Error { message }])
+                }
             },
-            None => Ok(vec![ServerMsg::Error {
-                message: "Replay storage is not configured".into(),
-            }]),
+            None => {
+                tracing::warn!(share_slug = %slug, "shared replay requested without replay storage");
+                Ok(vec![ServerMsg::Error {
+                    message: "Replay storage is not configured".into(),
+                }])
+            }
         },
         msg @ (ClientMsg::RunSims { .. } | ClientMsg::RunSearch { .. }) => {
             let mut replay_session = user_session.replay_session.lock().await;

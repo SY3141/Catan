@@ -21,7 +21,7 @@ tailwind.config = {
   }
 }
 </script>
-<link rel="stylesheet" href="style.css?v=native-ad-6rows-20260620">
+<link rel="stylesheet" href="style.css?v=auth-card-fit-20260621">
 <script
   defer
   crossorigin="anonymous"
@@ -45,20 +45,23 @@ tailwind.config = {
         <span class="login-mark" aria-hidden="true"></span>
         <span>HexFish</span>
       </div>
-      <h1 id="login-title">Catan Analysis Board</h1>
-      <p>Sign in to continue to the board, search tree, and game controls.</p>
+      <h1 id="login-title">
+        Play sharper Catan<br>
+        with HexFish
+      </h1>
+      <p class="login-intro">Practice against HexFish from beginner to expert difficulty, review every move, save your games, and share replay links with friends.</p>
       <div class="login-preview" aria-hidden="true">
         <img src="hexfish.png" alt="">
       </div>
     </div>
     <div class="login-panel">
       <div class="login-panel-header">
-        <p class="login-eyebrow">Secure workspace</p>
-        <h2>Welcome back</h2>
+        <h2 id="login-panel-title">Welcome back</h2>
+        <p id="login-panel-copy" class="login-panel-copy">Sign in to access your saved replays, rooms, and analysis tools.</p>
       </div>
       <div class="login-tabs" role="tablist" aria-label="Authentication options">
         <button id="login-tab-sign-in" class="login-tab active" type="button" role="tab" aria-selected="true">Sign in</button>
-        <button id="login-tab-sign-up" class="login-tab" type="button" role="tab" aria-selected="false">Sign up</button>
+        <button id="login-tab-sign-up" class="login-tab" type="button" role="tab" aria-selected="false">Create account</button>
       </div>
       <div id="clerk-auth-mount" class="clerk-auth-mount">
         <div id="clerk-sign-in-mount" class="clerk-auth-panel"></div>
@@ -82,7 +85,8 @@ tailwind.config = {
     <span id="phase-label" class="bg-bg-3 px-2 py-0.5 rounded text-xs text-gray-300"></span>
     <span id="turn-label" class="text-xs text-gray-500"></span>
     <div id="auth-controls" class="ml-auto flex items-center gap-2">
-      <span id="app-version" class="px-2 py-0.5 rounded border border-gray-700 bg-bg text-[10px] font-semibold tracking-wide text-gray-400" aria-label="Version V1.0">V1.0</span>
+      <a id="ko-fi-link" href="https://ko-fi.com/hexfish" target="_blank" rel="noopener noreferrer" class="px-2 py-0.5 rounded border border-gray-700 bg-bg text-[10px] font-semibold tracking-wide text-gray-300 hover:text-gray-100 hover:bg-bg-3 transition-colors">Donate</a>
+      <span id="app-version" class="px-2 py-0.5 rounded border border-gray-700 bg-bg text-[10px] font-semibold tracking-wide text-gray-400" aria-label="Version V1.0.2">V1.0.2</span>
       <div id="clerk-user-button" class="hidden"></div>
       <span id="clerk-status" class="sr-only" aria-live="polite"></span>
     </div>
@@ -256,13 +260,16 @@ tailwind.config = {
     <div class="mx-auto flex w-full max-w-xl flex-col gap-3">
       <section class="bg-bg-2 border border-gray-700 rounded p-4">
         <div class="flex flex-wrap items-start justify-between gap-3">
-          <h2 id="play-setup-title" class="text-sm font-semibold text-gray-100">You vs HexFish5</h2>
+          <div>
+            <h2 class="text-sm font-semibold text-gray-100">Singleplayer</h2>
+            <p id="play-setup-title" class="mt-1 text-xs font-medium text-gray-400">You Vs HexFish</p>
+          </div>
         </div>
 
         <div class="mt-3 flex flex-wrap items-center gap-2">
           <div class="flex rounded border border-gray-700 overflow-hidden" role="group" aria-label="Choose your side">
-            <button id="play-side-p1" type="button" class="play-side-btn px-3 py-1 text-xs bg-accent text-white" data-player="0" aria-pressed="true">P1</button>
-            <button id="play-side-p2" type="button" class="play-side-btn px-3 py-1 text-xs bg-bg-3 text-gray-300 hover:bg-bg border-l border-gray-700" data-player="1" aria-pressed="false">P2</button>
+            <button id="play-side-p1" type="button" class="play-side-btn px-3 py-1 text-xs bg-accent text-white" data-play-scope="singleplayer" data-player="0" aria-pressed="true">P1</button>
+            <button id="play-side-p2" type="button" class="play-side-btn px-3 py-1 text-xs bg-bg-3 text-gray-300 hover:bg-bg border-l border-gray-700" data-play-scope="singleplayer" data-player="1" aria-pressed="false">P2</button>
           </div>
           <label id="play-difficulty-label" class="flex items-center gap-1.5 text-xs text-gray-300">
             Difficulty
@@ -279,8 +286,8 @@ tailwind.config = {
         <div class="flex flex-wrap items-start justify-between gap-3">
           <h2 class="text-sm font-semibold text-gray-100">Multiplayer</h2>
           <div class="flex rounded border border-gray-700 overflow-hidden" role="group" aria-label="Choose your multiplayer side">
-            <button id="multiplayer-side-p1" type="button" class="play-side-btn px-3 py-1 text-xs bg-accent text-white" data-player="0" aria-pressed="true">P1</button>
-            <button id="multiplayer-side-p2" type="button" class="play-side-btn px-3 py-1 text-xs bg-bg-3 text-gray-300 hover:bg-bg border-l border-gray-700" data-player="1" aria-pressed="false">P2</button>
+            <button id="multiplayer-side-p1" type="button" class="play-side-btn px-3 py-1 text-xs bg-accent text-white" data-play-scope="multiplayer" data-player="0" aria-pressed="true">P1</button>
+            <button id="multiplayer-side-p2" type="button" class="play-side-btn px-3 py-1 text-xs bg-bg-3 text-gray-300 hover:bg-bg border-l border-gray-700" data-play-scope="multiplayer" data-player="1" aria-pressed="false">P2</button>
           </div>
         </div>
 
@@ -324,6 +331,19 @@ tailwind.config = {
       </section>
     </div>
   </section>
+
+  <div id="replay-share-modal" class="hidden fixed inset-0 z-40 items-center justify-center bg-black/60 px-4" role="dialog" aria-modal="true" aria-labelledby="replay-share-modal-title">
+    <div class="w-full max-w-md rounded border border-gray-700 bg-bg-2 p-4 shadow-xl">
+      <div class="mb-3 flex items-center justify-between gap-3">
+        <h2 id="replay-share-modal-title" class="text-sm font-semibold text-gray-100">Replay link copied</h2>
+        <button id="btn-close-replay-share-modal" type="button" class="h-7 w-7 rounded border border-gray-700 bg-bg-3 text-gray-300 hover:bg-bg hover:text-gray-100" aria-label="Close replay link dialog">&times;</button>
+      </div>
+      <div class="flex items-center gap-2">
+        <input id="replay-share-link" type="text" readonly class="min-w-0 flex-1 rounded border border-gray-700 bg-bg-3 px-2 py-1.5 text-xs text-gray-300" aria-label="Replay share link">
+        <button id="btn-copy-replay-share-link" type="button" class="py-1.5 px-3 text-xs bg-accent border border-accent text-white rounded cursor-pointer hover:bg-red-600 transition-colors">Copy Again</button>
+      </div>
+    </div>
+  </div>
 
   <!-- Bottom: Controls -->
   <div id="controls" class="hidden flex items-center gap-2 px-4 py-2 bg-bg-2 border-t border-gray-700 flex-wrap">
@@ -370,11 +390,11 @@ tailwind.config = {
 </div>
 <div id="svg-tooltip"></div>
 
-<script src="session.js?v=play-options-20260614"></script>
+<script src="session.js?v=connected-event-20260621"></script>
 <script src="board.js?v=building-icons-20260620"></script>
 <script src="mcts.js?v=analysis-bar-public-20260620"></script>
 <script src="controls.js?v=replay-slider-20260620"></script>
-<script src="auth.js?v=clerk-stable-tabs-local-verify-20260619"></script>
-<script src="app.js?v=shared-replays-20260621"></script>
+<script src="auth.js?v=auth-stable-tabs-20260621"></script>
+<script src="app.js?v=replay-share-modal-20260621"></script>
 </body>
 </html>
