@@ -144,6 +144,18 @@ tailwind.config = {
           <div id="resource-animation-layer" class="resource-animation-layer" aria-hidden="true"></div>
           <div id="roll-badge" class="roll-badge hidden absolute right-0 bottom-0 z-10 flex w-[42px] h-[42px] items-center justify-center rounded-lg border border-white/50 bg-bg-3/90 text-white text-xl font-extrabold shadow-lg pointer-events-none" aria-live="polite" aria-label="Roll"></div>
           <svg id="board-svg" class="w-full h-full min-h-0" viewBox="-50 -50 500 500"></svg>
+          <div id="multiplayer-invite-modal" class="hidden absolute inset-0 z-30 items-center justify-center bg-black/55 px-4">
+            <div class="w-full max-w-sm rounded border border-gray-700 bg-bg-2 p-3 shadow-xl">
+              <div class="mb-2 flex items-center justify-between gap-2">
+                <h2 class="text-sm font-semibold text-gray-100">Waiting for opponent</h2>
+                <span id="multiplayer-invite-room-code" class="font-mono text-xs text-gray-400">-</span>
+              </div>
+              <div class="flex items-center gap-2">
+                <input id="multiplayer-invite-link" type="text" readonly class="min-w-0 flex-1 bg-bg-3 border border-gray-700 text-gray-300 rounded px-2 py-1.5 text-xs" aria-label="Invite link">
+                <button id="btn-copy-multiplayer-invite" type="button" class="py-1.5 px-3 text-xs bg-accent border border-accent text-white rounded cursor-pointer hover:bg-red-600 transition-colors">Copy</button>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
       <aside id="action-panel" class="w-44 min-w-44 max-w-52 shrink-0 min-h-0 flex flex-col border-l border-gray-700">
@@ -275,20 +287,12 @@ tailwind.config = {
         <div id="play-online-options" class="mt-4 flex flex-col gap-3">
           <div class="flex flex-wrap items-center gap-2">
             <button id="btn-create-multiplayer-room" type="button" class="py-1.5 px-3 text-xs bg-accent border border-accent text-white rounded cursor-pointer hover:bg-red-600 transition-colors">Create Room</button>
+            <button id="btn-join-multiplayer-room" type="button" class="py-1.5 px-3 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors">Join Room</button>
             <input id="multiplayer-room-code-input" type="text" inputmode="text" autocomplete="off" maxlength="12" placeholder="CODE" class="w-28 bg-bg-3 border border-gray-700 text-gray-100 rounded px-2 py-1.5 text-xs uppercase" aria-label="Invite code">
-            <button id="btn-join-multiplayer-room" type="button" class="py-1.5 px-3 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors">Join</button>
           </div>
           <div id="multiplayer-reconnect-row" class="hidden flex flex-wrap items-center gap-2 text-xs">
             <span class="text-gray-500">Last room <span id="multiplayer-reconnect-code" class="font-mono text-gray-200">-</span></span>
             <button id="btn-reconnect-multiplayer-room" type="button" class="py-1 px-2 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-default">Reconnect</button>
-          </div>
-          <div class="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 text-xs">
-            <span class="text-gray-500">Room</span>
-            <span id="multiplayer-room-code" class="font-mono text-gray-200">-</span>
-            <button id="btn-leave-multiplayer-room" type="button" class="hidden py-1 px-2 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors">Leave</button>
-            <span class="text-gray-500">Invite</span>
-            <input id="multiplayer-room-link" type="text" readonly class="min-w-0 bg-bg-3 border border-gray-700 text-gray-300 rounded px-2 py-1 text-xs" aria-label="Invite link">
-            <button id="btn-copy-room-link" type="button" class="py-1 px-2 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-default" disabled>Copy</button>
           </div>
           <div id="multiplayer-room-status" class="hidden min-h-4 text-xs text-gray-300" aria-live="polite"></div>
           <div class="border-t border-gray-700 pt-3">
@@ -371,6 +375,6 @@ tailwind.config = {
 <script src="mcts.js?v=analysis-bar-public-20260620"></script>
 <script src="controls.js?v=replay-slider-20260620"></script>
 <script src="auth.js?v=clerk-stable-tabs-local-verify-20260619"></script>
-<script src="app.js?v=multiplayer-reconnect-20260621"></script>
+<script src="app.js?v=shared-replays-20260621"></script>
 </body>
 </html>

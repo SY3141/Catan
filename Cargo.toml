@@ -11,7 +11,17 @@ path = "src/lib.rs"
 serde = ["dep:serde", "dep:serde_json"]
 cli = ["dep:clap"]
 visualize = ["serde"]
-server = ["serde", "dep:axum", "dep:futures-util", "dep:jsonwebtoken", "dep:tower-http", "dep:tokio"]
+server = [
+  "serde",
+  "dep:axum",
+  "dep:futures-util",
+  "dep:jsonwebtoken",
+  "dep:native-tls",
+  "dep:postgres-native-tls",
+  "dep:tokio-postgres",
+  "dep:tower-http",
+  "dep:tokio",
+]
 nn = [
   "serde",
   "cli",
@@ -33,9 +43,12 @@ fastrand = "2"
 futures-util = { version = "0.3", optional = true }
 indicatif = "0.18"
 jsonwebtoken = { version = "9", optional = true }
+native-tls = { version = "0.2", optional = true }
+postgres-native-tls = { version = "0.5", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"], optional = true }
+tokio-postgres = { version = "0.7", optional = true }
 tower-http = { version = "0.6", features = ["fs"], optional = true }
 tracing = "0.1"
 tracing-indicatif = "0.3"

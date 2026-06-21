@@ -107,8 +107,11 @@ let activeView = 'play-setup';
 let selectedPlayHumanPlayer = 0;
 let selectedPlayMode = 'bot';
 let selectedPlayDifficulty = 5;
-const initialUrlRoomCode = normalizeRoomCode(new URLSearchParams(window.location.search).get('room'));
-let pendingAutoJoinRoomCode = initialUrlRoomCode;
+const initialUrlParams = new URLSearchParams(window.location.search);
+const initialSharedReplaySlug = normalizeReplaySlug(initialUrlParams.get('replay'));
+const initialUrlRoomCode = normalizeRoomCode(initialUrlParams.get('room'));
+let pendingSharedReplaySlug = initialSharedReplaySlug;
+let pendingAutoJoinRoomCode = initialSharedReplaySlug ? '' : initialUrlRoomCode;
 if (pendingAutoJoinRoomCode) selectedPlayMode = 'multiplayer';
 let autoJoinRoomAttempted = false;
 let multiplayerLobbyRooms = [];
@@ -389,6 +392,10 @@ function normalizeRoomCode(code) {
   return String(code || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 12);
 }
 
+function normalizeReplaySlug(slug) {
+  return String(slug || '').trim().replace(/[^A-Za-z0-9_-]/g, '').slice(0, 128);
+}
+
 function readLastMultiplayerRoomCode() {
   try {
     return window.localStorage?.getItem(LAST_MULTIPLAYER_ROOM_KEY) || '';
@@ -447,6 +454,7 @@ function multiplayerOpponentConnected(room = playMode.multiplayerRoom) {
 
 function roomInviteUrl(code) {
   const url = new URL(window.location.href);
+  url.searchParams.delete('replay');
   url.searchParams.set('room', normalizeRoomCode(code));
   return url.toString();
 }
@@ -561,17 +569,10 @@ function updateMultiplayerReconnectUi() {
 function updateMultiplayerRoomUi() {
   const room = playMode.multiplayerRoom;
   const code = normalizeRoomCode(room?.code);
-  const codeEl = document.getElementById('multiplayer-room-code');
-  const linkEl = document.getElementById('multiplayer-room-link');
-  const copyBtn = document.getElementById('btn-copy-room-link');
-  const leaveBtn = document.getElementById('btn-leave-multiplayer-room');
 
-  if (codeEl) codeEl.textContent = code || '-';
-  if (linkEl) linkEl.value = code ? roomInviteUrl(code) : '';
-  if (copyBtn) copyBtn.disabled = !code;
-  if (leaveBtn) leaveBtn.classList.toggle('hidden', !code);
   renderMultiplayerLobby();
   updateMultiplayerReconnectUi();
+  updateMultiplayerInviteModal();
 
   if (!room) {
     if (selectedPlayMode === 'multiplayer') {
@@ -588,6 +589,20 @@ function updateMultiplayerRoomUi() {
   } else {
     setMultiplayerSetupStatus(`Room ${code}. You are ${side}.`);
   }
+}
+
+function updateMultiplayerInviteModal() {
+  const modal = document.getElementById('multiplayer-invite-modal');
+  const linkInput = document.getElementById('multiplayer-invite-link');
+  const codeEl = document.getElementById('multiplayer-invite-room-code');
+  if (!modal || !linkInput || !codeEl) return;
+
+  const code = normalizeRoomCode(playMode.multiplayerRoom?.code);
+  const show = playMultiplayerActive() && !!code && !multiplayerRoomFull();
+  modal.classList.toggle('hidden', !show);
+  modal.classList.toggle('flex', show);
+  codeEl.textContent = code || '-';
+  linkInput.value = show ? roomInviteUrl(code) : '';
 }
 
 function resetMultiplayerState(statusText = '') {
@@ -651,17 +666,15 @@ function leaveMultiplayerRoom(showSetup = true, preserveReconnect = false) {
 
 async function copyMultiplayerInviteLink() {
   const code = normalizeRoomCode(playMode.multiplayerRoom?.code);
-  if (!code) return;
-  const link = roomInviteUrl(code);
-  const input = document.getElementById('multiplayer-room-link');
+  const input = document.getElementById('multiplayer-invite-link');
+  const link = code ? roomInviteUrl(code) : input?.value;
+  if (!link) return;
   try {
     await navigator.clipboard.writeText(link);
     setMultiplayerSetupStatus(`Copied invite link for ${code}.`);
   } catch (_error) {
-    if (input) {
-      input.focus();
-      input.select();
-    }
+    input?.focus();
+    input?.select();
     setMultiplayerSetupStatus('Invite link selected.');
   }
 }
@@ -673,6 +686,37 @@ function maybeAutoJoinRoomFromUrl() {
   const input = document.getElementById('multiplayer-room-code-input');
   if (input) input.value = pendingAutoJoinRoomCode;
   joinMultiplayerRoom(pendingAutoJoinRoomCode);
+}
+
+function sharedReplayUrl(slug) {
+  return `${window.location.origin}/r/${normalizeReplaySlug(slug)}`;
+}
+
+function maybeLoadSharedReplayFromUrl() {
+  const slug = normalizeReplaySlug(pendingSharedReplaySlug);
+  if (!slug) return;
+  pendingSharedReplaySlug = '';
+  controls.stopAutoplay();
+  controls._disableAutoSearch();
+  controls.pauseBeforeCommand();
+  replayState = null;
+  controls.showReplayLoading(slug, 0);
+  setReplayStatus('Loading shared replay...');
+  session.send({ type: 'LoadSharedReplay', slug });
+  showReplayBoardView();
+}
+
+async function copyReplayShareLink(entry) {
+  const slug = normalizeReplaySlug(entry?.share_slug);
+  if (!slug) return;
+  const link = sharedReplayUrl(slug);
+  try {
+    await navigator.clipboard.writeText(link);
+    setReplayStatus('Copied replay link.');
+  } catch (_error) {
+    window.prompt('Replay link', link);
+    setReplayStatus('Replay link ready.');
+  }
 }
 
 function handleMultiplayerRoomMessage(msg) {
@@ -1417,6 +1461,7 @@ function showPlayView() {
   } else {
     updateViewChrome(null);
   }
+  updateMultiplayerInviteModal();
   scheduleBoardChromePlacement();
 }
 
@@ -1434,6 +1479,7 @@ function showPlaySetupView() {
   document.getElementById('play-setup-view').classList.remove('hidden');
   document.getElementById('replay-view').classList.add('hidden');
   document.getElementById('controls').classList.add('hidden');
+  updateMultiplayerInviteModal();
 }
 
 function showAnalysisView() {
@@ -1450,6 +1496,7 @@ function showAnalysisView() {
   controls.setOptionsAvailable(true);
   if (analysisState) renderGameState(analysisState);
   else updateViewChrome(null);
+  updateMultiplayerInviteModal();
   scheduleBoardChromePlacement();
 }
 
@@ -1467,6 +1514,7 @@ function showReplayView() {
   document.getElementById('controls').classList.add('hidden');
   controls.setOptionsAvailable(false);
   requestReplayList();
+  updateMultiplayerInviteModal();
 }
 
 function showReplayBoardView() {
@@ -1482,6 +1530,7 @@ function showReplayBoardView() {
   controls.setOptionsAvailable(false);
   if (replayState) renderGameState(replayState);
   else updateViewChrome(null);
+  updateMultiplayerInviteModal();
   scheduleBoardChromePlacement();
 }
 
@@ -1502,6 +1551,7 @@ function showEditorView() {
   setEditorChrome(true);
   controls.setOptionsAvailable(false);
   renderEditorBoard();
+  updateMultiplayerInviteModal();
   scheduleBoardChromePlacement();
 }
 
@@ -1733,6 +1783,18 @@ function renderReplaySection(list, entries, emptyText) {
       showReplayBoardView();
     });
 
+    const share = document.createElement('button');
+    share.type = 'button';
+    share.className = 'h-7 px-2 flex items-center justify-center text-[11px] text-gray-300 rounded hover:bg-bg cursor-pointer disabled:cursor-default disabled:opacity-40';
+    share.textContent = 'Share';
+    share.title = 'Copy replay link';
+    share.setAttribute('aria-label', 'Copy replay link');
+    share.disabled = !normalizeReplaySlug(entry.share_slug);
+    share.addEventListener('click', (event) => {
+      event.stopPropagation();
+      copyReplayShareLink(entry);
+    });
+
     const trash = document.createElement('button');
     trash.type = 'button';
     trash.className = 'w-7 h-7 flex items-center justify-center text-sm text-gray-400 rounded hover:bg-accent hover:text-white cursor-pointer';
@@ -1747,6 +1809,7 @@ function renderReplaySection(list, entries, emptyText) {
 
     row.appendChild(star);
     row.appendChild(load);
+    row.appendChild(share);
     row.appendChild(trash);
     list.appendChild(row);
   }
@@ -2067,8 +2130,7 @@ document.getElementById('btn-start-play-game').addEventListener('click', startPl
 document.getElementById('btn-create-multiplayer-room')?.addEventListener('click', createMultiplayerRoom);
 document.getElementById('btn-join-multiplayer-room')?.addEventListener('click', () => joinMultiplayerRoom());
 document.getElementById('btn-reconnect-multiplayer-room')?.addEventListener('click', reconnectMultiplayerRoom);
-document.getElementById('btn-copy-room-link')?.addEventListener('click', copyMultiplayerInviteLink);
-document.getElementById('btn-leave-multiplayer-room')?.addEventListener('click', () => leaveMultiplayerRoom(true));
+document.getElementById('btn-copy-multiplayer-invite')?.addEventListener('click', copyMultiplayerInviteLink);
 document.getElementById('btn-refresh-multiplayer-lobby')?.addEventListener('click', requestMultiplayerLobby);
 document.getElementById('multiplayer-room-code-input')?.addEventListener('input', (event) => {
   const input = event.target;
@@ -2467,6 +2529,7 @@ window.hexfishStartApp = () => {
   if (appStarted) return;
   appStarted = true;
   session.connect();
+  maybeLoadSharedReplayFromUrl();
   requestMultiplayerLobby();
   maybeAutoJoinRoomFromUrl();
 };

@@ -577,6 +577,7 @@ impl<G: Game + 'static> GameSession<G> {
             }
             ClientMsg::ListReplays
             | ClientMsg::LoadReplay { .. }
+            | ClientMsg::LoadSharedReplay { .. }
             | ClientMsg::DeleteReplay { .. }
             | ClientMsg::SetReplayFavorite { .. }
             | ClientMsg::CreateMultiplayerRoom { .. }

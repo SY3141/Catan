@@ -81,6 +81,11 @@ gets a fresh isolated game. To share one in-memory game across tabs and
 refreshes for the same Clerk account, create a local `.env` file from
 `.env.example` and set `CLERK_JWT_KEY` to your Clerk JWT public key.
 
+Replay logs are stored in Postgres when `DATABASE_URL` is set. The
+included `docker-compose.yml` starts a local Postgres service and wires
+`DATABASE_URL` automatically; without `DATABASE_URL`, the server falls
+back to local replay log files.
+
 Then open <http://localhost:3000>.
 
 ## What you get

@@ -1,14 +1,37 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: hexfish
+      POSTGRES_USER: hexfish
+      POSTGRES_PASSWORD: hexfish
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hexfish -d hexfish"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   hexfish-catan-ui:
     build:
       context: .
       dockerfile: Dockerfile
     init: true
+    depends_on:
+      postgres:
+        condition: service_healthy
     environment:
       CLERK_JWT_KEY: ${CLERK_JWT_KEY:-}
       CLERK_ISSUER: ${CLERK_ISSUER:-}
       CLERK_AUTHORIZED_PARTIES: ${CLERK_AUTHORIZED_PARTIES:-http://localhost:3000}
+      DATABASE_URL: ${DATABASE_URL:-postgres://hexfish:hexfish@postgres:5432/hexfish?sslmode=disable}
     ports:
       - "3000:3000"
     volumes:
       - ./examples/catan/web:/app/examples/catan/web
+
+volumes:
+  postgres-data:

@@ -9,6 +9,7 @@ pub use traits::GamePresenter;
 
 use std::{
     collections::{HashMap, hash_map::DefaultHasher},
+    env,
     hash::{Hash, Hasher},
     path::PathBuf,
     sync::{
@@ -19,10 +20,15 @@ use std::{
 
 use axum::{
     Router,
-    extract::ws::{Message, WebSocket, WebSocketUpgrade},
+    extract::{
+        Path,
+        ws::{Message, WebSocket, WebSocketUpgrade},
+    },
+    response::Redirect,
 };
 use futures_util::FutureExt;
 use tokio::sync::{Mutex, mpsc};
+use tokio_postgres::Row;
 use tower_http::services::ServeDir;
 
 use crate::eval::Evaluator;
@@ -39,12 +45,88 @@ const SEARCH_INTERRUPT_INTERVAL: u32 = 8;
 const MULTIPLAYER_ANALYSIS_SIMS: u32 = 200;
 const BOARD_FINGERPRINT_RETRIES: usize = 64;
 
+struct LoadedReplay {
+    id: String,
+    log: GameLog,
+}
+
 #[derive(Clone)]
-struct ReplayStore {
-    root: PathBuf,
+enum ReplayStore {
+    File(FileReplayStore),
+    Postgres(PostgresReplayStore),
 }
 
 impl ReplayStore {
+    fn file(root: PathBuf) -> Self {
+        Self::File(FileReplayStore::new(root))
+    }
+
+    async fn postgres(database_url: &str) -> Result<Self, String> {
+        PostgresReplayStore::connect(database_url)
+            .await
+            .map(Self::Postgres)
+    }
+
+    async fn save(
+        &self,
+        account_key: &str,
+        session_id: u64,
+        counter: u64,
+        log: &GameLog,
+    ) -> Result<ReplayEntry, String> {
+        match self {
+            Self::File(store) => store.save(account_key, session_id, counter, log),
+            Self::Postgres(store) => store.save(account_key, log).await,
+        }
+    }
+
+    async fn list(&self, account_key: &str) -> Result<Vec<ReplayEntry>, String> {
+        match self {
+            Self::File(store) => store.list(account_key),
+            Self::Postgres(store) => store.list(account_key).await,
+        }
+    }
+
+    async fn delete(&self, account_key: &str, id: &str) -> Result<(), String> {
+        match self {
+            Self::File(store) => store.delete(account_key, id),
+            Self::Postgres(store) => store.delete(account_key, id).await,
+        }
+    }
+
+    async fn set_favorite(
+        &self,
+        account_key: &str,
+        id: &str,
+        favorite: bool,
+    ) -> Result<(), String> {
+        match self {
+            Self::File(store) => store.set_favorite(account_key, id, favorite),
+            Self::Postgres(store) => store.set_favorite(account_key, id, favorite).await,
+        }
+    }
+
+    async fn load(&self, account_key: &str, id: &str) -> Result<GameLog, String> {
+        match self {
+            Self::File(store) => store.load(account_key, id),
+            Self::Postgres(store) => store.load(account_key, id).await,
+        }
+    }
+
+    async fn load_shared(&self, slug: &str) -> Result<LoadedReplay, String> {
+        match self {
+            Self::File(store) => store.load_shared(slug),
+            Self::Postgres(store) => store.load_shared(slug).await,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct FileReplayStore {
+    root: PathBuf,
+}
+
+impl FileReplayStore {
     fn new(root: PathBuf) -> Self {
         Self { root }
     }
@@ -57,17 +139,22 @@ impl ReplayStore {
         log: &GameLog,
     ) -> Result<ReplayEntry, String> {
         let saved_at_ms = current_unix_ms();
-        let id = format!("{saved_at_ms}-{session_id}-{counter}.log");
+        let id = format!(
+            "{saved_at_ms}-{session_id}-{counter}-{}.log",
+            random_base62(16)
+        );
         let dir = self.user_dir(account_key);
         std::fs::create_dir_all(&dir).map_err(|e| format!("failed to create replay dir: {e}"))?;
         let path = dir.join(&id);
         log.write_result(&path)
             .map_err(|e| format!("failed to write replay log: {e}"))?;
+        let share_slug = file_share_slug(&id);
         Ok(ReplayEntry {
             id,
             saved_at_ms,
             action_count: log.actions.len(),
             favorite: false,
+            share_slug,
         })
     }
 
@@ -99,6 +186,7 @@ impl ReplayStore {
                 saved_at_ms,
                 action_count,
                 favorite: self.is_favorite(account_key, id),
+                share_slug: file_share_slug(id),
             });
         }
         out.sort_by(|a, b| {
@@ -156,6 +244,49 @@ impl ReplayStore {
         GameLog::read_result(&path)
     }
 
+    fn load_shared(&self, slug: &str) -> Result<LoadedReplay, String> {
+        if !safe_share_slug(slug) {
+            return Err("invalid replay share link".into());
+        }
+        let accounts = match std::fs::read_dir(&self.root) {
+            Ok(accounts) => accounts,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err("shared replay not found".into());
+            }
+            Err(e) => return Err(format!("failed to read replay storage: {e}")),
+        };
+
+        for account in accounts {
+            let account = account.map_err(|e| format!("failed to read replay account: {e}"))?;
+            let account_path = account.path();
+            if !account_path.is_dir() {
+                continue;
+            }
+            let logs = match std::fs::read_dir(&account_path) {
+                Ok(logs) => logs,
+                Err(_) => continue,
+            };
+            for log in logs {
+                let log = log.map_err(|e| format!("failed to read replay entry: {e}"))?;
+                let path = log.path();
+                if !path.is_file() {
+                    continue;
+                }
+                let Some(id) = path.file_name().and_then(|name| name.to_str()) else {
+                    continue;
+                };
+                if safe_replay_id(id) && file_share_slug(id) == slug {
+                    return Ok(LoadedReplay {
+                        id: id.to_string(),
+                        log: GameLog::read_result(&path)?,
+                    });
+                }
+            }
+        }
+
+        Err("shared replay not found".into())
+    }
+
     fn is_favorite(&self, account_key: &str, id: &str) -> bool {
         self.favorite_path(account_key, id).is_file()
     }
@@ -169,11 +300,259 @@ impl ReplayStore {
     }
 }
 
+#[derive(Clone)]
+struct PostgresReplayStore {
+    client: Arc<tokio_postgres::Client>,
+}
+
+impl PostgresReplayStore {
+    async fn connect(database_url: &str) -> Result<Self, String> {
+        let tls = native_tls::TlsConnector::builder()
+            .build()
+            .map_err(|e| format!("failed to configure Postgres TLS: {e}"))?;
+        let tls = postgres_native_tls::MakeTlsConnector::new(tls);
+        let (client, connection) = tokio_postgres::connect(database_url, tls)
+            .await
+            .map_err(|e| format!("failed to connect to Postgres replay store: {e}"))?;
+
+        tokio::spawn(async move {
+            if let Err(error) = connection.await {
+                tracing::error!(%error, "Postgres replay store connection closed");
+            }
+        });
+
+        let store = Self {
+            client: Arc::new(client),
+        };
+        store.init_schema().await?;
+        Ok(store)
+    }
+
+    async fn init_schema(&self) -> Result<(), String> {
+        self.client
+            .batch_execute(
+                r#"
+                CREATE TABLE IF NOT EXISTS replay_logs (
+                    id TEXT PRIMARY KEY,
+                    account_key TEXT NOT NULL,
+                    share_slug TEXT NOT NULL UNIQUE,
+                    initial_state TEXT NOT NULL,
+                    actions BIGINT[] NOT NULL,
+                    saved_at_ms BIGINT NOT NULL,
+                    action_count BIGINT NOT NULL,
+                    favorite BOOLEAN NOT NULL DEFAULT FALSE
+                );
+                CREATE INDEX IF NOT EXISTS replay_logs_account_saved_idx
+                    ON replay_logs (account_key, saved_at_ms DESC, id DESC);
+                CREATE INDEX IF NOT EXISTS replay_logs_share_slug_idx
+                    ON replay_logs (share_slug);
+                "#,
+            )
+            .await
+            .map_err(|e| format!("failed to initialize Postgres replay schema: {e}"))
+    }
+
+    async fn save(&self, account_key: &str, log: &GameLog) -> Result<ReplayEntry, String> {
+        let saved_at_ms = i64::try_from(current_unix_ms())
+            .map_err(|_| "current timestamp does not fit in Postgres BIGINT".to_string())?;
+        let action_count = i64::try_from(log.actions.len())
+            .map_err(|_| "replay action count does not fit in Postgres BIGINT".to_string())?;
+        let actions = actions_to_i64(&log.actions)?;
+
+        for _ in 0..32 {
+            let id = random_base62(24);
+            let share_slug = random_base62(18);
+            let row = self
+                .client
+                .query_opt(
+                    r#"
+                    INSERT INTO replay_logs (
+                        id,
+                        account_key,
+                        share_slug,
+                        initial_state,
+                        actions,
+                        saved_at_ms,
+                        action_count,
+                        favorite
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, FALSE)
+                    ON CONFLICT DO NOTHING
+                    RETURNING id, saved_at_ms, action_count, favorite, share_slug
+                    "#,
+                    &[
+                        &id,
+                        &account_key,
+                        &share_slug,
+                        &log.initial_state,
+                        &actions,
+                        &saved_at_ms,
+                        &action_count,
+                    ],
+                )
+                .await
+                .map_err(|e| format!("failed to save replay log: {e}"))?;
+
+            if let Some(row) = row {
+                return replay_entry_from_row(&row);
+            }
+        }
+
+        Err("failed to generate a unique replay id".into())
+    }
+
+    async fn list(&self, account_key: &str) -> Result<Vec<ReplayEntry>, String> {
+        let rows = self
+            .client
+            .query(
+                r#"
+                SELECT id, saved_at_ms, action_count, favorite, share_slug
+                FROM replay_logs
+                WHERE account_key = $1
+                ORDER BY saved_at_ms DESC, id DESC
+                "#,
+                &[&account_key],
+            )
+            .await
+            .map_err(|e| format!("failed to list replays: {e}"))?;
+
+        rows.iter().map(replay_entry_from_row).collect()
+    }
+
+    async fn delete(&self, account_key: &str, id: &str) -> Result<(), String> {
+        if !safe_replay_token(id) {
+            return Err("invalid replay id".into());
+        }
+        let deleted = self
+            .client
+            .execute(
+                "DELETE FROM replay_logs WHERE account_key = $1 AND id = $2",
+                &[&account_key, &id],
+            )
+            .await
+            .map_err(|e| format!("failed to delete replay log: {e}"))?;
+        if deleted == 0 {
+            return Err("replay log not found".into());
+        }
+        Ok(())
+    }
+
+    async fn set_favorite(
+        &self,
+        account_key: &str,
+        id: &str,
+        favorite: bool,
+    ) -> Result<(), String> {
+        if !safe_replay_token(id) {
+            return Err("invalid replay id".into());
+        }
+        let updated = self
+            .client
+            .execute(
+                "UPDATE replay_logs SET favorite = $3 WHERE account_key = $1 AND id = $2",
+                &[&account_key, &id, &favorite],
+            )
+            .await
+            .map_err(|e| format!("failed to save replay favourite: {e}"))?;
+        if updated == 0 {
+            return Err("replay log not found".into());
+        }
+        Ok(())
+    }
+
+    async fn load(&self, account_key: &str, id: &str) -> Result<GameLog, String> {
+        if !safe_replay_token(id) {
+            return Err("invalid replay id".into());
+        }
+        let row = self
+            .client
+            .query_opt(
+                "SELECT initial_state, actions FROM replay_logs WHERE account_key = $1 AND id = $2",
+                &[&account_key, &id],
+            )
+            .await
+            .map_err(|e| format!("failed to read replay log: {e}"))?
+            .ok_or_else(|| "replay log not found".to_string())?;
+        game_log_from_row(&row)
+    }
+
+    async fn load_shared(&self, slug: &str) -> Result<LoadedReplay, String> {
+        if !safe_share_slug(slug) {
+            return Err("invalid replay share link".into());
+        }
+        let row = self
+            .client
+            .query_opt(
+                "SELECT id, initial_state, actions FROM replay_logs WHERE share_slug = $1",
+                &[&slug],
+            )
+            .await
+            .map_err(|e| format!("failed to read shared replay: {e}"))?
+            .ok_or_else(|| "shared replay not found".to_string())?;
+        Ok(LoadedReplay {
+            id: row.get("id"),
+            log: game_log_from_row(&row)?,
+        })
+    }
+}
+
 fn current_unix_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+fn replay_entry_from_row(row: &Row) -> Result<ReplayEntry, String> {
+    let saved_at_ms: i64 = row.get("saved_at_ms");
+    let action_count: i64 = row.get("action_count");
+    Ok(ReplayEntry {
+        id: row.get("id"),
+        saved_at_ms: u64::try_from(saved_at_ms)
+            .map_err(|_| "stored replay timestamp is negative".to_string())?,
+        action_count: usize::try_from(action_count)
+            .map_err(|_| "stored replay action count is invalid".to_string())?,
+        favorite: row.get("favorite"),
+        share_slug: row.get("share_slug"),
+    })
+}
+
+fn game_log_from_row(row: &Row) -> Result<GameLog, String> {
+    let actions: Vec<i64> = row.get("actions");
+    Ok(GameLog {
+        initial_state: row.get("initial_state"),
+        actions: actions_from_i64(actions)?,
+    })
+}
+
+fn actions_to_i64(actions: &[usize]) -> Result<Vec<i64>, String> {
+    actions
+        .iter()
+        .map(|&action| {
+            i64::try_from(action).map_err(|_| "replay action id does not fit in BIGINT".to_string())
+        })
+        .collect()
+}
+
+fn actions_from_i64(actions: Vec<i64>) -> Result<Vec<usize>, String> {
+    actions
+        .into_iter()
+        .map(|action| {
+            usize::try_from(action).map_err(|_| "stored replay action id is invalid".to_string())
+        })
+        .collect()
+}
+
+const REPLAY_TOKEN_ALPHABET: &[u8] =
+    b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
+fn random_base62(len: usize) -> String {
+    (0..len)
+        .map(|_| {
+            let idx = fastrand::usize(..REPLAY_TOKEN_ALPHABET.len());
+            REPLAY_TOKEN_ALPHABET[idx] as char
+        })
+        .collect()
 }
 
 fn safe_replay_id(id: &str) -> bool {
@@ -184,6 +563,22 @@ fn safe_replay_id(id: &str) -> bool {
         && id
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+}
+
+fn safe_replay_token(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+fn safe_share_slug(slug: &str) -> bool {
+    safe_replay_token(slug)
+}
+
+fn file_share_slug(id: &str) -> String {
+    id.strip_suffix(".log").unwrap_or(id).to_string()
 }
 
 fn replay_timestamp_from_id(id: &str) -> Option<u64> {
@@ -629,7 +1024,7 @@ impl<G: Game + 'static> MultiplayerRoom<G> {
         });
     }
 
-    fn save_completed_replay_once(&self, session: &GameSession<G>) -> Vec<ServerMsg> {
+    async fn save_completed_replay_once(&self, session: &GameSession<G>) -> Vec<ServerMsg> {
         if !session.current_game_ended() {
             return Vec::new();
         }
@@ -643,11 +1038,18 @@ impl<G: Game + 'static> MultiplayerRoom<G> {
             return Vec::new();
         };
 
-        let seats = self.seats.lock().expect("room seats lock poisoned");
+        let account_keys = {
+            let seats = self.seats.lock().expect("room seats lock poisoned");
+            seats
+                .iter()
+                .flatten()
+                .map(|seat| seat.account_key.clone())
+                .collect::<Vec<_>>()
+        };
         let mut errors = Vec::new();
-        for seat in seats.iter().flatten() {
+        for account_key in account_keys {
             let counter = self.next_replay_counter.fetch_add(1, Ordering::Relaxed);
-            if let Err(message) = store.save(&seat.account_key, self.room_id, counter, &log) {
+            if let Err(message) = store.save(&account_key, self.room_id, counter, &log).await {
                 errors.push(ServerMsg::Error { message });
             }
         }
@@ -816,7 +1218,7 @@ fn normalize_room_code(code: &str) -> Result<String, String> {
     Ok(code)
 }
 
-fn save_replay_log<G: Game + 'static>(
+async fn save_replay_log<G: Game + 'static>(
     user_session: &UserSession<G>,
     log: &GameLog,
 ) -> Option<ServerMsg> {
@@ -824,24 +1226,27 @@ fn save_replay_log<G: Game + 'static>(
     let counter = user_session
         .next_replay_counter
         .fetch_add(1, Ordering::Relaxed);
-    match store.save(
-        &user_session.account_key,
-        user_session.session_id,
-        counter,
-        log,
-    ) {
+    match store
+        .save(
+            &user_session.account_key,
+            user_session.session_id,
+            counter,
+            log,
+        )
+        .await
+    {
         Ok(_) => None,
         Err(message) => Some(ServerMsg::Error { message }),
     }
 }
 
-fn save_current_replay_once<G: Game + 'static>(
+async fn save_current_replay_once<G: Game + 'static>(
     user_session: &UserSession<G>,
     session: &mut GameSession<G>,
 ) -> Option<ServerMsg> {
     let has_store = user_session.replay_store.is_some();
     let log = session.export_unsaved_current_log()?;
-    let error = save_replay_log(user_session, &log);
+    let error = save_replay_log(user_session, &log).await;
     if has_store && error.is_none() {
         session.mark_current_log_saved(&log);
     }
@@ -987,6 +1392,31 @@ fn log_socket_auth_mode(auth: &SocketAuth) {
     }
 }
 
+async fn replay_store_from_config(web_log_dir: Option<PathBuf>) -> Option<Arc<ReplayStore>> {
+    match env::var("DATABASE_URL") {
+        Ok(database_url) if !database_url.trim().is_empty() => {
+            println!("Replay storage: Postgres DATABASE_URL");
+            Some(Arc::new(
+                ReplayStore::postgres(database_url.trim())
+                    .await
+                    .expect("failed to initialize Postgres replay storage"),
+            ))
+        }
+        _ => web_log_dir.map(|dir| {
+            println!("Replay storage: filesystem {}", dir.display());
+            Arc::new(ReplayStore::file(dir))
+        }),
+    }
+}
+
+async fn replay_link_redirect(Path(slug): Path<String>) -> Redirect {
+    if safe_share_slug(&slug) {
+        Redirect::temporary(&format!("/?replay={slug}"))
+    } else {
+        Redirect::temporary("/")
+    }
+}
+
 /// Launch the web analysis board server.
 ///
 /// Serves static files from the presenter's `static_dir()` and provides
@@ -1002,7 +1432,7 @@ pub async fn serve<G: Game + 'static>(
 ) {
     let static_dir = presenter.static_dir().to_path_buf();
     let replay = replay.map(|(s, l)| (s, Arc::new(l)));
-    let replay_store = web_log_dir.map(|dir| Arc::new(ReplayStore::new(dir)));
+    let replay_store = replay_store_from_config(web_log_dir).await;
     let store = Arc::new(UserSessionStore::new(
         SessionFactory::new_game(evaluator, eval_name, presenter, human_players, replay),
         replay_store.clone(),
@@ -1031,6 +1461,7 @@ pub async fn serve<G: Game + 'static>(
                     }
                 }),
             )
+            .route("/r/{slug}", axum::routing::get(replay_link_redirect))
             .fallback_service(ServeDir::new(&static_dir));
 
     let addr = format!("0.0.0.0:{port}");
@@ -1073,6 +1504,7 @@ pub async fn serve_with_state<G: Game + 'static>(
                     }
                 }),
             )
+            .route("/r/{slug}", axum::routing::get(replay_link_redirect))
             .fallback_service(ServeDir::new(&static_dir));
 
     let addr = format!("0.0.0.0:{port}");
@@ -1114,6 +1546,7 @@ pub async fn serve_with_timeline<G: Game + 'static>(
                     }
                 }),
             )
+            .route("/r/{slug}", axum::routing::get(replay_link_redirect))
             .fallback_service(ServeDir::new(&static_dir));
 
     let addr = format!("0.0.0.0:{port}");
@@ -1591,7 +2024,7 @@ async fn handle_authenticated_message<G: Game + 'static>(
         let was_terminal = session.current_game_ended();
         let mut responses = match client_msg {
             ClientMsg::ListReplays => match &user_session.replay_store {
-                Some(store) => match store.list(&user_session.account_key) {
+                Some(store) => match store.list(&user_session.account_key).await {
                     Ok(entries) => vec![ServerMsg::ReplayList { entries }],
                     Err(message) => vec![ServerMsg::Error { message }],
                 },
@@ -1600,11 +2033,11 @@ async fn handle_authenticated_message<G: Game + 'static>(
                 }],
             },
             ClientMsg::DeleteReplay { id } => match &user_session.replay_store {
-                Some(store) => match store
-                    .delete(&user_session.account_key, &id)
-                    .and_then(|()| store.list(&user_session.account_key))
-                {
-                    Ok(entries) => vec![ServerMsg::ReplayList { entries }],
+                Some(store) => match store.delete(&user_session.account_key, &id).await {
+                    Ok(()) => match store.list(&user_session.account_key).await {
+                        Ok(entries) => vec![ServerMsg::ReplayList { entries }],
+                        Err(message) => vec![ServerMsg::Error { message }],
+                    },
                     Err(message) => vec![ServerMsg::Error { message }],
                 },
                 None => vec![ServerMsg::Error {
@@ -1614,9 +2047,12 @@ async fn handle_authenticated_message<G: Game + 'static>(
             ClientMsg::SetReplayFavorite { id, favorite } => match &user_session.replay_store {
                 Some(store) => match store
                     .set_favorite(&user_session.account_key, &id, favorite)
-                    .and_then(|()| store.list(&user_session.account_key))
+                    .await
                 {
-                    Ok(entries) => vec![ServerMsg::ReplayList { entries }],
+                    Ok(()) => match store.list(&user_session.account_key).await {
+                        Ok(entries) => vec![ServerMsg::ReplayList { entries }],
+                        Err(message) => vec![ServerMsg::Error { message }],
+                    },
                     Err(message) => vec![ServerMsg::Error { message }],
                 },
                 None => vec![ServerMsg::Error {
@@ -1635,7 +2071,7 @@ async fn handle_authenticated_message<G: Game + 'static>(
                     .any(|msg| matches!(msg, ServerMsg::GameState { .. }));
                 if started_game {
                     if let Some(log) = pending_log {
-                        if let Some(error) = save_replay_log(user_session, &log) {
+                        if let Some(error) = save_replay_log(user_session, &log).await {
                             msgs.insert(0, error);
                         }
                     }
@@ -1649,7 +2085,7 @@ async fn handle_authenticated_message<G: Game + 'static>(
             msg => session.handle(msg),
         };
         if !was_terminal && responses_include_terminal_game_state(&responses) {
-            if let Some(error) = save_current_replay_once(user_session, &mut session) {
+            if let Some(error) = save_current_replay_once(user_session, &mut session).await {
                 responses.insert(0, error);
             }
         }
@@ -1793,7 +2229,7 @@ async fn handle_multiplayer_message<G: Game + 'static>(
                 room.touch();
                 room.broadcast_state_except(&session, Some(socket_id));
                 let mut responses = vec![session.state_msg_for_player(player)];
-                responses.extend(room.save_completed_replay_once(&session));
+                responses.extend(room.save_completed_replay_once(&session).await);
                 (
                     responses,
                     room.next_analysis_generation(),
@@ -1893,7 +2329,9 @@ fn multiplayer_analysis_root_wdl<G: Game + 'static>(session: &mut GameSession<G>
 
 fn client_msg_target(msg: &ClientMsg) -> ViewTarget {
     match msg {
-        ClientMsg::LoadReplay { .. } | ClientMsg::SetReplayCursor { .. } => ViewTarget::Replay,
+        ClientMsg::LoadReplay { .. }
+        | ClientMsg::LoadSharedReplay { .. }
+        | ClientMsg::SetReplayCursor { .. } => ViewTarget::Replay,
         ClientMsg::RunSims { target, .. }
         | ClientMsg::RunSearch { target, .. }
         | ClientMsg::PauseSearch { target, .. }
@@ -1909,10 +2347,29 @@ async fn handle_replay_message<G: Game + 'static>(
 ) -> Result<Vec<ServerMsg>, ()> {
     match client_msg {
         ClientMsg::LoadReplay { id } => match &user_session.replay_store {
-            Some(store) => match store.load(&user_session.account_key, &id) {
+            Some(store) => match store.load(&user_session.account_key, &id).await {
                 Ok(log) => {
                     let mut replay_session = user_session.factory.create_session();
                     match replay_session.load_saved_replay_log(id.clone(), &log) {
+                        Ok(()) => {
+                            let state_msg = replay_session.state_msg();
+                            *user_session.replay_session.lock().await = Some(replay_session);
+                            Ok(vec![state_msg])
+                        }
+                        Err(message) => Ok(vec![ServerMsg::Error { message }]),
+                    }
+                }
+                Err(message) => Ok(vec![ServerMsg::Error { message }]),
+            },
+            None => Ok(vec![ServerMsg::Error {
+                message: "Replay storage is not configured".into(),
+            }]),
+        },
+        ClientMsg::LoadSharedReplay { slug } => match &user_session.replay_store {
+            Some(store) => match store.load_shared(&slug).await {
+                Ok(loaded) => {
+                    let mut replay_session = user_session.factory.create_session();
+                    match replay_session.load_saved_replay_log(loaded.id.clone(), &loaded.log) {
                         Ok(()) => {
                             let state_msg = replay_session.state_msg();
                             *user_session.replay_session.lock().await = Some(replay_session);
@@ -1997,10 +2454,10 @@ mod tests {
     use tokio::{sync::mpsc, time::timeout};
 
     use super::{
-        ActiveMultiplayerRoom, ClientMsg, GamePresenter, MultiplayerRoomStore, ReplayStore,
-        SearchBudget, ServerMsg, SessionFactory, UserSessionStore, ViewTarget,
+        ActiveMultiplayerRoom, ClientMsg, FileReplayStore, GamePresenter, MultiplayerRoomStore,
+        ReplayStore, SearchBudget, ServerMsg, SessionFactory, UserSessionStore, ViewTarget,
         anonymous_user_id_from_id, anonymous_user_id_from_token, client_msg_target,
-        current_unix_ms, handle_multiplayer_message, safe_replay_id,
+        current_unix_ms, handle_multiplayer_message, safe_replay_id, safe_share_slug,
     };
 
     #[derive(Clone)]
@@ -2407,7 +2864,7 @@ mod tests {
     #[test]
     fn replay_store_lists_only_the_current_account() {
         let dir = temp_replay_dir("replay-scope");
-        let store = ReplayStore::new(dir.clone());
+        let store = FileReplayStore::new(dir.clone());
         let log = GameLog {
             initial_state: "1".into(),
             actions: vec![0, 0],
@@ -2422,8 +2879,15 @@ mod tests {
         assert_eq!(entries_a.len(), 1);
         assert_eq!(entries_a[0].id, saved_a.id);
         assert_eq!(entries_a[0].action_count, 2);
+        assert!(safe_share_slug(&entries_a[0].share_slug));
         assert_eq!(entries_b.len(), 1);
         assert_ne!(entries_a[0].id, entries_b[0].id);
+
+        let shared = store
+            .load_shared(&entries_a[0].share_slug)
+            .expect("shared replay load");
+        assert_eq!(shared.id, entries_a[0].id);
+        assert_eq!(shared.log.actions, vec![0, 0]);
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -2431,7 +2895,7 @@ mod tests {
     #[test]
     fn replay_store_favorites_and_deletes_logs() {
         let dir = temp_replay_dir("replay-favorite-delete");
-        let store = ReplayStore::new(dir.clone());
+        let store = FileReplayStore::new(dir.clone());
         let log = GameLog {
             initial_state: "1".into(),
             actions: vec![0],
@@ -2459,6 +2923,69 @@ mod tests {
     }
 
     #[test]
+    fn postgres_replay_store_integration() {
+        let Ok(database_url) = std::env::var("HEXFISH_TEST_DATABASE_URL") else {
+            return;
+        };
+        if database_url.trim().is_empty() {
+            return;
+        }
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let store = ReplayStore::postgres(database_url.trim())
+                .await
+                .expect("Postgres replay store");
+            let account = format!("account_{}_{}", current_unix_ms(), fastrand::u64(..));
+            let other_account = format!("other_{}_{}", current_unix_ms(), fastrand::u64(..));
+            let log = GameLog {
+                initial_state: "1".into(),
+                actions: vec![0, 1, 2],
+            };
+
+            let saved = store
+                .save(&account, 11, 1, &log)
+                .await
+                .expect("save replay");
+            assert!(safe_share_slug(&saved.share_slug));
+            assert!(store.list(&other_account).await.unwrap().is_empty());
+
+            let entries = store.list(&account).await.expect("list owner replays");
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].id, saved.id);
+            assert_eq!(entries[0].action_count, 3);
+            assert!(!entries[0].favorite);
+
+            let loaded = store
+                .load(&account, &saved.id)
+                .await
+                .expect("load owner replay");
+            assert_eq!(loaded.initial_state, log.initial_state);
+            assert_eq!(loaded.actions, log.actions);
+
+            let shared = store
+                .load_shared(&saved.share_slug)
+                .await
+                .expect("load shared replay");
+            assert_eq!(shared.id, saved.id);
+            assert_eq!(shared.log.actions, log.actions);
+
+            store
+                .set_favorite(&account, &saved.id, true)
+                .await
+                .expect("favorite replay");
+            assert!(store.list(&account).await.unwrap()[0].favorite);
+
+            store
+                .delete(&account, &saved.id)
+                .await
+                .expect("delete replay");
+            assert!(store.list(&account).await.unwrap().is_empty());
+            assert!(store.load_shared(&saved.share_slug).await.is_err());
+        });
+    }
+
+    #[test]
     fn replay_store_rejects_unsafe_ids() {
         assert!(!safe_replay_id("../game.log"));
         assert!(!safe_replay_id("..game.log"));
@@ -2468,7 +2995,7 @@ mod tests {
         assert!(!safe_replay_id("game.txt"));
         assert!(safe_replay_id("123-1-1.log"));
 
-        let store = ReplayStore::new(temp_replay_dir("unsafe-replay-id"));
+        let store = FileReplayStore::new(temp_replay_dir("unsafe-replay-id"));
         let err = store.load("account_a", "../game.log").unwrap_err();
         assert!(err.contains("invalid replay id"));
     }
@@ -2477,6 +3004,12 @@ mod tests {
     fn replay_messages_route_to_replay_session() {
         assert_eq!(
             client_msg_target(&super::ClientMsg::LoadReplay { id: "1.log".into() }),
+            ViewTarget::Replay
+        );
+        assert_eq!(
+            client_msg_target(&super::ClientMsg::LoadSharedReplay {
+                slug: "abc123".into()
+            }),
             ViewTarget::Replay
         );
         assert_eq!(

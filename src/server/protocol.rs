@@ -44,6 +44,7 @@ pub struct ReplayEntry {
     pub saved_at_ms: u64,
     pub action_count: usize,
     pub favorite: bool,
+    pub share_slug: String,
 }
 
 /// Replay metadata for the currently loaded game state.
@@ -136,6 +137,8 @@ pub enum ClientMsg {
     ListReplays,
     /// Load a saved replay by id.
     LoadReplay { id: String },
+    /// Load an unlisted shared replay by slug.
+    LoadSharedReplay { slug: String },
     /// Delete a saved replay by id.
     DeleteReplay { id: String },
     /// Toggle whether a saved replay is favourited.
