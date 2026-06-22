@@ -68,6 +68,9 @@ const EDITOR_NUMBER_BAG = [2, 3, 3, 4, 4, 5, 5, 6, 6, 8, 8, 9, 9, 10, 10, 11, 11
 const EDITOR_PORT_BAG = ['lumber', 'brick', 'wool', 'grain', 'ore', 'generic', 'generic', 'generic', 'generic'];
 const LAST_MULTIPLAYER_ROOM_KEY = 'hexfish-last-multiplayer-room-code';
 const PENDING_SHARED_REPLAY_KEY = 'hexfish-pending-shared-replay-slug';
+const MULTIPLAYER_CLERK_ERROR = 'Multiplayer requires a Clerk account';
+const MULTIPLAYER_SIGN_IN_MESSAGE = 'Sign in or create an account to use multiplayer rooms.';
+const MULTIPLAYER_DEPLOY_CLERK_MESSAGE = 'Multiplayer is disabled on this deployment because the server is running without Clerk authentication. Set CLERK_JWT_KEY, CLERK_ISSUER, and CLERK_AUTHORIZED_PARTIES in Google Cloud, then redeploy.';
 
 function playerColor(playerIndex) {
   return playerIndex === 0 || playerIndex === 1 ? PLAYER_COLORS[playerIndex] : '';
@@ -549,6 +552,7 @@ function multiplayerLobbyStatusText(room) {
 }
 
 function requestMultiplayerLobby() {
+  if (!clerkSignedIn()) return;
   session.send({ type: 'ListMultiplayerRooms' });
 }
 
@@ -671,6 +675,7 @@ function resetMultiplayerState(statusText = '') {
 
 function createMultiplayerRoom() {
   setPlayModeChoice('multiplayer');
+  if (!requireClerkForMultiplayer()) return;
   resetMultiplayerState('Creating room...');
   session.send({ type: 'CreateMultiplayerRoom', preferred_player: selectedMultiplayerHumanPlayer });
 }
@@ -679,6 +684,7 @@ function joinMultiplayerRoom(code = null) {
   const input = document.getElementById('multiplayer-room-code-input');
   const roomCode = normalizeRoomCode(code ?? input?.value);
   setPlayModeChoice('multiplayer');
+  if (!requireClerkForMultiplayer()) return;
   if (!roomCode) {
     setMultiplayerSetupStatus('Enter an invite code.');
     return;
@@ -690,6 +696,8 @@ function joinMultiplayerRoom(code = null) {
 
 function reconnectMultiplayerRoom() {
   const code = reconnectRoomCode();
+  setPlayModeChoice('multiplayer');
+  if (!requireClerkForMultiplayer()) return;
   if (!code) {
     setMultiplayerSetupStatus('No room to reconnect.');
     updateMultiplayerReconnectUi();
@@ -698,6 +706,27 @@ function reconnectMultiplayerRoom() {
   const input = document.getElementById('multiplayer-room-code-input');
   if (input) input.value = code;
   joinMultiplayerRoom(code);
+}
+
+function clerkSignedIn() {
+  const clerk = window.Clerk;
+  return !!(
+    window.hexfishAuthSignedIn ||
+    clerk?.isSignedIn ||
+    clerk?.session ||
+    clerk?.user
+  );
+}
+
+function requireClerkForMultiplayer() {
+  if (clerkSignedIn()) return true;
+  setMultiplayerSetupStatus(MULTIPLAYER_SIGN_IN_MESSAGE);
+  return false;
+}
+
+function displayServerErrorMessage(message) {
+  if (String(message || '') !== MULTIPLAYER_CLERK_ERROR) return message;
+  return clerkSignedIn() ? MULTIPLAYER_DEPLOY_CLERK_MESSAGE : MULTIPLAYER_SIGN_IN_MESSAGE;
 }
 
 function leaveMultiplayerRoom(showSetup = true, preserveReconnect = false) {
@@ -1526,6 +1555,7 @@ session.on('BotAction', (msg) => {
 });
 
 session.on('Error', (msg) => {
+  const displayMessage = displayServerErrorMessage(msg.message);
   if (loadingSharedReplaySlug) {
     loadingSharedReplaySlug = '';
     if (/shared replay|replay share/i.test(String(msg.message || ''))) {
@@ -1535,18 +1565,22 @@ session.on('Error', (msg) => {
   }
   if (pendingEditorStart) {
     pendingEditorStart = false;
-    setEditorStatus(msg.message);
+    setEditorStatus(displayMessage);
   }
   controls.onSearchError();
   playMode.botThinking = false;
   playMode.forcedMoveKey = null;
   playMode.pendingHumanMove = false;
   updateActionPanelStatus(currentState, isPlayBotTurn(currentState));
-  if (activeView === 'replay-board') setReplayBoardStatus(msg.message);
-  if (selectedPlayMode === 'multiplayer' || playMode.mode === 'multiplayer') {
-    setMultiplayerSetupStatus(msg.message);
+  if (activeView === 'replay-board') setReplayBoardStatus(displayMessage);
+  if (
+    selectedPlayMode === 'multiplayer' ||
+    playMode.mode === 'multiplayer' ||
+    msg.message === MULTIPLAYER_CLERK_ERROR
+  ) {
+    setMultiplayerSetupStatus(displayMessage);
   }
-  setReplayStatus(msg.message);
+  setReplayStatus(displayMessage);
   console.error('Server error:', msg.message);
 });
 

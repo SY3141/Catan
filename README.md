@@ -80,6 +80,9 @@ By default, when `CLERK_JWT_KEY` is not set, each WebSocket connection
 gets a fresh isolated game. To share one in-memory game across tabs and
 refreshes for the same Clerk account, create a local `.env` file from
 `.env.example` and set `CLERK_JWT_KEY` to your Clerk JWT public key.
+Multiplayer rooms require Clerk-backed WebSocket sessions, so Cloud Run
+and other production deploys must set `CLERK_JWT_KEY`, `CLERK_ISSUER`,
+and `CLERK_AUTHORIZED_PARTIES` to the deployed site origin.
 
 Replay logs are stored in Postgres when `DATABASE_URL` is set. The
 included `docker-compose.yml` starts a local Postgres service and wires

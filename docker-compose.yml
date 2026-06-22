@@ -32,6 +32,7 @@ services:
       - "3000:3000"
     volumes:
       - ./examples/catan/web:/app/examples/catan/web
+      - ./Ads.txt:/app/examples/catan/web/ads.txt:ro
 
 volumes:
   postgres-data:
