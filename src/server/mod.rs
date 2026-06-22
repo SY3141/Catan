@@ -1,4 +1,3 @@
-mod auth;
 mod protocol;
 mod session;
 mod traits;
@@ -36,8 +35,6 @@ use crate::game::Game;
 use crate::game_log::GameLog;
 use crate::mcts::Config;
 use protocol::{MultiplayerLobbyRoom, MultiplayerPlayer, ReplayEntry, ViewTarget};
-
-pub use auth::ClerkAuth;
 
 /// Send a progress snapshot every N simulations.
 const PROGRESS_INTERVAL: u32 = 100;
@@ -1339,17 +1336,10 @@ fn board_fingerprint_in_use<G: Game + 'static>(
         .any(|session| session.board_fingerprint == Some(fingerprint))
 }
 
-#[derive(Clone)]
-enum SocketAuth {
-    Clerk(Arc<ClerkAuth>),
-    Anonymous,
-}
-
 struct SocketSessionKey {
     user_id: String,
     ephemeral: bool,
     scope: &'static str,
-    is_clerk: bool,
 }
 
 struct ActiveMultiplayerRoom<G: Game + 'static> {
@@ -1366,29 +1356,6 @@ impl<G: Game + 'static> UserSessionStore<G> {
             .map_or(false, |current| Arc::ptr_eq(current, session));
         if should_remove {
             sessions.remove(user_id);
-        }
-    }
-}
-
-fn socket_auth_from_env() -> SocketAuth {
-    match ClerkAuth::optional_from_env() {
-        Ok(Some(auth)) => SocketAuth::Clerk(Arc::new(auth)),
-        Ok(None) => SocketAuth::Anonymous,
-        Err(e) => panic!("Clerk authentication is misconfigured: {e}"),
-    }
-}
-
-fn log_socket_auth_mode(auth: &SocketAuth) {
-    match auth {
-        SocketAuth::Clerk(_) => {
-            println!("Per-account HexFish sessions enabled");
-            tracing::info!("per-account HexFish sessions enabled");
-        }
-        SocketAuth::Anonymous => {
-            println!("Anonymous HexFish sessions enabled (CLERK_JWT_KEY not set)");
-            tracing::warn!(
-                "CLERK_JWT_KEY not set; browser reconnects reuse a local anonymous session token"
-            );
         }
     }
 }
@@ -1442,8 +1409,8 @@ pub async fn serve<G: Game + 'static>(
         Arc::clone(&store.factory),
         replay_store,
     ));
-    let auth = Arc::new(socket_auth_from_env());
-    log_socket_auth_mode(auth.as_ref());
+    println!("Anonymous HexFish WebSocket sessions enabled");
+    tracing::info!("anonymous HexFish WebSocket sessions enabled");
 
     let app =
         Router::new()
@@ -1451,13 +1418,11 @@ pub async fn serve<G: Game + 'static>(
                 "/ws",
                 axum::routing::get({
                     let store = Arc::clone(&store);
-                    let auth = Arc::clone(&auth);
                     move |ws: WebSocketUpgrade| {
                         let store = Arc::clone(&store);
                         let rooms = Arc::clone(&rooms);
-                        let auth = Arc::clone(&auth);
                         async move {
-                            ws.on_upgrade(move |socket| handle_socket(socket, store, rooms, auth))
+                            ws.on_upgrade(move |socket| handle_socket(socket, store, rooms))
                         }
                     }
                 }),
@@ -1486,7 +1451,6 @@ pub async fn serve_with_state<G: Game + 'static>(
         None,
     ));
     let rooms = Arc::new(MultiplayerRoomStore::new(Arc::clone(&store.factory), None));
-    let auth = Arc::new(socket_auth_from_env());
 
     let app =
         Router::new()
@@ -1494,13 +1458,11 @@ pub async fn serve_with_state<G: Game + 'static>(
                 "/ws",
                 axum::routing::get({
                     let store = Arc::clone(&store);
-                    let auth = Arc::clone(&auth);
                     move |ws: WebSocketUpgrade| {
                         let store = Arc::clone(&store);
                         let rooms = Arc::clone(&rooms);
-                        let auth = Arc::clone(&auth);
                         async move {
-                            ws.on_upgrade(move |socket| handle_socket(socket, store, rooms, auth))
+                            ws.on_upgrade(move |socket| handle_socket(socket, store, rooms))
                         }
                     }
                 }),
@@ -1528,7 +1490,6 @@ pub async fn serve_with_timeline<G: Game + 'static>(
         None,
     ));
     let rooms = Arc::new(MultiplayerRoomStore::new(Arc::clone(&store.factory), None));
-    let auth = Arc::new(socket_auth_from_env());
 
     let app =
         Router::new()
@@ -1536,13 +1497,11 @@ pub async fn serve_with_timeline<G: Game + 'static>(
                 "/ws",
                 axum::routing::get({
                     let store = Arc::clone(&store);
-                    let auth = Arc::clone(&auth);
                     move |ws: WebSocketUpgrade| {
                         let store = Arc::clone(&store);
                         let rooms = Arc::clone(&rooms);
-                        let auth = Arc::clone(&auth);
                         async move {
-                            ws.on_upgrade(move |socket| handle_socket(socket, store, rooms, auth))
+                            ws.on_upgrade(move |socket| handle_socket(socket, store, rooms))
                         }
                     }
                 }),
@@ -1711,9 +1670,8 @@ async fn handle_socket<G: Game + 'static>(
     mut socket: WebSocket,
     store: Arc<UserSessionStore<G>>,
     rooms: Arc<MultiplayerRoomStore<G>>,
-    auth: Arc<SocketAuth>,
 ) {
-    let session_key = match authenticate_socket(&mut socket, auth.as_ref()).await {
+    let session_key = match authenticate_socket(&mut socket).await {
         Ok(session_key) => session_key,
         Err(()) => return,
     };
@@ -1749,7 +1707,6 @@ async fn handle_socket<G: Game + 'static>(
         Arc::clone(&user_session),
         rooms,
         user_id.clone(),
-        session_key.is_clerk,
         socket_id,
         outbound_tx,
         outbound_rx,
@@ -1782,10 +1739,7 @@ fn format_board_fingerprint(fingerprint: Option<u64>) -> String {
         .unwrap_or_else(|| "none".into())
 }
 
-async fn authenticate_socket(
-    socket: &mut WebSocket,
-    auth: &SocketAuth,
-) -> Result<SocketSessionKey, ()> {
+async fn authenticate_socket(socket: &mut WebSocket) -> Result<SocketSessionKey, ()> {
     let Some(Ok(ws_msg)) = socket.recv().await else {
         return Err(());
     };
@@ -1814,46 +1768,27 @@ async fn authenticate_socket(
         return Err(());
     };
 
-    match auth {
-        SocketAuth::Clerk(auth) => match auth.verify_user_id(&token) {
-            Ok(user_id) => Ok(SocketSessionKey {
-                user_id,
-                ephemeral: false,
-                scope: "clerk",
-                is_clerk: true,
-            }),
-            Err(_) => {
-                send_unauthorized(socket).await;
-                Err(())
-            }
-        },
-        SocketAuth::Anonymous => {
-            if let Some(user_id) = anonymous_session
-                .as_deref()
-                .and_then(anonymous_user_id_from_id)
-            {
-                Ok(SocketSessionKey {
-                    user_id,
-                    ephemeral: false,
-                    scope: "anonymous",
-                    is_clerk: false,
-                })
-            } else if let Some(user_id) = anonymous_user_id_from_token(&token) {
-                Ok(SocketSessionKey {
-                    user_id,
-                    ephemeral: false,
-                    scope: "anonymous",
-                    is_clerk: false,
-                })
-            } else {
-                Ok(SocketSessionKey {
-                    user_id: format!("anonymous:{}", fastrand::u64(..)),
-                    ephemeral: true,
-                    scope: "anonymous-ephemeral",
-                    is_clerk: false,
-                })
-            }
-        }
+    if let Some(user_id) = anonymous_session
+        .as_deref()
+        .and_then(anonymous_user_id_from_id)
+    {
+        Ok(SocketSessionKey {
+            user_id,
+            ephemeral: false,
+            scope: "anonymous",
+        })
+    } else if let Some(user_id) = anonymous_user_id_from_token(&token) {
+        Ok(SocketSessionKey {
+            user_id,
+            ephemeral: false,
+            scope: "anonymous",
+        })
+    } else {
+        Ok(SocketSessionKey {
+            user_id: format!("anonymous:{}", fastrand::u64(..)),
+            ephemeral: true,
+            scope: "anonymous-ephemeral",
+        })
     }
 }
 
@@ -1877,7 +1812,6 @@ async fn handle_authenticated_socket<G: Game + 'static>(
     user_session: Arc<UserSession<G>>,
     rooms: Arc<MultiplayerRoomStore<G>>,
     user_id: String,
-    is_clerk: bool,
     socket_id: u64,
     outbound_tx: mpsc::UnboundedSender<String>,
     mut outbound_rx: mpsc::UnboundedReceiver<String>,
@@ -1894,13 +1828,8 @@ async fn handle_authenticated_socket<G: Game + 'static>(
         }
     }
 
-    let lobby_socket_id = if is_clerk {
-        let lobby_socket_id = rooms.register_lobby_socket(outbound_tx.clone());
-        rooms.send_lobby_to(&outbound_tx);
-        Some(lobby_socket_id)
-    } else {
-        None
-    };
+    let lobby_socket_id = rooms.register_lobby_socket(outbound_tx.clone());
+    rooms.send_lobby_to(&outbound_tx);
 
     let result = loop {
         tokio::select! {
@@ -1921,7 +1850,6 @@ async fn handle_authenticated_socket<G: Game + 'static>(
                     &user_session,
                     &rooms,
                     &user_id,
-                    is_clerk,
                     socket_id,
                     &outbound_tx,
                     &mut active_room,
@@ -1937,9 +1865,7 @@ async fn handle_authenticated_socket<G: Game + 'static>(
     };
 
     let detached = detach_active_room(&mut active_room);
-    if let Some(lobby_socket_id) = lobby_socket_id {
-        rooms.unregister_lobby_socket(lobby_socket_id);
-    }
+    rooms.unregister_lobby_socket(lobby_socket_id);
     if detached {
         rooms.broadcast_lobby();
     }
@@ -1951,7 +1877,6 @@ async fn handle_authenticated_message<G: Game + 'static>(
     user_session: &Arc<UserSession<G>>,
     rooms: &Arc<MultiplayerRoomStore<G>>,
     user_id: &str,
-    is_clerk: bool,
     socket_id: u64,
     outbound_tx: &mpsc::UnboundedSender<String>,
     active_room: &mut Option<ActiveMultiplayerRoom<G>>,
@@ -1982,7 +1907,6 @@ async fn handle_authenticated_message<G: Game + 'static>(
         let responses = handle_multiplayer_message(
             rooms,
             user_id,
-            is_clerk,
             outbound_tx,
             active_room,
             client_msg,
@@ -2163,17 +2087,10 @@ fn is_blocked_while_in_multiplayer(msg: &ClientMsg) -> bool {
 async fn handle_multiplayer_message<G: Game + 'static>(
     rooms: &Arc<MultiplayerRoomStore<G>>,
     user_id: &str,
-    is_clerk: bool,
     outbound_tx: &mpsc::UnboundedSender<String>,
     active_room: &mut Option<ActiveMultiplayerRoom<G>>,
     msg: ClientMsg,
 ) -> Vec<ServerMsg> {
-    if !is_clerk {
-        return vec![ServerMsg::Error {
-            message: "Multiplayer requires a Clerk account".into(),
-        }];
-    }
-
     match msg {
         ClientMsg::ListMultiplayerRooms => vec![rooms.lobby_msg()],
         ClientMsg::CreateMultiplayerRoom { preferred_player } => {
@@ -2654,7 +2571,6 @@ mod tests {
             let responses = handle_multiplayer_message(
                 &rooms,
                 "user_a",
-                true,
                 &tx,
                 &mut active_room,
                 ClientMsg::CreateMultiplayerRoom {
@@ -2718,7 +2634,7 @@ mod tests {
     }
 
     #[test]
-    fn multiplayer_requires_clerk_account() {
+    fn anonymous_multiplayer_can_create_room() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
             let (rooms, _) = test_room_store();
@@ -2729,7 +2645,6 @@ mod tests {
             let responses = handle_multiplayer_message(
                 &rooms,
                 "anonymous:a",
-                false,
                 &tx,
                 &mut active_room,
                 ClientMsg::CreateMultiplayerRoom {
@@ -2739,10 +2654,15 @@ mod tests {
             .await;
 
             match responses.as_slice() {
-                [ServerMsg::Error { message }] => {
-                    assert!(message.contains("Clerk"));
+                [ServerMsg::MultiplayerRoom {
+                    status,
+                    local_player,
+                    ..
+                }, ServerMsg::GameState { .. }, ..] => {
+                    assert_eq!(status, "waiting");
+                    assert_eq!(*local_player, Some(0));
                 }
-                other => panic!("expected Clerk error, got {other:?}"),
+                other => panic!("expected anonymous room creation, got {other:?}"),
             }
         });
     }
@@ -2765,7 +2685,6 @@ mod tests {
             let responses = handle_multiplayer_message(
                 &rooms,
                 "user_a",
-                true,
                 &tx,
                 &mut active_room,
                 ClientMsg::PlayMultiplayerAction { action: 0 },
@@ -2831,7 +2750,6 @@ mod tests {
             let responses = handle_multiplayer_message(
                 &rooms,
                 "user_a",
-                true,
                 &tx_a,
                 &mut active_room,
                 ClientMsg::PlayMultiplayerAction { action: 0 },

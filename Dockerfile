@@ -24,7 +24,6 @@ RUN apt-get update \
 
 COPY --from=builder /app/target/release/examples/catan /app/catan
 COPY --from=builder /app/examples/catan/web /app/examples/catan/web
-COPY Ads.txt /app/examples/catan/web/ads.txt
 COPY checkpoints/catan-nexus-v3/model_iter_315.mpk /app/checkpoints/catan-nexus-v3/model_iter_315.mpk
 
 EXPOSE 3000

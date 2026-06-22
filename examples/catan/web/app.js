@@ -1,8 +1,6 @@
 // Entry point: wires components together.
 
-const session = new Session({
-  getAuthToken: () => window.hexfishGetClerkToken ? window.hexfishGetClerkToken() : null,
-});
+const session = new Session();
 const board = new Board(document.getElementById('board-svg'));
 window.hexfishBoard = board;
 const mctsPanel = new MCTSPanel();
@@ -68,9 +66,9 @@ const EDITOR_NUMBER_BAG = [2, 3, 3, 4, 4, 5, 5, 6, 6, 8, 8, 9, 9, 10, 10, 11, 11
 const EDITOR_PORT_BAG = ['lumber', 'brick', 'wool', 'grain', 'ore', 'generic', 'generic', 'generic', 'generic'];
 const LAST_MULTIPLAYER_ROOM_KEY = 'hexfish-last-multiplayer-room-code';
 const PENDING_SHARED_REPLAY_KEY = 'hexfish-pending-shared-replay-slug';
-const MULTIPLAYER_CLERK_ERROR = 'Multiplayer requires a Clerk account';
-const MULTIPLAYER_SIGN_IN_MESSAGE = 'Sign in or create an account to use multiplayer rooms.';
-const MULTIPLAYER_DEPLOY_CLERK_MESSAGE = 'Multiplayer is disabled on this deployment because the server is running without Clerk authentication. Set CLERK_JWT_KEY, CLERK_ISSUER, and CLERK_AUTHORIZED_PARTIES in Google Cloud, then redeploy.';
+const BASE_DOCUMENT_TITLE = document.title || 'HexFish';
+const MULTIPLAYER_TURN_DOCUMENT_TITLE = 'Your turn - HexFish';
+const MULTIPLAYER_TURN_TITLE_FLASH_MS = 900;
 
 function playerColor(playerIndex) {
   return playerIndex === 0 || playerIndex === 1 ? PLAYER_COLORS[playerIndex] : '';
@@ -135,6 +133,8 @@ let playMode = {
   rejoiningRoom: false,
 };
 let serverSingleplayerHumanPlayer = undefined;
+let multiplayerTurnTitleTimer = null;
+let multiplayerTurnTitleActive = false;
 
 function setServerSingleplayerHumanPlayer(player) {
   const humanPlayer = player == null ? null : player;
@@ -258,6 +258,54 @@ function playBotActive() {
 
 window.hexfishIsMultiplayerActive = playMultiplayerActive;
 
+function browserTabNeedsAttention() {
+  const focused = typeof document.hasFocus === 'function' ? document.hasFocus() : true;
+  return document.hidden || !focused;
+}
+
+function isLocalMultiplayerTurn(msg = currentState) {
+  return !!(
+    playMultiplayerActive() &&
+    msg &&
+    !msg.replay &&
+    !msg.is_terminal &&
+    !msg.is_chance &&
+    multiplayerRoomFull() &&
+    multiplayerOpponentConnected() &&
+    msg.current_player === playMode.humanPlayer &&
+    !playMode.pendingHumanMove &&
+    Array.isArray(msg.legal_actions) &&
+    msg.legal_actions.length > 0
+  );
+}
+
+function stopMultiplayerTurnTitleFlash() {
+  if (multiplayerTurnTitleTimer) {
+    window.clearInterval(multiplayerTurnTitleTimer);
+    multiplayerTurnTitleTimer = null;
+  }
+  multiplayerTurnTitleActive = false;
+  if (document.title !== BASE_DOCUMENT_TITLE) document.title = BASE_DOCUMENT_TITLE;
+}
+
+function startMultiplayerTurnTitleFlash() {
+  if (multiplayerTurnTitleTimer) return;
+  multiplayerTurnTitleActive = true;
+  document.title = MULTIPLAYER_TURN_DOCUMENT_TITLE;
+  multiplayerTurnTitleTimer = window.setInterval(() => {
+    multiplayerTurnTitleActive = !multiplayerTurnTitleActive;
+    document.title = multiplayerTurnTitleActive ? MULTIPLAYER_TURN_DOCUMENT_TITLE : BASE_DOCUMENT_TITLE;
+  }, MULTIPLAYER_TURN_TITLE_FLASH_MS);
+}
+
+function updateMultiplayerTurnAttention() {
+  if (isLocalMultiplayerTurn() && browserTabNeedsAttention()) {
+    startMultiplayerTurnTitleFlash();
+  } else {
+    stopMultiplayerTurnTitleFlash();
+  }
+}
+
 function isPlayBotTurn(msg = currentState) {
   return !!(
     playBotActive() &&
@@ -344,6 +392,7 @@ function sendPlayAction(action) {
   if (playViewActive()) {
     if (playMode.pendingHumanMove) return;
     playMode.pendingHumanMove = true;
+    updateMultiplayerTurnAttention();
     if (playBotActive() && controls.searchRunning && controls.interruptSearchForCommand(msg)) return;
   }
   session.send(msg);
@@ -552,7 +601,6 @@ function multiplayerLobbyStatusText(room) {
 }
 
 function requestMultiplayerLobby() {
-  if (!clerkSignedIn()) return;
   session.send({ type: 'ListMultiplayerRooms' });
 }
 
@@ -671,11 +719,11 @@ function resetMultiplayerState(statusText = '') {
   playMode.rejoiningRoom = false;
   updateMultiplayerRoomUi();
   if (statusText) setMultiplayerSetupStatus(statusText);
+  updateMultiplayerTurnAttention();
 }
 
 function createMultiplayerRoom() {
   setPlayModeChoice('multiplayer');
-  if (!requireClerkForMultiplayer()) return;
   resetMultiplayerState('Creating room...');
   session.send({ type: 'CreateMultiplayerRoom', preferred_player: selectedMultiplayerHumanPlayer });
 }
@@ -684,7 +732,6 @@ function joinMultiplayerRoom(code = null) {
   const input = document.getElementById('multiplayer-room-code-input');
   const roomCode = normalizeRoomCode(code ?? input?.value);
   setPlayModeChoice('multiplayer');
-  if (!requireClerkForMultiplayer()) return;
   if (!roomCode) {
     setMultiplayerSetupStatus('Enter an invite code.');
     return;
@@ -697,7 +744,6 @@ function joinMultiplayerRoom(code = null) {
 function reconnectMultiplayerRoom() {
   const code = reconnectRoomCode();
   setPlayModeChoice('multiplayer');
-  if (!requireClerkForMultiplayer()) return;
   if (!code) {
     setMultiplayerSetupStatus('No room to reconnect.');
     updateMultiplayerReconnectUi();
@@ -706,27 +752,6 @@ function reconnectMultiplayerRoom() {
   const input = document.getElementById('multiplayer-room-code-input');
   if (input) input.value = code;
   joinMultiplayerRoom(code);
-}
-
-function clerkSignedIn() {
-  const clerk = window.Clerk;
-  return !!(
-    window.hexfishAuthSignedIn ||
-    clerk?.isSignedIn ||
-    clerk?.session ||
-    clerk?.user
-  );
-}
-
-function requireClerkForMultiplayer() {
-  if (clerkSignedIn()) return true;
-  setMultiplayerSetupStatus(MULTIPLAYER_SIGN_IN_MESSAGE);
-  return false;
-}
-
-function displayServerErrorMessage(message) {
-  if (String(message || '') !== MULTIPLAYER_CLERK_ERROR) return message;
-  return clerkSignedIn() ? MULTIPLAYER_DEPLOY_CLERK_MESSAGE : MULTIPLAYER_SIGN_IN_MESSAGE;
 }
 
 function leaveMultiplayerRoom(showSetup = true, preserveReconnect = false) {
@@ -866,12 +891,14 @@ function handleMultiplayerRoomMessage(msg) {
     setRoomCodeInUrl('');
     resetMultiplayerState('');
     if (activeView === 'play') showPlaySetupView();
+    updateMultiplayerTurnAttention();
     return;
   }
 
   const localPlayer = Number(msg.local_player);
   if (localPlayer !== 0 && localPlayer !== 1) {
     resetMultiplayerState('Room joined, but no seat was assigned.');
+    updateMultiplayerTurnAttention();
     return;
   }
 
@@ -896,6 +923,7 @@ function handleMultiplayerRoomMessage(msg) {
     showPlayView();
   }
   updateActionPanelStatus(currentState, false);
+  updateMultiplayerTurnAttention();
 }
 
 session.on('GameState', (msg) => {
@@ -1115,6 +1143,7 @@ function renderGameState(msg) {
 
   controls.onStateUpdate(msg);
   updateViewChrome(msg);
+  updateMultiplayerTurnAttention();
   scheduleBoardChromePlacement();
 }
 
@@ -1555,7 +1584,6 @@ session.on('BotAction', (msg) => {
 });
 
 session.on('Error', (msg) => {
-  const displayMessage = displayServerErrorMessage(msg.message);
   if (loadingSharedReplaySlug) {
     loadingSharedReplaySlug = '';
     if (/shared replay|replay share/i.test(String(msg.message || ''))) {
@@ -1565,22 +1593,19 @@ session.on('Error', (msg) => {
   }
   if (pendingEditorStart) {
     pendingEditorStart = false;
-    setEditorStatus(displayMessage);
+    setEditorStatus(msg.message);
   }
   controls.onSearchError();
   playMode.botThinking = false;
   playMode.forcedMoveKey = null;
   playMode.pendingHumanMove = false;
   updateActionPanelStatus(currentState, isPlayBotTurn(currentState));
-  if (activeView === 'replay-board') setReplayBoardStatus(displayMessage);
-  if (
-    selectedPlayMode === 'multiplayer' ||
-    playMode.mode === 'multiplayer' ||
-    msg.message === MULTIPLAYER_CLERK_ERROR
-  ) {
-    setMultiplayerSetupStatus(displayMessage);
+  updateMultiplayerTurnAttention();
+  if (activeView === 'replay-board') setReplayBoardStatus(msg.message);
+  if (selectedPlayMode === 'multiplayer' || playMode.mode === 'multiplayer') {
+    setMultiplayerSetupStatus(msg.message);
   }
-  setReplayStatus(displayMessage);
+  setReplayStatus(msg.message);
   console.error('Server error:', msg.message);
 });
 
@@ -1590,6 +1615,7 @@ session.on('Disconnected', () => {
   playMode.botThinking = false;
   playMode.forcedMoveKey = null;
   playMode.pendingHumanMove = false;
+  updateMultiplayerTurnAttention();
   if (playMode.mode === 'multiplayer' && playMode.multiplayerRoom?.code && appStarted) {
     writeLastMultiplayerRoomCode(playMode.multiplayerRoom.code);
     playMode.rejoiningRoom = true;
@@ -1655,6 +1681,7 @@ function showPlayView() {
     updateViewChrome(null);
   }
   updateMultiplayerInviteModal();
+  updateMultiplayerTurnAttention();
   scheduleBoardChromePlacement();
 }
 
@@ -1673,6 +1700,7 @@ function showPlaySetupView() {
   document.getElementById('replay-view').classList.add('hidden');
   document.getElementById('controls').classList.add('hidden');
   updateMultiplayerInviteModal();
+  updateMultiplayerTurnAttention();
 }
 
 function showAnalysisView() {
@@ -1690,6 +1718,7 @@ function showAnalysisView() {
   if (analysisState) renderGameState(analysisState);
   else updateViewChrome(null);
   updateMultiplayerInviteModal();
+  updateMultiplayerTurnAttention();
   scheduleBoardChromePlacement();
 }
 
@@ -1708,6 +1737,7 @@ function showReplayView() {
   controls.setOptionsAvailable(false);
   requestReplayList();
   updateMultiplayerInviteModal();
+  updateMultiplayerTurnAttention();
 }
 
 function showReplayBoardView() {
@@ -1724,6 +1754,7 @@ function showReplayBoardView() {
   if (replayState) renderGameState(replayState);
   else updateViewChrome(null);
   updateMultiplayerInviteModal();
+  updateMultiplayerTurnAttention();
   scheduleBoardChromePlacement();
 }
 
@@ -1745,6 +1776,7 @@ function showEditorView() {
   controls.setOptionsAvailable(false);
   renderEditorBoard();
   updateMultiplayerInviteModal();
+  updateMultiplayerTurnAttention();
   scheduleBoardChromePlacement();
 }
 
@@ -2331,6 +2363,9 @@ document.getElementById('btn-copy-replay-share-link')?.addEventListener('click',
 document.getElementById('replay-share-modal')?.addEventListener('click', (event) => {
   if (event.target === event.currentTarget) hideReplayShareModal();
 });
+window.addEventListener('focus', updateMultiplayerTurnAttention);
+window.addEventListener('blur', updateMultiplayerTurnAttention);
+document.addEventListener('visibilitychange', updateMultiplayerTurnAttention);
 document.getElementById('multiplayer-room-code-input')?.addEventListener('input', (event) => {
   const input = event.target;
   const normalized = normalizeRoomCode(input.value);

@@ -76,13 +76,9 @@ The server chooses its port in this order: an explicit `--port`, the
 `docker compose` available at <http://localhost:3000> while allowing
 Cloud Run to inject its required port.
 
-By default, when `CLERK_JWT_KEY` is not set, each WebSocket connection
-gets a fresh isolated game. To share one in-memory game across tabs and
-refreshes for the same Clerk account, create a local `.env` file from
-`.env.example` and set `CLERK_JWT_KEY` to your Clerk JWT public key.
-Multiplayer rooms require Clerk-backed WebSocket sessions, so Cloud Run
-and other production deploys must set `CLERK_JWT_KEY`, `CLERK_ISSUER`,
-and `CLERK_AUTHORIZED_PARTIES` to the deployed site origin.
+WebSocket sessions use a browser-local anonymous session id. The frontend
+can still require Clerk sign-in before showing the app, but the server no
+longer validates Clerk JWTs or depends on Clerk server environment variables.
 
 Replay logs are stored in Postgres when `DATABASE_URL` is set. The
 included `docker-compose.yml` starts a local Postgres service and wires
