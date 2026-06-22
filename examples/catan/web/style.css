@@ -275,6 +275,76 @@
   color: #ff6b6b;
 }
 
+.multiplayer-clock-card {
+  display: flex;
+  min-height: 24px;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid #374151;
+  margin: -2px -2px 8px;
+  padding: 0 2px 7px;
+}
+
+.multiplayer-clock-card.hidden {
+  display: none;
+}
+
+.multiplayer-clock-time {
+  color: #f9fafb;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 1rem;
+  font-variant-numeric: tabular-nums;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.multiplayer-clock-time.low-time {
+  color: #991b1b;
+}
+
+.multiplayer-clock-time.critical-time {
+  animation: multiplayer-clock-flash 700ms steps(2, end) infinite;
+}
+
+.multiplayer-clock-increment {
+  color: #6b7280;
+  font-size: 0.68rem;
+  font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.multiplayer-clock-add {
+  min-height: 24px;
+  border: 1px solid #374151;
+  border-radius: 5px;
+  background: #0f3460;
+  color: #e5e7eb;
+  padding: 3px 8px;
+  font-size: 0.68rem;
+  font-weight: 800;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.multiplayer-clock-add:hover {
+  border-color: #e94560;
+  background: #e94560;
+  color: #ffffff;
+}
+
+@keyframes multiplayer-clock-flash {
+  0%,
+  49% {
+    color: #991b1b;
+  }
+  50%,
+  100% {
+    color: #fca5a5;
+  }
+}
+
 .ad-card {
   flex: 1 1 auto;
   width: 100%;
@@ -778,6 +848,45 @@
 .editor-random-btn:hover {
   border-color: #e94560;
   background: #223b68;
+}
+
+.create-room-dialog input[type="range"] {
+  display: block;
+}
+
+.create-room-section {
+  border: 1px solid #374151;
+  border-radius: 6px;
+  background: rgba(15, 52, 96, 0.36);
+  padding: 10px;
+}
+
+.create-room-preset-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.create-room-preset-btn {
+  min-width: 38px;
+  min-height: 28px;
+  border: 1px solid #374151;
+  border-radius: 5px;
+  background: #0f3460;
+  color: #d1d5db;
+  padding: 4px 8px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.create-room-preset-btn:hover,
+.create-room-preset-btn.active {
+  border-color: #e94560;
+  background: #e94560;
+  color: #ffffff;
 }
 
 /* Tree explorer toggle */

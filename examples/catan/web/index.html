@@ -21,7 +21,7 @@ tailwind.config = {
   }
 }
 </script>
-<link rel="stylesheet" href="style.css?v=auth-card-fit-20260621">
+<link rel="stylesheet" href="style.css?v=multiplayer-clock-card-alerts-20260622">
 <script
   defer
   crossorigin="anonymous"
@@ -97,7 +97,6 @@ tailwind.config = {
     <!-- Left: Advertisement -->
     <aside id="left-ad-panel" class="w-44 min-w-44 flex flex-col p-2 bg-bg-2 border-r border-gray-700 overflow-hidden">
       <div class="bg-bg rounded-md p-2.5 border border-gray-700 ad-card" id="native-ad-panel" aria-label="Advertisement">
-        <script async="async" data-cfasync="false" src="https://pl29822875.effectivecpmnetwork.com/22b9435bf5d21daf1267cb569cf13015/invoke.js"></script>
         <div id="container-22b9435bf5d21daf1267cb569cf13015"></div>
       </div>
     </aside>
@@ -198,6 +197,11 @@ tailwind.config = {
         <div class="flex flex-wrap gap-1 text-xs" id="bank-dev"></div>
       </div>
       <div class="bg-bg rounded-md p-2.5 border border-gray-700 player-card" id="player-0">
+        <div id="multiplayer-clock-0" class="multiplayer-clock-card hidden" data-player="0">
+          <span id="multiplayer-clock-time-0" class="multiplayer-clock-time">--:--</span>
+          <span id="multiplayer-clock-increment-0" class="multiplayer-clock-increment">+0s inc</span>
+          <button id="btn-add-opponent-time-0" type="button" class="multiplayer-clock-add hidden">+15s</button>
+        </div>
         <div class="player-card-header flex items-start justify-between gap-2 mb-1">
           <h3 class="min-w-0 text-sm font-medium text-p1 flex flex-wrap items-end gap-1.5">
             <span id="p0-name" class="leading-none">P1</span>
@@ -211,6 +215,11 @@ tailwind.config = {
         <button class="takeover-btn hidden mt-2 w-full py-1 text-xs bg-bg-3 border border-gray-700 text-gray-300 rounded hover:bg-accent transition-colors cursor-pointer" data-player="0">Take Over</button>
       </div>
       <div class="bg-bg rounded-md p-2.5 border border-gray-700 player-card" id="player-1">
+        <div id="multiplayer-clock-1" class="multiplayer-clock-card hidden" data-player="1">
+          <span id="multiplayer-clock-time-1" class="multiplayer-clock-time">--:--</span>
+          <span id="multiplayer-clock-increment-1" class="multiplayer-clock-increment">+0s inc</span>
+          <button id="btn-add-opponent-time-1" type="button" class="multiplayer-clock-add hidden">+15s</button>
+        </div>
         <div class="player-card-header flex items-start justify-between gap-2 mb-1">
           <h3 class="min-w-0 text-sm font-medium text-p2 flex flex-wrap items-end gap-1.5">
             <span id="p1-name" class="leading-none">P2</span>
@@ -286,17 +295,15 @@ tailwind.config = {
       <section class="bg-bg-2 border border-gray-700 rounded p-4">
         <div class="flex flex-wrap items-start justify-between gap-3">
           <h2 class="text-sm font-semibold text-gray-100">Multiplayer</h2>
-          <div class="flex rounded border border-gray-700 overflow-hidden" role="group" aria-label="Choose your multiplayer side">
-            <button id="multiplayer-side-p1" type="button" class="play-side-btn px-3 py-1 text-xs bg-accent text-white" data-play-scope="multiplayer" data-player="0" aria-pressed="true">P1</button>
-            <button id="multiplayer-side-p2" type="button" class="play-side-btn px-3 py-1 text-xs bg-bg-3 text-gray-300 hover:bg-bg border-l border-gray-700" data-play-scope="multiplayer" data-player="1" aria-pressed="false">P2</button>
-          </div>
         </div>
 
         <div id="play-online-options" class="mt-4 flex flex-col gap-3">
-          <div class="flex flex-wrap items-center gap-2">
+          <div class="flex flex-col items-start gap-2">
             <button id="btn-create-multiplayer-room" type="button" class="py-1.5 px-3 text-xs bg-accent border border-accent text-white rounded cursor-pointer hover:bg-red-600 transition-colors">Create Room</button>
-            <button id="btn-join-multiplayer-room" type="button" class="py-1.5 px-3 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors">Join Room</button>
-            <input id="multiplayer-room-code-input" type="text" inputmode="text" autocomplete="off" maxlength="12" placeholder="CODE" class="w-28 bg-bg-3 border border-gray-700 text-gray-100 rounded px-2 py-1.5 text-xs uppercase" aria-label="Invite code">
+            <div class="flex flex-wrap items-center gap-2">
+              <button id="btn-join-multiplayer-room" type="button" class="py-1.5 px-3 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors">Join Room</button>
+              <input id="multiplayer-room-code-input" type="text" inputmode="text" autocomplete="off" maxlength="12" placeholder="CODE" class="w-28 bg-bg-3 border border-gray-700 text-gray-100 rounded px-2 py-1.5 text-xs uppercase" aria-label="Invite code">
+            </div>
           </div>
           <div id="multiplayer-reconnect-row" class="hidden flex flex-wrap items-center gap-2 text-xs">
             <span class="text-gray-500">Last room <span id="multiplayer-reconnect-code" class="font-mono text-gray-200">-</span></span>
@@ -342,6 +349,92 @@ tailwind.config = {
       <div class="flex items-center gap-2">
         <input id="replay-share-link" type="text" readonly class="min-w-0 flex-1 rounded border border-gray-700 bg-bg-3 px-2 py-1.5 text-xs text-gray-300" aria-label="Replay share link">
         <button id="btn-copy-replay-share-link" type="button" class="py-1.5 px-3 text-xs bg-accent border border-accent text-white rounded cursor-pointer hover:bg-red-600 transition-colors">Copy Again</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="create-multiplayer-room-modal" class="hidden fixed inset-0 z-40 items-center justify-center bg-black/65 px-4" role="dialog" aria-modal="true" aria-labelledby="create-multiplayer-room-title">
+    <div class="create-room-dialog w-full max-w-lg rounded border border-gray-700 bg-bg-2 p-4 shadow-xl">
+      <div class="mb-3 flex items-start justify-between gap-3">
+        <div>
+          <h2 id="create-multiplayer-room-title" class="text-sm font-semibold text-gray-100">Create Room</h2>
+          <p class="mt-1 text-xs text-gray-500">Configure the room before inviting your opponent.</p>
+        </div>
+        <button id="btn-close-create-multiplayer-room-modal" type="button" class="h-7 w-7 rounded border border-gray-700 bg-bg-3 text-gray-300 hover:bg-bg hover:text-gray-100" aria-label="Close create room dialog">&times;</button>
+      </div>
+
+      <div class="grid gap-3">
+        <section class="create-room-section">
+          <div class="flex items-center justify-between gap-3">
+            <span class="text-xs font-medium text-gray-300">Side</span>
+            <div class="flex rounded border border-gray-700 overflow-hidden" role="group" aria-label="Choose your multiplayer side">
+              <button id="create-room-side-p1" type="button" class="play-side-btn px-3 py-1 text-xs bg-accent text-white" data-play-scope="multiplayer" data-player="0" aria-pressed="true">P1</button>
+              <button id="create-room-side-p2" type="button" class="play-side-btn px-3 py-1 text-xs bg-bg-3 text-gray-300 hover:bg-bg border-l border-gray-700" data-play-scope="multiplayer" data-player="1" aria-pressed="false">P2</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="create-room-section">
+          <div class="flex items-center justify-between gap-3">
+            <span class="text-xs font-medium text-gray-300">Room Code</span>
+            <div class="flex items-center gap-2">
+              <span id="create-room-code-preview" class="font-mono text-sm font-semibold tracking-wide text-gray-100">------</span>
+              <button id="btn-regenerate-create-room-code" type="button" class="py-1 px-2 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors">Refresh</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="create-room-section">
+          <div class="mb-2 flex items-center justify-between gap-3">
+            <label for="create-room-time-input" class="text-xs font-medium text-gray-300">Time</label>
+            <div class="flex items-center gap-1.5">
+              <input id="create-room-time-input" type="number" min="1" max="180" step="1" value="15" class="w-20 bg-bg-3 border border-gray-700 text-gray-100 rounded px-2 py-1 text-xs" aria-label="Custom time in minutes">
+              <span class="text-xs text-gray-500">min</span>
+            </div>
+          </div>
+          <input id="create-room-time-slider" type="range" min="1" max="60" step="1" value="15" class="mb-2 w-full accent-accent" aria-label="Time slider">
+          <div class="create-room-preset-row" role="group" aria-label="Time options">
+            <button type="button" class="create-room-preset-btn" data-time-minutes="5">5</button>
+            <button type="button" class="create-room-preset-btn" data-time-minutes="10">10</button>
+            <button type="button" class="create-room-preset-btn" data-time-minutes="15">15</button>
+            <button type="button" class="create-room-preset-btn" data-time-minutes="30">30</button>
+            <button type="button" class="create-room-preset-btn" data-time-minutes="60">60</button>
+          </div>
+        </section>
+
+        <section class="create-room-section">
+          <div class="mb-2 flex items-center justify-between gap-3">
+            <label for="create-room-increment-input" class="text-xs font-medium text-gray-300">Increment</label>
+            <div class="flex items-center gap-1.5">
+              <input id="create-room-increment-input" type="number" min="0" max="120" step="1" value="0" class="w-20 bg-bg-3 border border-gray-700 text-gray-100 rounded px-2 py-1 text-xs" aria-label="Custom increment in seconds">
+              <span class="text-xs text-gray-500">sec</span>
+            </div>
+          </div>
+          <input id="create-room-increment-slider" type="range" min="0" max="60" step="1" value="0" class="mb-2 w-full accent-accent" aria-label="Increment slider">
+          <div class="create-room-preset-row" role="group" aria-label="Increment options">
+            <button type="button" class="create-room-preset-btn" data-increment-seconds="0">0</button>
+            <button type="button" class="create-room-preset-btn" data-increment-seconds="1">1</button>
+            <button type="button" class="create-room-preset-btn" data-increment-seconds="3">3</button>
+            <button type="button" class="create-room-preset-btn" data-increment-seconds="5">5</button>
+            <button type="button" class="create-room-preset-btn" data-increment-seconds="10">10</button>
+            <button type="button" class="create-room-preset-btn" data-increment-seconds="15">15</button>
+          </div>
+        </section>
+      </div>
+
+      <div class="mt-4 flex items-center justify-end gap-2">
+        <button id="btn-cancel-create-multiplayer-room" type="button" class="py-1.5 px-3 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-bg transition-colors">Cancel</button>
+        <button id="btn-confirm-create-multiplayer-room" type="button" class="py-1.5 px-3 text-xs bg-accent border border-accent text-white rounded cursor-pointer hover:bg-red-600 transition-colors">Create Room</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="multiplayer-analysis-guard-modal" class="hidden fixed inset-0 z-40 items-center justify-center bg-black/65 px-4" role="dialog" aria-modal="true" aria-labelledby="multiplayer-analysis-guard-title">
+    <div class="w-full max-w-sm rounded border border-gray-700 bg-bg-2 p-4 shadow-xl">
+      <h2 id="multiplayer-analysis-guard-title" class="text-sm font-semibold text-gray-100">Multiplayer Game Open</h2>
+      <p class="mt-2 text-xs leading-5 text-gray-400">Your room is still active on the Play tab.</p>
+      <div class="mt-4 flex justify-end">
+        <button id="btn-return-to-multiplayer-game" type="button" class="py-1.5 px-3 text-xs bg-accent border border-accent text-white rounded cursor-pointer hover:bg-red-600 transition-colors">Return to Game</button>
       </div>
     </div>
   </div>
@@ -396,6 +489,6 @@ tailwind.config = {
 <script src="mcts.js?v=cpu-load-20260622"></script>
 <script src="controls.js?v=replay-slider-20260620"></script>
 <script src="auth.js?v=frontend-auth-gate-20260621"></script>
-<script src="app.js?v=multiplayer-turn-title-20260621"></script>
+<script src="app.js?v=lazy-native-ads-20260622"></script>
 </body>
 </html>

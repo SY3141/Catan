@@ -584,7 +584,8 @@ impl<G: Game + 'static> GameSession<G> {
             | ClientMsg::ListMultiplayerRooms
             | ClientMsg::JoinMultiplayerRoom { .. }
             | ClientMsg::LeaveMultiplayerRoom
-            | ClientMsg::PlayMultiplayerAction { .. } => vec![ServerMsg::Error {
+            | ClientMsg::PlayMultiplayerAction { .. }
+            | ClientMsg::AddMultiplayerOpponentTime => vec![ServerMsg::Error {
                 message: "Replay storage is not available in this session".into(),
             }],
             ClientMsg::NewGame { seed } => {
@@ -890,7 +891,7 @@ impl<G: Game + 'static> GameSession<G> {
         self.can_search() && self.legal_actions().len() > 1
     }
 
-    fn current_player_idx(&self) -> usize {
+    pub fn current_player_idx(&self) -> usize {
         match self.search.state().status() {
             Status::Decision(sign) if sign > 0.0 => 0,
             _ => 1,

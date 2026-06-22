@@ -61,6 +61,8 @@ pub struct MultiplayerPlayer {
     pub occupied: bool,
     pub connected: bool,
     pub you: bool,
+    pub time_millis: Option<u64>,
+    pub clock_active: bool,
 }
 
 /// Public lobby summary for an invite-code multiplayer room.
@@ -70,6 +72,8 @@ pub struct MultiplayerLobbyRoom {
     pub status: String,
     pub occupied: u8,
     pub connected: u8,
+    pub time_minutes: Option<u32>,
+    pub increment_seconds: Option<u32>,
     pub last_activity_ms: u64,
 }
 
@@ -148,7 +152,12 @@ pub enum ClientMsg {
     /// Human plays an action.
     PlayAction { action: usize },
     /// Create an invite-code multiplayer room.
-    CreateMultiplayerRoom { preferred_player: Option<u8> },
+    CreateMultiplayerRoom {
+        preferred_player: Option<u8>,
+        code: Option<String>,
+        time_minutes: Option<u32>,
+        increment_seconds: Option<u32>,
+    },
     /// List visible invite-code multiplayer rooms.
     ListMultiplayerRooms,
     /// Join an existing invite-code multiplayer room.
@@ -157,6 +166,8 @@ pub enum ClientMsg {
     LeaveMultiplayerRoom,
     /// Human plays an action in the current multiplayer room.
     PlayMultiplayerAction { action: usize },
+    /// Add a small clock bonus to the opponent in the current multiplayer room.
+    AddMultiplayerOpponentTime,
     /// Request the bot to play an action.
     BotMove {
         simulations: Option<u32>,
@@ -242,6 +253,9 @@ pub enum ServerMsg {
         status: String,
         local_player: Option<u8>,
         players: Vec<MultiplayerPlayer>,
+        time_minutes: Option<u32>,
+        increment_seconds: Option<u32>,
+        winner: Option<u8>,
     },
     /// Public multiplayer lobby room list.
     MultiplayerLobby { rooms: Vec<MultiplayerLobbyRoom> },
