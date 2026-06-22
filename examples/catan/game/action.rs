@@ -316,15 +316,6 @@ pub fn legal_actions(state: &GameState, actions: &mut Vec<ActionId>) {
     }
 }
 
-pub fn legal_actions_without_setup_pip_filter(state: &GameState, actions: &mut Vec<ActionId>) {
-    if matches!(state.phase, Phase::PlaceSettlement) {
-        actions.clear();
-        populate_place_settlement(state, actions, false);
-    } else {
-        legal_actions(state, actions);
-    }
-}
-
 /// Legal actions for a singleplayer human.
 ///
 /// This keeps real game constraints but disables search-only canonical pruning

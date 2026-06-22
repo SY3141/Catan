@@ -360,12 +360,6 @@ impl Topology {
         Self::build(&mut rng)
     }
 
-    /// Build a topology from an explicit terrain/number layout using the
-    /// default port positions and port resources.
-    pub fn from_layout(terrains: [Terrain; 19], numbers: [Option<u8>; 19]) -> Self {
-        Self::from_layout_with_ports(terrains, numbers, PORT_POOL, &PORT_SPECS)
-    }
-
     fn build(rng: &mut fastrand::Rng) -> Self {
         let mut terrains = TERRAIN_POOL;
         rng.shuffle(&mut terrains);
@@ -966,15 +960,15 @@ mod tests {
         assert_eq!(seq_sorted, tok_sorted);
     }
 
-    /// from_layout produces the same topology as build when given the same
-    /// terrain, number, and port assignments.
+    /// from_layout_with_ports produces the same topology as build when given
+    /// the same terrain, number, and port assignments.
     #[test]
-    fn from_layout_matches_build() {
+    fn from_layout_with_ports_matches_build() {
         for seed in [0, 42, 123, 999] {
             let mut rng = fastrand::Rng::with_seed(seed);
             let t_build = Topology::build(&mut rng);
 
-            // Reconstruct the same inputs build() would pass to from_layout
+            // Reconstruct the same inputs build() would pass to from_layout_with_ports.
             let mut rng = fastrand::Rng::with_seed(seed);
             let mut terrains = TERRAIN_POOL;
             rng.shuffle(&mut terrains);

@@ -4,6 +4,7 @@ class MCTSPanel {
   constructor() {
     this.barsEl = document.getElementById('policy-bars');
     this.simsEl = document.getElementById('sims-count');
+    this.cpuLoadEl = document.getElementById('cpu-load-count');
     this.analysisBarEl = document.getElementById('analysis-bar-track');
     this.analysisP1El = document.getElementById('analysis-bar-p1');
     this.analysisP2El = document.getElementById('analysis-bar-p2');
@@ -188,7 +189,8 @@ class MCTSPanel {
     return true;
   }
 
-  showProgress(snapshot, budget, simsTotal) {
+  showProgress(snapshot, budget, simsTotal, cpuLoad = null) {
+    this.updateCpuLoad(cpuLoad);
     if (budget && budget.mode === 'pv_depth') {
       const depth = snapshot?.pv_depth ?? 0;
       const done = snapshot?.fresh_simulations ?? snapshot?.total_simulations ?? 0;
@@ -205,8 +207,18 @@ class MCTSPanel {
     this.expandedPaths.clear();
     this.barsEl.innerHTML = '';
     this.simsEl.textContent = '0 sims';
+    this.updateCpuLoad(0);
     this.treeViewEl.innerHTML = '';
     this._updateAnalysisBar([0, 1, 0]);
+  }
+
+  updateCpuLoad(cpuLoad) {
+    if (!this.cpuLoadEl) return;
+    const value = Number(cpuLoad);
+    if (!Number.isFinite(value)) return;
+    const pct = Math.max(0, Math.min(100, Math.round(value)));
+    this.cpuLoadEl.textContent = `Load ${pct}%`;
+    this.cpuLoadEl.title = `Server CPU load ${pct}%`;
   }
 
   updateAnalysisBar(rootWdl) {

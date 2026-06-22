@@ -799,6 +799,7 @@ async fn handle_colonist_socket(
     let mut sims_budget = 0u32;
     let mut auto_refill = 0u32;
     let mut last_poll = std::time::Instant::now();
+    let mut cpu_load = hexfish::server::CpuLoadSampler::new();
 
     if hexfish::server::send_msg(&mut socket, &session.state_msg())
         .await
@@ -999,6 +1000,7 @@ async fn handle_colonist_socket(
                         action_labels: labels,
                         sims_total: after + sims_budget,
                         budget: hexfish::server::SearchBudget::simulations(after + sims_budget),
+                        cpu_load: cpu_load.sample(),
                     },
                 )
                 .await;

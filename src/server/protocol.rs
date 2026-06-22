@@ -267,6 +267,7 @@ pub enum ServerMsg {
         action_labels: Vec<String>,
         sims_total: u32,
         budget: SearchBudget,
+        cpu_load: Option<u8>,
     },
     /// Error message.
     Error { message: String },

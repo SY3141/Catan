@@ -86,7 +86,7 @@ tailwind.config = {
     <span id="turn-label" class="text-xs text-gray-500"></span>
     <div id="auth-controls" class="ml-auto flex items-center gap-2">
       <a id="ko-fi-link" href="https://ko-fi.com/hexfish" target="_blank" rel="noopener noreferrer" class="px-2 py-0.5 rounded border border-gray-700 bg-bg text-[10px] font-semibold tracking-wide text-gray-300 hover:text-gray-100 hover:bg-bg-3 transition-colors">Donate</a>
-      <span id="app-version" class="px-2 py-0.5 rounded border border-gray-700 bg-bg text-[10px] font-semibold tracking-wide text-gray-400" aria-label="Version V1.0.3">V1.0.3</span>
+      <span id="app-version" class="px-2 py-0.5 rounded border border-gray-700 bg-bg text-[10px] font-semibold tracking-wide text-gray-400" aria-label="Version V1.0.4">V1.0.4</span>
       <div id="clerk-user-button" class="hidden"></div>
       <span id="clerk-status" class="sr-only" aria-live="polite"></span>
     </div>
@@ -234,6 +234,7 @@ tailwind.config = {
       <div id="search-info" class="px-2.5 py-2 text-xs border-b border-gray-700">
         <div class="flex gap-3 flex-wrap">
           <span id="sims-count" class="whitespace-nowrap text-gray-300">0 sims</span>
+          <span id="cpu-load-count" class="whitespace-nowrap text-gray-500" title="Server CPU load">Load 0%</span>
         </div>
       </div>
       <div id="policy-header" class="flex items-center gap-1 px-2.5 py-1 text-[10px] uppercase tracking-wide text-gray-500 border-b border-gray-700">
@@ -392,7 +393,7 @@ tailwind.config = {
 
 <script src="session.js?v=connected-event-20260621"></script>
 <script src="board.js?v=building-icons-20260620"></script>
-<script src="mcts.js?v=analysis-bar-public-20260620"></script>
+<script src="mcts.js?v=cpu-load-20260622"></script>
 <script src="controls.js?v=replay-slider-20260620"></script>
 <script src="auth.js?v=frontend-auth-gate-20260621"></script>
 <script src="app.js?v=multiplayer-turn-title-20260621"></script>

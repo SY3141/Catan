@@ -240,15 +240,6 @@ fn buildings_frame(state: &GameState, pid: Player) -> BuildingsFrame {
     }
 }
 
-pub fn capture_frame(
-    state: &GameState,
-    action: &str,
-    player: u8,
-    last_roll: Option<u8>,
-) -> ReplayFrame {
-    capture_frame_with_perspective(state, action, player, last_roll, None)
-}
-
 pub fn capture_frame_with_perspective(
     state: &GameState,
     action: &str,

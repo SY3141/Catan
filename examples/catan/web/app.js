@@ -1558,7 +1558,7 @@ session.on('SearchProgress', (msg) => {
   controls.onSearchProgress();
   if (controls.isPausePending()) return;
   mctsPanel.updateSnapshot(msg.snapshot, msg.action_labels, currentState?.current_player ?? 0);
-  mctsPanel.showProgress(msg.snapshot, msg.budget, msg.sims_total);
+  mctsPanel.showProgress(msg.snapshot, msg.budget, msg.sims_total, msg.cpu_load);
   updateSearchHighlights(msg.snapshot, msg.action_labels);
 });
 

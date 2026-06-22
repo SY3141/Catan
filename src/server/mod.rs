@@ -42,6 +42,113 @@ const SEARCH_INTERRUPT_INTERVAL: u32 = 8;
 const MULTIPLAYER_ANALYSIS_SIMS: u32 = 200;
 const BOARD_FINGERPRINT_RETRIES: usize = 64;
 
+#[derive(Clone, Copy)]
+struct CpuTimes {
+    idle: u64,
+    total: u64,
+}
+
+pub struct CpuLoadSampler {
+    last: Option<CpuTimes>,
+}
+
+impl CpuLoadSampler {
+    pub fn new() -> Self {
+        Self {
+            last: read_cpu_times(),
+        }
+    }
+
+    pub fn sample(&mut self) -> Option<u8> {
+        let current = read_cpu_times()?;
+        let Some(last) = self.last.replace(current) else {
+            return None;
+        };
+        let total = current.total.saturating_sub(last.total);
+        if total == 0 {
+            return None;
+        }
+        let idle = current.idle.saturating_sub(last.idle).min(total);
+        let busy = total - idle;
+        Some(((busy * 100 + total / 2) / total).min(100) as u8)
+    }
+}
+
+impl Default for CpuLoadSampler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn read_cpu_times() -> Option<CpuTimes> {
+    let data = std::fs::read_to_string("/proc/stat").ok()?;
+    let line = data.lines().next()?;
+    let mut parts = line.split_whitespace();
+    if parts.next()? != "cpu" {
+        return None;
+    }
+
+    let values = parts
+        .map(|part| part.parse::<u64>())
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    if values.len() < 4 {
+        return None;
+    }
+
+    let idle = values[3] + values.get(4).copied().unwrap_or(0);
+    let total = values.iter().sum();
+    Some(CpuTimes { idle, total })
+}
+
+#[cfg(windows)]
+#[repr(C)]
+struct FileTime {
+    low: u32,
+    high: u32,
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn GetSystemTimes(
+        idle_time: *mut FileTime,
+        kernel_time: *mut FileTime,
+        user_time: *mut FileTime,
+    ) -> i32;
+}
+
+#[cfg(windows)]
+fn read_cpu_times() -> Option<CpuTimes> {
+    let mut idle = FileTime { low: 0, high: 0 };
+    let mut kernel = FileTime { low: 0, high: 0 };
+    let mut user = FileTime { low: 0, high: 0 };
+    // SAFETY: All pointers refer to valid FILETIME-compatible local structs.
+    let ok = unsafe { GetSystemTimes(&mut idle, &mut kernel, &mut user) };
+    if ok == 0 {
+        return None;
+    }
+
+    let idle = file_time_to_u64(idle);
+    let kernel = file_time_to_u64(kernel);
+    let user = file_time_to_u64(user);
+    Some(CpuTimes {
+        idle,
+        total: kernel.saturating_add(user),
+    })
+}
+
+#[cfg(windows)]
+fn file_time_to_u64(file_time: FileTime) -> u64 {
+    ((file_time.high as u64) << 32) | file_time.low as u64
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
+fn read_cpu_times() -> Option<CpuTimes> {
+    None
+}
+
 struct LoadedReplay {
     id: String,
     log: GameLog,
@@ -876,6 +983,14 @@ impl<G: Game + 'static> MultiplayerRoom<G> {
         self.touch();
     }
 
+    fn has_registered_sockets(&self) -> bool {
+        !self
+            .sockets
+            .lock()
+            .expect("room sockets lock poisoned")
+            .is_empty()
+    }
+
     fn seat_for_user(&self, user_id: &str) -> Option<usize> {
         self.seats
             .lock()
@@ -1191,6 +1306,20 @@ impl<G: Game + 'static> MultiplayerRoomStore<G> {
         };
         let player = room.assign_or_find_seat(owner)?;
         Ok((room, player))
+    }
+
+    fn close_room_if_empty(&self, room: &Arc<MultiplayerRoom<G>>) -> bool {
+        if room.has_registered_sockets() {
+            return false;
+        }
+        let mut rooms = self.rooms.lock().expect("room store lock poisoned");
+        let should_remove = rooms
+            .get(&room.code)
+            .map_or(false, |stored| Arc::ptr_eq(stored, room));
+        if should_remove {
+            rooms.remove(&room.code);
+        }
+        should_remove
     }
 }
 
@@ -1529,6 +1658,7 @@ pub async fn run_search<G: Game + 'static>(
         Ok(active_budget) => {
             let mut last_progress = 0;
             let mut ticks_since_interrupt_check = 0;
+            let mut cpu_load = CpuLoadSampler::new();
             let result = loop {
                 if let Some(result) = session.search_tick() {
                     break result;
@@ -1551,6 +1681,7 @@ pub async fn run_search<G: Game + 'static>(
                                 action_labels: labels,
                                 sims_total: active_budget.sims_total,
                                 budget: active_budget.budget,
+                                cpu_load: cpu_load.sample(),
                             },
                         )
                         .await?;
@@ -1563,6 +1694,21 @@ pub async fn run_search<G: Game + 'static>(
                     }
                 }
             };
+            if let Some((snap, labels)) = session.snapshot_with_labels() {
+                if snap.fresh_simulations > last_progress {
+                    send_msg(
+                        socket,
+                        &ServerMsg::SearchProgress {
+                            snapshot: snap,
+                            action_labels: labels,
+                            sims_total: active_budget.sims_total,
+                            budget: active_budget.budget,
+                            cpu_load: cpu_load.sample(),
+                        },
+                    )
+                    .await?;
+                }
+            }
             Ok(session.finish_search(msg, result))
         }
     }
@@ -1864,7 +2010,7 @@ async fn handle_authenticated_socket<G: Game + 'static>(
         }
     };
 
-    let detached = detach_active_room(&mut active_room);
+    let detached = detach_active_room(rooms.as_ref(), &mut active_room);
     rooms.unregister_lobby_socket(lobby_socket_id);
     if detached {
         rooms.broadcast_lobby();
@@ -2094,7 +2240,7 @@ async fn handle_multiplayer_message<G: Game + 'static>(
     match msg {
         ClientMsg::ListMultiplayerRooms => vec![rooms.lobby_msg()],
         ClientMsg::CreateMultiplayerRoom { preferred_player } => {
-            if detach_active_room(active_room) {
+            if detach_active_room(rooms.as_ref(), active_room) {
                 rooms.broadcast_lobby();
             }
             let (room, _) = match rooms.create_room(user_id, preferred_player) {
@@ -2107,7 +2253,7 @@ async fn handle_multiplayer_message<G: Game + 'static>(
             responses
         }
         ClientMsg::JoinMultiplayerRoom { code } => {
-            if detach_active_room(active_room) {
+            if detach_active_room(rooms.as_ref(), active_room) {
                 rooms.broadcast_lobby();
             }
             let (room, _) = match rooms.join_room(user_id, &code) {
@@ -2120,7 +2266,7 @@ async fn handle_multiplayer_message<G: Game + 'static>(
             responses
         }
         ClientMsg::LeaveMultiplayerRoom => {
-            if detach_active_room(active_room) {
+            if detach_active_room(rooms.as_ref(), active_room) {
                 rooms.broadcast_lobby();
             }
             vec![MultiplayerRoom::<G>::left_room_msg()]
@@ -2201,13 +2347,16 @@ async fn activate_multiplayer_room<G: Game + 'static>(
 }
 
 fn detach_active_room<G: Game + 'static>(
+    rooms: &MultiplayerRoomStore<G>,
     active_room: &mut Option<ActiveMultiplayerRoom<G>>,
 ) -> bool {
     if let Some(active) = active_room.take() {
         active.room.unregister_socket(active.socket_id);
-        active
-            .room
-            .broadcast_room_info_except(Some(active.socket_id));
+        if !rooms.close_room_if_empty(&active.room) {
+            active
+                .room
+                .broadcast_room_info_except(Some(active.socket_id));
+        }
         true
     } else {
         false
@@ -2386,7 +2535,8 @@ mod tests {
         ActiveMultiplayerRoom, ClientMsg, FileReplayStore, GamePresenter, MultiplayerRoomStore,
         ReplayStore, SearchBudget, ServerMsg, SessionFactory, UserSessionStore, ViewTarget,
         anonymous_user_id_from_id, anonymous_user_id_from_token, client_msg_target,
-        current_unix_ms, handle_multiplayer_message, safe_replay_id, safe_share_slug,
+        current_unix_ms, detach_active_room, handle_multiplayer_message, safe_replay_id,
+        safe_share_slug,
     };
 
     #[derive(Clone)]
@@ -2555,6 +2705,49 @@ mod tests {
             Err(err) => err,
         };
         assert!(err.contains("full"));
+    }
+
+    #[test]
+    fn multiplayer_room_closes_after_all_players_disconnect() {
+        let (rooms, _) = test_room_store();
+        let (room, player_a) = rooms.create_room("user_a", Some(0)).unwrap();
+        let code = room.code.clone();
+        let (_, player_b) = rooms.join_room("user_b", &code).unwrap();
+        let (tx_a, _rx_a) = mpsc::unbounded_channel();
+        let (tx_b, _rx_b) = mpsc::unbounded_channel();
+        let (socket_a, socket_player_a) = room.register_socket("user_a", tx_a).unwrap();
+        let (socket_b, socket_player_b) = room.register_socket("user_b", tx_b).unwrap();
+        assert_eq!(socket_player_a, player_a);
+        assert_eq!(socket_player_b, player_b);
+
+        let mut active_a = Some(ActiveMultiplayerRoom {
+            room: Arc::clone(&room),
+            socket_id: socket_a,
+            player: player_a,
+        });
+        let mut active_b = Some(ActiveMultiplayerRoom {
+            room,
+            socket_id: socket_b,
+            player: player_b,
+        });
+
+        assert!(detach_active_room(&rooms, &mut active_a));
+        match rooms.lobby_msg() {
+            ServerMsg::MultiplayerLobby { rooms } => {
+                assert_eq!(rooms.len(), 1);
+                assert_eq!(rooms[0].code, code);
+                assert_eq!(rooms[0].connected, 1);
+            }
+            other => panic!("expected lobby message, got {other:?}"),
+        }
+
+        assert!(detach_active_room(&rooms, &mut active_b));
+        match rooms.lobby_msg() {
+            ServerMsg::MultiplayerLobby { rooms } => assert!(rooms.is_empty()),
+            other => panic!("expected lobby message, got {other:?}"),
+        }
+        let err = rooms.join_room("user_a", &code).unwrap_err();
+        assert!(err.contains("not found"));
     }
 
     #[test]
