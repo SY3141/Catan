@@ -85,7 +85,84 @@ included `docker-compose.yml` starts a local Postgres service and wires
 `DATABASE_URL` automatically; without `DATABASE_URL`, the server falls
 back to local replay log files.
 
+For production, set `HEXFISH_REPLAY_STORE_REQUIRED=true` so the server
+fails startup if Postgres replay storage cannot connect. Leave it unset
+or `false` for local development so filesystem replay logs remain a
+fallback.
+
 Then open <http://localhost:3000>.
+
+## Cloud Run + Cloud SQL replay storage
+
+Use these defaults for a fresh production Cloud SQL setup: `REGION=us-central1`,
+`INSTANCE=hexfish-postgres`, `DATABASE=hexfish`, `DB_USER=hexfish_app`,
+and `SECRET=hexfish-database-url`. This starts with an empty replay
+database; existing Docker Postgres replay data is not imported.
+
+Run from Cloud Shell or any terminal with `gcloud` authenticated:
+
+```bash
+PROJECT_ID="PROJECT_ID"
+SERVICE_NAME="SERVICE_NAME"
+REGION="us-central1"
+INSTANCE="hexfish-postgres"
+DATABASE="hexfish"
+DB_USER="hexfish_app"
+SECRET="hexfish-database-url"
+
+gcloud config set project "$PROJECT_ID"
+gcloud services enable run.googleapis.com sqladmin.googleapis.com secretmanager.googleapis.com
+PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
+CONNECTION_NAME="$PROJECT_ID:$REGION:$INSTANCE"
+DB_PASSWORD="$(openssl rand -base64 32)"
+
+gcloud sql instances create "$INSTANCE" \
+  --database-version=POSTGRES_16 \
+  --region="$REGION" \
+  --availability-type=ZONAL \
+  --tier=db-f1-micro \
+  --storage-type=SSD \
+  --storage-size=10GB \
+  --storage-auto-increase \
+  --backup-start-time=03:00 \
+  --enable-point-in-time-recovery \
+  --deletion-protection
+
+gcloud sql databases create "$DATABASE" --instance="$INSTANCE"
+gcloud sql users create "$DB_USER" --instance="$INSTANCE" --password="$DB_PASSWORD"
+
+printf "host=/cloudsql/%s port=5432 dbname=%s user=%s password=%s sslmode=disable" \
+  "$CONNECTION_NAME" "$DATABASE" "$DB_USER" "$DB_PASSWORD" \
+  | gcloud secrets create "$SECRET" --data-file=-
+# If the secret already exists, add a new version instead:
+# printf "host=/cloudsql/%s port=5432 dbname=%s user=%s password=%s sslmode=disable" \
+#   "$CONNECTION_NAME" "$DATABASE" "$DB_USER" "$DB_PASSWORD" \
+#   | gcloud secrets versions add "$SECRET" --data-file=-
+
+SERVICE_ACCOUNT="$(gcloud run services describe "$SERVICE_NAME" \
+  --region="$REGION" \
+  --format='value(spec.template.spec.serviceAccountName)')"
+if [ -z "$SERVICE_ACCOUNT" ]; then
+  SERVICE_ACCOUNT="$PROJECT_NUMBER-compute@developer.gserviceaccount.com"
+fi
+
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:$SERVICE_ACCOUNT" \
+  --role="roles/cloudsql.client"
+gcloud secrets add-iam-policy-binding "$SECRET" \
+  --member="serviceAccount:$SERVICE_ACCOUNT" \
+  --role="roles/secretmanager.secretAccessor"
+
+gcloud run services update "$SERVICE_NAME" \
+  --region="$REGION" \
+  --add-cloudsql-instances="$CONNECTION_NAME" \
+  --set-secrets="DATABASE_URL=$SECRET:latest" \
+  --set-env-vars="HEXFISH_REPLAY_STORE_REQUIRED=true"
+```
+
+After the new revision starts, save a replay, list replays, favorite it,
+open the share link, and confirm rows exist in `replay_logs`. Keep the
+previous Cloud Run revision available until those checks pass.
 
 ## What you get
 

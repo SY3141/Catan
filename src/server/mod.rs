@@ -42,6 +42,8 @@ const SEARCH_INTERRUPT_INTERVAL: u32 = 8;
 const MULTIPLAYER_ANALYSIS_SIMS: u32 = 200;
 const MULTIPLAYER_EMPTY_ROOM_GRACE_MS: u64 = 5 * 60_000;
 const BOARD_FINGERPRINT_RETRIES: usize = 64;
+const DATABASE_URL_ENV: &str = "DATABASE_URL";
+const REPLAY_STORE_REQUIRED_ENV: &str = "HEXFISH_REPLAY_STORE_REQUIRED";
 
 #[derive(Clone, Copy)]
 struct CpuTimes {
@@ -2053,20 +2055,59 @@ impl<G: Game + 'static> UserSessionStore<G> {
 }
 
 async fn replay_store_from_config(web_log_dir: Option<PathBuf>) -> Option<Arc<ReplayStore>> {
-    match env::var("DATABASE_URL") {
-        Ok(database_url) if !database_url.trim().is_empty() => {
-            println!("Replay storage: Postgres DATABASE_URL");
-            Some(Arc::new(
-                ReplayStore::postgres(database_url.trim())
-                    .await
-                    .expect("failed to initialize Postgres replay storage"),
-            ))
+    let database_url = env::var(DATABASE_URL_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let required = env_flag(REPLAY_STORE_REQUIRED_ENV);
+    replay_store_from_settings(web_log_dir, database_url.as_deref(), required).await
+}
+
+async fn replay_store_from_settings(
+    web_log_dir: Option<PathBuf>,
+    database_url: Option<&str>,
+    required: bool,
+) -> Option<Arc<ReplayStore>> {
+    if let Some(database_url) = database_url {
+        println!("Replay storage: Postgres {DATABASE_URL_ENV}");
+        match ReplayStore::postgres(database_url).await {
+            Ok(store) => return Some(Arc::new(store)),
+            Err(error) if required => {
+                panic!(
+                    "failed to initialize required Postgres replay storage from {DATABASE_URL_ENV}: {error}"
+                );
+            }
+            Err(error) => {
+                eprintln!(
+                    "Replay storage: failed to initialize Postgres {DATABASE_URL_ENV}: {error}; falling back to filesystem if configured"
+                );
+            }
         }
-        _ => web_log_dir.map(|dir| {
-            println!("Replay storage: filesystem {}", dir.display());
-            Arc::new(ReplayStore::file(dir))
-        }),
     }
+
+    if required {
+        panic!(
+            "{REPLAY_STORE_REQUIRED_ENV}=true requires {DATABASE_URL_ENV} to be set for replay storage"
+        );
+    }
+
+    web_log_dir.map(|dir| {
+        println!("Replay storage: filesystem {}", dir.display());
+        Arc::new(ReplayStore::file(dir))
+    })
+}
+
+fn env_flag(name: &str) -> bool {
+    env::var(name)
+        .map(|value| parse_env_bool(&value))
+        .unwrap_or(false)
+}
+
+fn parse_env_bool(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "t" | "yes" | "y" | "on"
+    )
 }
 
 async fn replay_link_redirect(Path(slug): Path<String>) -> Redirect {
@@ -3331,8 +3372,8 @@ mod tests {
         ActiveMultiplayerRoom, ClientMsg, FileReplayStore, GamePresenter, MultiplayerRoomStore,
         ReplayStore, RoomClock, SearchBudget, ServerMsg, SessionFactory, UserSessionStore,
         ViewTarget, anonymous_user_id_from_id, anonymous_user_id_from_token, client_msg_target,
-        current_unix_ms, detach_active_room, handle_multiplayer_message, redacted_account_key,
-        safe_replay_id, safe_share_slug,
+        current_unix_ms, detach_active_room, handle_multiplayer_message, parse_env_bool,
+        redacted_account_key, safe_replay_id, safe_share_slug,
     };
 
     #[derive(Clone)]
@@ -3362,6 +3403,20 @@ mod tests {
     impl Evaluator<TestGame> for TestEvaluator {
         fn evaluate(&self, _state: &TestGame, _rng: &mut fastrand::Rng) -> Evaluation {
             Evaluation::uniform(TestGame::NUM_ACTIONS, 0.0)
+        }
+    }
+
+    #[test]
+    fn parse_env_bool_accepts_enabled_values() {
+        for value in ["1", "true", "TRUE", "t", "yes", "Y", "on", " on "] {
+            assert!(parse_env_bool(value), "{value:?} should be enabled");
+        }
+    }
+
+    #[test]
+    fn parse_env_bool_rejects_other_values() {
+        for value in ["", "0", "false", "no", "off", "required", "enabled"] {
+            assert!(!parse_env_bool(value), "{value:?} should be disabled");
         }
     }
 
