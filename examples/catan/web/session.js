@@ -46,7 +46,8 @@ class Session {
       ws.send(JSON.stringify({
         type: 'Authenticate',
         token,
-        anonymous_session: token ? null : this.anonymousSessionId,
+        anonymous_session: this.anonymousSessionId,
+        clerk_user_id: this._getAuthUserId(),
         username: this._getAuthUsername(),
       }));
     };
@@ -165,6 +166,16 @@ class Session {
       .trim()
       .slice(0, 24);
     return username || null;
+  }
+
+  _getAuthUserId() {
+    if (!window.hexfishAuthSignedIn) return null;
+    const clerk = window.Clerk;
+    const value = clerk?.user?.id || clerk?.session?.user?.id || '';
+    const userId = String(value || '')
+      .trim()
+      .slice(0, 128);
+    return userId || null;
   }
 
   _loadAnonymousSessionId() {

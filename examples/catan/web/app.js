@@ -140,7 +140,11 @@ let activeView = 'play-setup';
 let selectedSingleplayerHumanPlayer = 0;
 let selectedMultiplayerHumanPlayer = 0;
 let profileUsername = readStoredProfileUsername();
+let profileUsernameSet = false;
+let profileLoaded = false;
 let pendingProfileSave = false;
+let profileModalMode = 'profile';
+let profilePromptDismissed = false;
 let moveSoundEnabled = readStoredMoveSoundEnabled();
 let moveSoundUnlocked = false;
 let moveSoundAudios = new Map();
@@ -353,15 +357,53 @@ function updateProfileUi() {
   }
 }
 
-function setProfileUsername(username, persist = true) {
+function playTabActiveForProfilePrompt() {
+  return activeView === 'play' || activeView === 'play-setup';
+}
+
+function needsProfileUsernamePrompt() {
+  return profileLoaded
+    && window.hexfishAuthSignedIn === true
+    && !guestMode()
+    && !profileUsernameSet
+    && playTabActiveForProfilePrompt();
+}
+
+function maybePromptForProfileUsername() {
+  if (profilePromptDismissed || !needsProfileUsernamePrompt()) return;
+  profilePromptDismissed = true;
+  window.setTimeout(() => {
+    if (!needsProfileUsernamePrompt()) return;
+    showProfileModal({ prompt: true });
+  }, 0);
+}
+
+function setProfileModalMode(mode) {
+  profileModalMode = mode === 'username-prompt' ? 'username-prompt' : 'profile';
+  const prompt = profileModalMode === 'username-prompt';
+  const title = document.getElementById('profile-modal-title');
+  const copy = document.getElementById('profile-modal-copy');
+  const cancel = document.getElementById('btn-cancel-profile');
+  if (title) title.textContent = prompt ? 'Choose Username' : 'Profile';
+  if (copy) {
+    copy.textContent = prompt
+      ? 'Set a username before playing so other players can recognize you.'
+      : '';
+    copy.classList.toggle('hidden', !prompt);
+  }
+  if (cancel) cancel.textContent = prompt ? 'Later' : 'Cancel';
+}
+
+function setProfileUsername(username, persist = true, usernameSet = profileUsernameSet) {
   profileUsername = validProfileUsername(username);
+  profileUsernameSet = !!usernameSet;
   window.hexfishProfileUsername = profileUsername;
   window.hexfishUsername = profileUsername;
-  if (persist) writeStoredProfileUsername(profileUsername);
+  if (persist) writeStoredProfileUsername(profileUsernameSet ? profileUsername : '');
   updateProfileUi();
 }
 
-function showProfileModal() {
+function showProfileModal(options = {}) {
   if (guestMode()) {
     showGuestSignInRequiredModal('Changing your username');
     return;
@@ -369,6 +411,7 @@ function showProfileModal() {
   const modal = document.getElementById('profile-modal');
   const input = document.getElementById('profile-username-input');
   if (!modal || !input) return;
+  setProfileModalMode(options.prompt ? 'username-prompt' : 'profile');
   input.value = profileUsername;
   setProfileStatus('');
   modal.classList.remove('hidden');
@@ -383,6 +426,7 @@ function hideProfileModal() {
   modal.classList.add('hidden');
   modal.classList.remove('flex');
   pendingProfileSave = false;
+  setProfileModalMode('profile');
   const save = document.getElementById('btn-save-profile');
   if (save) save.disabled = false;
 }
@@ -1657,6 +1701,7 @@ function updateGameOverModal(msg = currentState) {
   const modal = document.getElementById('game-over-modal');
   const winner = document.getElementById('game-over-winner');
   const primary = document.getElementById('btn-game-over-primary');
+  const actionRow = document.getElementById('game-over-action-row');
   if (!modal || !winner || !primary) return;
 
   if (!shouldShowGameOverModal(msg)) {
@@ -1667,6 +1712,7 @@ function updateGameOverModal(msg = currentState) {
   winner.textContent = gameOverWinnerText(msg);
   const action = activeView === 'play' ? 'lobby' : 'new-game';
   primary.dataset.action = action;
+  if (actionRow) actionRow.dataset.action = action;
   primary.textContent = action === 'lobby' ? 'Lobby' : 'New Game';
   updateGameOverReplayLink();
   modal.classList.remove('hidden');
@@ -1688,6 +1734,9 @@ async function copyGameOverReplayLink() {
 }
 
 function returnToPlayLobbyFromGameOver() {
+  if (!playMultiplayerActive() && currentState?.is_terminal) {
+    session.send({ type: 'SaveReplay' });
+  }
   hideGameOverModal();
   clearSavedGameOverReplayLink();
   controls.stopAutoplay();
@@ -2546,13 +2595,19 @@ session.on('ReplaySaved', (msg) => {
 });
 
 session.on('Profile', (msg) => {
-  setProfileUsername(msg.username || '', true);
+  profileLoaded = true;
+  setProfileUsername(msg.username || '', true, msg.username_set === true);
   if (pendingProfileSave) {
     pendingProfileSave = false;
     const save = document.getElementById('btn-save-profile');
     if (save) save.disabled = false;
     setProfileStatus('Saved.');
+    profilePromptDismissed = false;
+    if (profileModalMode === 'username-prompt') {
+      window.setTimeout(hideProfileModal, 250);
+    }
   }
+  maybePromptForProfileUsername();
 });
 
 session.on('Subtree', (msg) => {
@@ -2711,6 +2766,7 @@ function showPlayView() {
   updateMultiplayerClockUi();
   updateMultiplayerTurnAttention();
   scheduleBoardChromePlacement();
+  maybePromptForProfileUsername();
 }
 
 function showPlaySetupView() {
@@ -2732,6 +2788,7 @@ function showPlaySetupView() {
   updateMultiplayerInviteModal();
   updateMultiplayerClockUi();
   updateMultiplayerTurnAttention();
+  maybePromptForProfileUsername();
 }
 
 function showAnalysisView() {
@@ -2741,6 +2798,7 @@ function showAnalysisView() {
     return;
   }
   hideMultiplayerAnalysisGuard();
+  profilePromptDismissed = false;
   activeView = 'analysis';
   setServerSingleplayerHumanPlayer(null);
   setTabState('analysis');
@@ -2776,6 +2834,7 @@ function showReplayView() {
   }
   if (showGuestFeatureBlocked('Replays')) return;
   hideMultiplayerAnalysisGuard();
+  profilePromptDismissed = false;
   if (multiplayerGameOpen()) {
     rememberMultiplayerRoomForPlayTabReconnect();
     leaveMultiplayerRoom(false, true);
@@ -2800,6 +2859,7 @@ function showReplayView() {
 function showReplayBoardView() {
   hideMultiplayerAnalysisGuard();
   hideGameOverModal();
+  profilePromptDismissed = false;
   activeView = 'replay-board';
   setServerSingleplayerHumanPlayer(null);
   setTabState('replay');
@@ -2822,6 +2882,7 @@ function showEditorView() {
   if (showGuestFeatureBlocked('Editor')) return;
   hideMultiplayerAnalysisGuard();
   hideGameOverModal();
+  profilePromptDismissed = false;
   if (multiplayerGameOpen()) {
     rememberMultiplayerRoomForPlayTabReconnect();
     leaveMultiplayerRoom(false, true);
@@ -4031,18 +4092,35 @@ window.hexfishStopApp = () => {
   session.disconnect();
 };
 
+function startOrReconnectForAuthChange() {
+  if (!appStarted) {
+    window.hexfishStartApp();
+    return;
+  }
+  session.disconnect();
+  session.connect();
+  if (activeView === 'replay-list') requestReplayList();
+}
+
 document.addEventListener('hexfish-auth-signed-in', () => {
+  profileLoaded = false;
+  profilePromptDismissed = false;
   syncGuestUiState();
   updateProfileUi();
-  window.hexfishStartApp();
+  startOrReconnectForAuthChange();
 });
 document.addEventListener('hexfish-auth-guest', () => {
+  profileLoaded = false;
+  profilePromptDismissed = false;
   if (guestMultiplayerMode()) enterGuestPlayMode();
   else syncGuestUiState();
   updateProfileUi();
   window.hexfishStartApp();
 });
 document.addEventListener('hexfish-auth-signed-out', () => {
+  profileLoaded = false;
+  profileUsernameSet = false;
+  profilePromptDismissed = false;
   syncGuestUiState();
   updateProfileUi();
   window.hexfishStopApp();

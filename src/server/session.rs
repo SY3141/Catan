@@ -610,6 +610,7 @@ impl<G: Game + 'static> GameSession<G> {
             | ClientMsg::LoadSharedReplay { .. }
             | ClientMsg::DeleteReplay { .. }
             | ClientMsg::SetReplayFavorite { .. }
+            | ClientMsg::SaveReplay
             | ClientMsg::GetProfile
             | ClientMsg::SetUsername { .. }
             | ClientMsg::CreateMultiplayerRoom { .. }

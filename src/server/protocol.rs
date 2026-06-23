@@ -132,6 +132,8 @@ pub enum ClientMsg {
         token: String,
         anonymous_session: Option<String>,
         #[serde(default)]
+        clerk_user_id: Option<String>,
+        #[serde(default)]
         username: Option<String>,
     },
     /// Start a new game (optionally with a seed).
@@ -153,6 +155,8 @@ pub enum ClientMsg {
     DeleteReplay { id: String },
     /// Toggle whether a saved replay is favourited.
     SetReplayFavorite { id: String, favorite: bool },
+    /// Save the current live game replay without starting a new game.
+    SaveReplay,
     /// Read the current profile for this web session.
     GetProfile,
     /// Set a globally unique username for this web session.
@@ -262,7 +266,10 @@ pub enum ServerMsg {
     /// Saved replays for the current web user.
     ReplayList { entries: Vec<ReplayEntry> },
     /// Current user profile for this web session.
-    Profile { username: Option<String> },
+    Profile {
+        username: Option<String>,
+        username_set: bool,
+    },
     /// A live game replay was saved and can be shared.
     ReplaySaved { entry: ReplayEntry },
     /// Current invite-code multiplayer room state for this socket.

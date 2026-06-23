@@ -7,7 +7,7 @@ pub use session::GameSession;
 pub use traits::GamePresenter;
 
 use std::{
-    collections::{HashMap, hash_map::DefaultHasher},
+    collections::{HashMap, HashSet, hash_map::DefaultHasher},
     env,
     hash::{Hash, Hasher},
     path::PathBuf,
@@ -1883,6 +1883,7 @@ struct UserSessionStore<G: Game + 'static> {
 struct UsernameRegistry {
     by_user: HashMap<String, String>,
     by_name: HashMap<String, String>,
+    explicit_users: HashSet<String>,
 }
 
 impl<G: Game + 'static> UserSessionStore<G> {
@@ -1952,8 +1953,13 @@ impl<G: Game + 'static> UserSessionStore<G> {
     }
 
     fn profile_msg(&self, user_id: &str) -> ServerMsg {
+        let registry = self
+            .usernames
+            .lock()
+            .expect("username registry lock poisoned");
         ServerMsg::Profile {
-            username: self.current_username(user_id),
+            username: registry.by_user.get(user_id).cloned(),
+            username_set: registry.explicit_users.contains(user_id),
         }
     }
 
@@ -1962,8 +1968,8 @@ impl<G: Game + 'static> UserSessionStore<G> {
             .usernames
             .lock()
             .expect("username registry lock poisoned");
-        if let Some(username) = registry.by_user.get(user_id) {
-            return username.clone();
+        if let Some(existing) = registry.by_user.get(user_id) {
+            return existing.clone();
         }
 
         if let Some(username) = normalize_profile_username(username) {
@@ -1973,10 +1979,14 @@ impl<G: Game + 'static> UserSessionStore<G> {
                 .get(&key)
                 .is_some_and(|owner| owner != user_id)
             {
+                let default_username = default_profile_username(user_id, &registry);
                 registry.by_name.insert(key, user_id.to_string());
                 registry
                     .by_user
                     .insert(user_id.to_string(), username.clone());
+                if username != default_username {
+                    registry.explicit_users.insert(user_id.to_string());
+                }
                 return username;
             }
         }
@@ -2016,6 +2026,7 @@ impl<G: Game + 'static> UserSessionStore<G> {
             }
         }
         registry.by_name.insert(key, user_id.to_string());
+        registry.explicit_users.insert(user_id.to_string());
         Ok(username)
     }
 }
@@ -2507,6 +2518,7 @@ async fn authenticate_socket(socket: &mut WebSocket) -> Result<SocketSessionKey,
     let ClientMsg::Authenticate {
         token,
         anonymous_session,
+        clerk_user_id,
         username,
     } = client_msg
     else {
@@ -2515,30 +2527,55 @@ async fn authenticate_socket(socket: &mut WebSocket) -> Result<SocketSessionKey,
     };
     let display_name = normalize_display_name(username);
 
+    Ok(socket_session_key_from_auth(
+        &token,
+        clerk_user_id,
+        anonymous_session,
+        display_name,
+    ))
+}
+
+fn socket_session_key_from_auth(
+    token: &str,
+    clerk_user_id: Option<String>,
+    anonymous_session: Option<String>,
+    display_name: Option<String>,
+) -> SocketSessionKey {
+    if let Some(user_id) = clerk_user_id_from_auth(token, clerk_user_id.as_deref()) {
+        return SocketSessionKey {
+            user_id,
+            display_name,
+            ephemeral: false,
+            scope: "clerk",
+        };
+    }
+
+    if let Some(user_id) = anonymous_user_id_from_token(token) {
+        return SocketSessionKey {
+            user_id,
+            display_name,
+            ephemeral: false,
+            scope: "anonymous",
+        };
+    }
+
     if let Some(user_id) = anonymous_session
         .as_deref()
         .and_then(anonymous_user_id_from_id)
     {
-        Ok(SocketSessionKey {
+        return SocketSessionKey {
             user_id,
             display_name,
             ephemeral: false,
             scope: "anonymous",
-        })
-    } else if let Some(user_id) = anonymous_user_id_from_token(&token) {
-        Ok(SocketSessionKey {
-            user_id,
-            display_name,
-            ephemeral: false,
-            scope: "anonymous",
-        })
-    } else {
-        Ok(SocketSessionKey {
-            user_id: format!("anonymous:{}", fastrand::u64(..)),
-            display_name,
-            ephemeral: true,
-            scope: "anonymous-ephemeral",
-        })
+        };
+    }
+
+    SocketSessionKey {
+        user_id: format!("anonymous:{}", fastrand::u64(..)),
+        display_name,
+        ephemeral: true,
+        scope: "anonymous-ephemeral",
     }
 }
 
@@ -2606,6 +2643,20 @@ fn default_profile_username(user_id: &str, registry: &UsernameRegistry) -> Strin
 
 fn username_key(username: &str) -> String {
     username.to_ascii_lowercase()
+}
+
+fn clerk_user_id_from_auth(token: &str, clerk_user_id: Option<&str>) -> Option<String> {
+    if token.trim().is_empty() {
+        return None;
+    }
+    let id = clerk_user_id?.trim();
+    if id.is_empty() || id.len() > 128 {
+        return None;
+    }
+    let safe = id
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+    safe.then(|| format!("clerk:{id}"))
 }
 
 fn anonymous_user_id_from_token(token: &str) -> Option<String> {
@@ -2822,6 +2873,13 @@ async fn handle_authenticated_message<G: Game + 'static>(
                     message: "Replay storage is not configured".into(),
                 }],
             },
+            ClientMsg::SaveReplay => {
+                let mut responses = Vec::new();
+                if let Some(msg) = save_current_replay_once(user_session, &mut session).await {
+                    responses.push(msg);
+                }
+                responses
+            }
             msg @ ClientMsg::NewGame { .. } => {
                 let pending_log = if was_terminal {
                     None
@@ -2905,6 +2963,7 @@ fn is_blocked_while_in_multiplayer(msg: &ClientMsg) -> bool {
         msg,
         ClientMsg::NewGame { .. }
             | ClientMsg::StartEditedGame { .. }
+            | ClientMsg::SaveReplay
             | ClientMsg::PlayAction { .. }
             | ClientMsg::BotMove { .. }
             | ClientMsg::RunSims { .. }
@@ -2939,6 +2998,7 @@ fn handle_profile_message<G: Game + 'static>(
             };
             let mut responses = vec![ServerMsg::Profile {
                 username: Some(username.clone()),
+                username_set: true,
             }];
             if let Some(active) = active_room.as_ref() {
                 if active
@@ -3373,7 +3433,7 @@ mod tests {
         ReplayStore, RoomClock, SearchBudget, ServerMsg, SessionFactory, UserSessionStore,
         ViewTarget, anonymous_user_id_from_id, anonymous_user_id_from_token, client_msg_target,
         current_unix_ms, detach_active_room, handle_multiplayer_message, parse_env_bool,
-        redacted_account_key, safe_replay_id, safe_share_slug,
+        redacted_account_key, safe_replay_id, safe_share_slug, socket_session_key_from_auth,
     };
 
     #[derive(Clone)]
@@ -3418,6 +3478,64 @@ mod tests {
         for value in ["", "0", "false", "no", "off", "required", "enabled"] {
             assert!(!parse_env_bool(value), "{value:?} should be disabled");
         }
+    }
+
+    #[test]
+    fn socket_auth_falls_back_to_browser_session_for_unrecognized_token() {
+        let key = socket_session_key_from_auth(
+            "clerk-session-token",
+            None,
+            Some("stable_browser_session".into()),
+            Some("Alice".into()),
+        );
+
+        assert_eq!(key.user_id, "anonymous:stable_browser_session");
+        assert_eq!(key.display_name.as_deref(), Some("Alice"));
+        assert!(!key.ephemeral);
+        assert_eq!(key.scope, "anonymous");
+    }
+
+    #[test]
+    fn socket_auth_prefers_recognized_token_over_browser_session() {
+        let key = socket_session_key_from_auth(
+            "anon:token_session",
+            None,
+            Some("browser_session".into()),
+            None,
+        );
+
+        assert_eq!(key.user_id, "anonymous:token_session");
+        assert!(!key.ephemeral);
+        assert_eq!(key.scope, "anonymous");
+    }
+
+    #[test]
+    fn socket_auth_uses_clerk_user_id_when_token_is_present() {
+        let key = socket_session_key_from_auth(
+            "clerk-session-token",
+            Some("user_2abc123".into()),
+            Some("browser_session".into()),
+            Some("Alice".into()),
+        );
+
+        assert_eq!(key.user_id, "clerk:user_2abc123");
+        assert_eq!(key.display_name.as_deref(), Some("Alice"));
+        assert!(!key.ephemeral);
+        assert_eq!(key.scope, "clerk");
+    }
+
+    #[test]
+    fn socket_auth_ignores_clerk_user_id_without_token() {
+        let key = socket_session_key_from_auth(
+            "",
+            Some("user_2abc123".into()),
+            Some("browser_session".into()),
+            None,
+        );
+
+        assert_eq!(key.user_id, "anonymous:browser_session");
+        assert!(!key.ephemeral);
+        assert_eq!(key.scope, "anonymous");
     }
 
     struct CountingPresenter {
@@ -3574,6 +3692,51 @@ mod tests {
         assert!(second.starts_with("User"));
         assert_ne!(first, second);
         assert_eq!(first_again, first);
+    }
+
+    #[test]
+    fn profile_reports_whether_username_was_explicitly_set() {
+        let (store, _) = test_store();
+
+        let default_username = store.ensure_username("user_a", None);
+        match store.profile_msg("user_a") {
+            ServerMsg::Profile {
+                username,
+                username_set,
+            } => {
+                assert_eq!(username.as_deref(), Some(default_username.as_str()));
+                assert!(!username_set);
+            }
+            other => panic!("unexpected profile message: {other:?}"),
+        }
+
+        store.set_username("user_a", "Alice").unwrap();
+        match store.profile_msg("user_a") {
+            ServerMsg::Profile {
+                username,
+                username_set,
+            } => {
+                assert_eq!(username.as_deref(), Some("Alice"));
+                assert!(username_set);
+            }
+            other => panic!("unexpected profile message: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn restored_default_username_is_not_treated_as_explicit() {
+        let (first_store, _) = test_store();
+        let default_username = first_store.ensure_username("user_a", None);
+        let (restored_store, _) = test_store();
+
+        assert_eq!(
+            restored_store.ensure_username("user_a", Some(&default_username)),
+            default_username
+        );
+        match restored_store.profile_msg("user_a") {
+            ServerMsg::Profile { username_set, .. } => assert!(!username_set),
+            other => panic!("unexpected profile message: {other:?}"),
+        }
     }
 
     #[test]

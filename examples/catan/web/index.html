@@ -99,7 +99,7 @@ tailwind.config = {
       <button id="btn-topbar-brand" type="button" class="topbar-brand text-sm font-semibold text-gray-100" aria-label="HexFish home">
         <span class="topbar-mark" aria-hidden="true"></span>
         <span>HexFish</span>
-        <span id="app-version" class="topbar-version" aria-label="Version V1.0.8">V1.0.8</span>
+        <span id="app-version" class="topbar-version" aria-label="Version V1.0.10">V1.0.10</span>
       </button>
     </h1>
     <div class="flex items-center gap-1 text-xs" role="tablist" aria-label="Main views">
@@ -257,7 +257,7 @@ tailwind.config = {
                   <button id="btn-copy-game-over-replay" type="button" class="py-1.5 px-3 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-default" disabled>Copy</button>
                 </div>
               </div>
-              <div class="flex justify-end">
+              <div id="game-over-action-row" class="game-over-action-row">
                 <button id="btn-game-over-primary" type="button" class="py-1.5 px-3 text-xs bg-accent border border-accent text-white rounded cursor-pointer hover:bg-red-600 transition-colors">New Game</button>
               </div>
             </div>
@@ -475,6 +475,7 @@ tailwind.config = {
         <h2 id="profile-modal-title" class="text-sm font-semibold text-gray-100">Profile</h2>
         <button id="btn-close-profile-modal" type="button" class="h-7 w-7 rounded border border-gray-700 bg-bg-3 text-gray-300 hover:bg-bg hover:text-gray-100" aria-label="Close profile dialog">&times;</button>
       </div>
+      <p id="profile-modal-copy" class="hidden mb-3 text-xs leading-5 text-gray-400"></p>
       <label for="profile-username-input" class="mb-1 block text-xs font-medium text-gray-400">Username</label>
       <input id="profile-username-input" type="text" maxlength="24" autocomplete="username" class="w-full rounded border border-gray-700 bg-bg-3 px-2 py-1.5 text-sm text-gray-100" aria-describedby="profile-username-status">
       <p id="profile-username-status" class="mt-2 min-h-4 text-xs text-gray-400" aria-live="polite"></p>
@@ -649,11 +650,11 @@ tailwind.config = {
 </div>
 <div id="svg-tooltip"></div>
 
-<script src="session.js?v=anonymous-session-v2-20260623"></script>
+<script src="session.js?v=clerk-replay-identity-20260623"></script>
 <script src="board.js?v=tile-textures-20260623"></script>
 <script src="mcts.js?v=cpu-load-20260622"></script>
 <script src="controls.js?v=guest-shared-replay-20260623"></script>
 <script src="auth.js?v=clerk-origin-aware-20260623"></script>
-<script src="app.js?v=clerk-production-20260623"></script>
+<script src="app.js?v=clerk-replay-identity-20260623"></script>
 </body>
 </html>

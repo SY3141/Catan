@@ -113,6 +113,15 @@
   white-space: nowrap;
 }
 
+.game-over-action-row {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.game-over-action-row[data-action="lobby"] {
+  justify-content: flex-start;
+}
+
 .login-copy h1 {
   max-width: 520px;
   margin-bottom: 18px;
