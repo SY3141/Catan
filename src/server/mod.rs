@@ -1105,6 +1105,21 @@ impl<G: Game + 'static> MultiplayerRoom<G> {
             .position(|seat| seat.as_ref().map_or(false, |seat| seat.user_id == user_id))
     }
 
+    fn update_seat_display_name(&self, user_id: &str, display_name: Option<String>) -> bool {
+        let mut seats = self.seats.lock().expect("room seats lock poisoned");
+        let Some(player) = seats
+            .iter()
+            .position(|seat| seat.as_ref().map_or(false, |seat| seat.user_id == user_id))
+        else {
+            return false;
+        };
+        if let Some(seat) = seats[player].as_mut() {
+            seat.display_name = display_name;
+        }
+        self.touch();
+        true
+    }
+
     fn is_full(&self) -> bool {
         self.seats
             .lock()
@@ -1597,6 +1612,7 @@ impl<G: Game + 'static> MultiplayerRoomStore<G> {
         increment_seconds: Option<u32>,
     ) -> Result<(Arc<MultiplayerRoom<G>>, usize), String> {
         let player = match preferred_player {
+            None => usize::from(fastrand::bool()),
             Some(1) => 1,
             _ => 0,
         };
@@ -1757,11 +1773,23 @@ async fn save_replay_log<G: Game + 'static>(
     user_session: &UserSession<G>,
     log: &GameLog,
 ) -> Option<ServerMsg> {
-    let store = user_session.replay_store.as_ref()?;
+    match save_replay_entry(user_session, log).await {
+        Ok(_) => None,
+        Err(message) => Some(ServerMsg::Error { message }),
+    }
+}
+
+async fn save_replay_entry<G: Game + 'static>(
+    user_session: &UserSession<G>,
+    log: &GameLog,
+) -> Result<Option<ReplayEntry>, String> {
+    let Some(store) = user_session.replay_store.as_ref() else {
+        return Ok(None);
+    };
     let counter = user_session
         .next_replay_counter
         .fetch_add(1, Ordering::Relaxed);
-    match store
+    store
         .save(
             &user_session.account_key,
             user_session.session_id,
@@ -1769,10 +1797,7 @@ async fn save_replay_log<G: Game + 'static>(
             log,
         )
         .await
-    {
-        Ok(_) => None,
-        Err(message) => Some(ServerMsg::Error { message }),
-    }
+        .map(Some)
 }
 
 async fn save_current_replay_once<G: Game + 'static>(
@@ -1781,11 +1806,15 @@ async fn save_current_replay_once<G: Game + 'static>(
 ) -> Option<ServerMsg> {
     let has_store = user_session.replay_store.is_some();
     let log = session.export_unsaved_current_log()?;
-    let error = save_replay_log(user_session, &log).await;
-    if has_store && error.is_none() {
-        session.mark_current_log_saved(&log);
+    match save_replay_entry(user_session, &log).await {
+        Ok(entry) => {
+            if has_store {
+                session.mark_current_log_saved(&log);
+            }
+            entry.map(|entry| ServerMsg::ReplaySaved { entry })
+        }
+        Err(message) => Some(ServerMsg::Error { message }),
     }
-    error
 }
 
 async fn list_replay_entries<G: Game + 'static>(
@@ -1841,8 +1870,15 @@ fn responses_include_terminal_game_state(responses: &[ServerMsg]) -> bool {
 struct UserSessionStore<G: Game + 'static> {
     factory: Arc<SessionFactory<G>>,
     sessions: StdMutex<HashMap<String, Arc<UserSession<G>>>>,
+    usernames: StdMutex<UsernameRegistry>,
     next_session_id: AtomicU64,
     replay_store: Option<Arc<ReplayStore>>,
+}
+
+#[derive(Default)]
+struct UsernameRegistry {
+    by_user: HashMap<String, String>,
+    by_name: HashMap<String, String>,
 }
 
 impl<G: Game + 'static> UserSessionStore<G> {
@@ -1850,6 +1886,7 @@ impl<G: Game + 'static> UserSessionStore<G> {
         Self {
             factory: Arc::new(factory),
             sessions: StdMutex::new(HashMap::new()),
+            usernames: StdMutex::new(UsernameRegistry::default()),
             next_session_id: AtomicU64::new(1),
             replay_store,
         }
@@ -1899,6 +1936,83 @@ impl<G: Game + 'static> UserSessionStore<G> {
             );
         }
         session
+    }
+
+    fn current_username(&self, user_id: &str) -> Option<String> {
+        self.usernames
+            .lock()
+            .expect("username registry lock poisoned")
+            .by_user
+            .get(user_id)
+            .cloned()
+    }
+
+    fn profile_msg(&self, user_id: &str) -> ServerMsg {
+        ServerMsg::Profile {
+            username: self.current_username(user_id),
+        }
+    }
+
+    fn ensure_username(&self, user_id: &str, username: Option<&str>) -> String {
+        let mut registry = self
+            .usernames
+            .lock()
+            .expect("username registry lock poisoned");
+        if let Some(username) = registry.by_user.get(user_id) {
+            return username.clone();
+        }
+
+        if let Some(username) = normalize_profile_username(username) {
+            let key = username_key(&username);
+            if !registry
+                .by_name
+                .get(&key)
+                .is_some_and(|owner| owner != user_id)
+            {
+                registry.by_name.insert(key, user_id.to_string());
+                registry
+                    .by_user
+                    .insert(user_id.to_string(), username.clone());
+                return username;
+            }
+        }
+
+        let username = default_profile_username(user_id, &registry);
+        let key = username_key(&username);
+        registry.by_name.insert(key, user_id.to_string());
+        registry
+            .by_user
+            .insert(user_id.to_string(), username.clone());
+        username
+    }
+
+    fn set_username(&self, user_id: &str, username: &str) -> Result<String, String> {
+        let username = normalize_profile_username(Some(username)).ok_or_else(|| {
+            "Username must be 3-24 letters, numbers, dashes, or underscores".to_string()
+        })?;
+        let key = username_key(&username);
+        let mut registry = self
+            .usernames
+            .lock()
+            .expect("username registry lock poisoned");
+        if registry
+            .by_name
+            .get(&key)
+            .is_some_and(|owner| owner != user_id)
+        {
+            return Err("Username is already taken".into());
+        }
+        if let Some(old_username) = registry
+            .by_user
+            .insert(user_id.to_string(), username.clone())
+        {
+            let old_key = username_key(&old_username);
+            if old_key != key {
+                registry.by_name.remove(&old_key);
+            }
+        }
+        registry.by_name.insert(key, user_id.to_string());
+        Ok(username)
     }
 }
 
@@ -2264,6 +2378,7 @@ async fn handle_socket<G: Game + 'static>(
     let session_scope = session_key.scope;
     let account_key = redacted_account_key(&user_id);
     let (user_session, created) = store.get_or_create(&user_id);
+    store.ensure_username(&user_id, display_name.as_deref());
     let board_code = format_board_fingerprint(user_session.board_fingerprint);
     if created {
         tracing::info!(
@@ -2289,6 +2404,7 @@ async fn handle_socket<G: Game + 'static>(
 
     let _ = handle_authenticated_socket(
         &mut socket,
+        Arc::clone(&store),
         Arc::clone(&user_session),
         rooms,
         user_id.clone(),
@@ -2414,6 +2530,41 @@ fn normalize_display_name(name: Option<String>) -> Option<String> {
     (!normalized.is_empty()).then_some(normalized)
 }
 
+fn normalize_profile_username(name: Option<&str>) -> Option<String> {
+    const MIN_USERNAME_CHARS: usize = 3;
+    const MAX_USERNAME_CHARS: usize = 24;
+    let mut normalized = String::new();
+
+    for ch in name?.trim().chars() {
+        if normalized.len() >= MAX_USERNAME_CHARS {
+            break;
+        }
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+            normalized.push(ch);
+        }
+    }
+
+    (normalized.len() >= MIN_USERNAME_CHARS).then_some(normalized)
+}
+
+fn default_profile_username(user_id: &str, registry: &UsernameRegistry) -> String {
+    for salt in 0_u64.. {
+        let mut hasher = DefaultHasher::new();
+        user_id.hash(&mut hasher);
+        salt.hash(&mut hasher);
+        let unique_key = format!("{:016x}", hasher.finish());
+        let username = format!("User{}", &unique_key[..8]);
+        if !registry.by_name.contains_key(&username_key(&username)) {
+            return username;
+        }
+    }
+    unreachable!("default username key space is exhausted")
+}
+
+fn username_key(username: &str) -> String {
+    username.to_ascii_lowercase()
+}
+
 fn anonymous_user_id_from_token(token: &str) -> Option<String> {
     let id = token.strip_prefix("anon:")?;
     anonymous_user_id_from_id(id)
@@ -2431,6 +2582,7 @@ fn anonymous_user_id_from_id(id: &str) -> Option<String> {
 
 async fn handle_authenticated_socket<G: Game + 'static>(
     socket: &mut WebSocket,
+    store: Arc<UserSessionStore<G>>,
     user_session: Arc<UserSession<G>>,
     rooms: Arc<MultiplayerRoomStore<G>>,
     user_id: String,
@@ -2450,6 +2602,7 @@ async fn handle_authenticated_socket<G: Game + 'static>(
             send_msg(socket, &msg).await?;
         }
     }
+    send_msg(socket, &store.profile_msg(&user_id)).await?;
 
     let lobby_socket_id = rooms.register_lobby_socket(outbound_tx.clone());
     rooms.send_lobby_to(&outbound_tx);
@@ -2470,6 +2623,7 @@ async fn handle_authenticated_socket<G: Game + 'static>(
                 };
                 if handle_authenticated_message(
                     socket,
+                    &store,
                     &user_session,
                     &rooms,
                     &user_id,
@@ -2498,6 +2652,7 @@ async fn handle_authenticated_socket<G: Game + 'static>(
 
 async fn handle_authenticated_message<G: Game + 'static>(
     socket: &mut WebSocket,
+    store: &Arc<UserSessionStore<G>>,
     user_session: &Arc<UserSession<G>>,
     rooms: &Arc<MultiplayerRoomStore<G>>,
     user_id: &str,
@@ -2528,11 +2683,25 @@ async fn handle_authenticated_message<G: Game + 'static>(
         }
     };
 
+    if matches!(
+        &client_msg,
+        ClientMsg::GetProfile | ClientMsg::SetUsername { .. }
+    ) {
+        let responses = handle_profile_message(store, user_id, active_room, client_msg);
+        for msg in responses {
+            send_msg(socket, &msg).await?;
+        }
+        return Ok(());
+    }
+
     if is_multiplayer_msg(&client_msg) {
+        let profile_display_name = store
+            .current_username(user_id)
+            .or_else(|| display_name.map(str::to_string));
         let responses = handle_multiplayer_message_for_user(
             rooms,
             user_id,
-            display_name,
+            profile_display_name.as_deref(),
             outbound_tx,
             active_room,
             client_msg,
@@ -2710,6 +2879,41 @@ fn is_blocked_while_in_multiplayer(msg: &ClientMsg) -> bool {
             | ClientMsg::SetConfig { .. }
             | ClientMsg::SetAutoSearch { .. }
     )
+}
+
+fn handle_profile_message<G: Game + 'static>(
+    store: &Arc<UserSessionStore<G>>,
+    user_id: &str,
+    active_room: &Option<ActiveMultiplayerRoom<G>>,
+    msg: ClientMsg,
+) -> Vec<ServerMsg> {
+    match msg {
+        ClientMsg::GetProfile => vec![store.profile_msg(user_id)],
+        ClientMsg::SetUsername { username } => {
+            let username = match store.set_username(user_id, &username) {
+                Ok(username) => username,
+                Err(message) => return vec![ServerMsg::Error { message }],
+            };
+            let mut responses = vec![ServerMsg::Profile {
+                username: Some(username.clone()),
+            }];
+            if let Some(active) = active_room.as_ref() {
+                if active
+                    .room
+                    .update_seat_display_name(user_id, Some(username.clone()))
+                {
+                    active
+                        .room
+                        .broadcast_room_info_except(Some(active.socket_id));
+                    responses.push(active.room.room_msg_for_player(Some(active.player)));
+                }
+            }
+            responses
+        }
+        _ => vec![ServerMsg::Error {
+            message: "Unsupported profile message".into(),
+        }],
+    }
 }
 
 async fn handle_multiplayer_message<G: Game + 'static>(
@@ -3301,6 +3505,32 @@ mod tests {
     }
 
     #[test]
+    fn users_receive_unique_default_usernames() {
+        let (store, _) = test_store();
+
+        let first = store.ensure_username("user_a", None);
+        let second = store.ensure_username("user_b", None);
+        let first_again = store.ensure_username("user_a", Some("Alice"));
+
+        assert!(first.starts_with("User"));
+        assert!(second.starts_with("User"));
+        assert_ne!(first, second);
+        assert_eq!(first_again, first);
+    }
+
+    #[test]
+    fn username_restore_collision_falls_back_to_default() {
+        let (store, _) = test_store();
+
+        let first = store.ensure_username("user_a", Some("Alice"));
+        let second = store.ensure_username("user_b", Some("Alice"));
+
+        assert_eq!(first, "Alice");
+        assert!(second.starts_with("User"));
+        assert_ne!(second, first);
+    }
+
+    #[test]
     fn multiplayer_room_invite_flow_assigns_fixed_seats() {
         let (rooms, presenter) = test_room_store();
 
@@ -3582,17 +3812,21 @@ mod tests {
             .await;
 
             let share_slug = match responses.as_slice() {
-                [ServerMsg::MultiplayerRoom {
-                    status,
-                    winner,
-                    finish_reason,
-                    replay_share_slug,
-                    ..
-                }] => {
+                [
+                    ServerMsg::MultiplayerRoom {
+                        status,
+                        winner,
+                        finish_reason,
+                        replay_share_slug,
+                        ..
+                    },
+                ] => {
                     assert_eq!(status, "finished");
                     assert_eq!(*winner, Some(1));
                     assert_eq!(finish_reason.as_deref(), Some("resignation"));
-                    replay_share_slug.clone().expect("resign should expose replay slug")
+                    replay_share_slug
+                        .clone()
+                        .expect("resign should expose replay slug")
                 }
                 other => panic!("expected resign room response, got {other:?}"),
             };

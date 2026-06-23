@@ -47,6 +47,11 @@ pub trait GamePresenter<G: Game>: Send + Sync {
         String::new()
     }
 
+    /// Stable frontend sound kind for a committed action or chance outcome.
+    fn action_sound_kind(&self, _state: &G, _action: usize, _is_chance: bool) -> &'static str {
+        "generic"
+    }
+
     /// Redact or rewrite an existing game-log label for a player perspective.
     ///
     /// The default preserves the analysis/replay label. Multiplayer presenters

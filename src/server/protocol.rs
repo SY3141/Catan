@@ -153,6 +153,10 @@ pub enum ClientMsg {
     DeleteReplay { id: String },
     /// Toggle whether a saved replay is favourited.
     SetReplayFavorite { id: String, favorite: bool },
+    /// Read the current profile for this web session.
+    GetProfile,
+    /// Set a globally unique username for this web session.
+    SetUsername { username: String },
     /// Jump to a replay cursor (0..=len).
     SetReplayCursor { cursor: usize },
     /// Human plays an action.
@@ -248,6 +252,7 @@ pub enum ServerMsg {
         is_terminal: bool,
         result: Option<String>,
         action_log: Vec<String>,
+        action_log_sound_kinds: Vec<String>,
         history_cursor: usize,
         action_log_cursors: Vec<usize>,
         can_undo: bool,
@@ -256,6 +261,10 @@ pub enum ServerMsg {
     },
     /// Saved replays for the current web user.
     ReplayList { entries: Vec<ReplayEntry> },
+    /// Current user profile for this web session.
+    Profile { username: Option<String> },
+    /// A live game replay was saved and can be shared.
+    ReplaySaved { entry: ReplayEntry },
     /// Current invite-code multiplayer room state for this socket.
     MultiplayerRoom {
         code: String,

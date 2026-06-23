@@ -42,24 +42,8 @@
       .slice(0, 24)
   );
 
-  const clerkUsername = () => (
-    normalizeUsername(window.Clerk?.user?.username)
-  );
-
-  const clerkUserDisplayNameFallback = () => {
-    const user = window.Clerk?.user;
-    if (!user) return '';
-    const firstLast = [user.firstName, user.lastName].filter(Boolean).join(' ');
-    const emailPrefix = user.primaryEmailAddress?.emailAddress?.split('@')[0] || '';
-    const candidates = [firstLast, user.fullName, emailPrefix];
-    return normalizeUsername(candidates.find((candidate) => normalizeUsername(candidate)) || '');
-  };
-
   const currentAuthUsername = () => (
-    normalizeUsername(
-      clerkUsername()
-      || clerkUserDisplayNameFallback()
-    )
+    normalizeUsername(window.hexfishProfileUsername)
   );
 
   window.hexfishUsername = currentAuthUsername();
@@ -401,6 +385,7 @@
 
   window.hexfishShowSignInFromGuest = showSignInPageFromGuest;
   window.hexfishShowSignUpFromGuest = showSignUpPageFromGuest;
+  window.hexfishShowLandingPage = showSignInPageFromGuest;
 
   const renderAuthState = () => {
     const clerk = window.Clerk;

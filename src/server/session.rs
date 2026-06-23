@@ -230,9 +230,7 @@ impl<G: Game + 'static> GameSession<G> {
             return None;
         }
         Some(GameLog {
-            initial_state: self
-                .presenter
-                .serialize_log_state(self.search.state())?,
+            initial_state: self.presenter.serialize_log_state(self.search.state())?,
             actions: Vec::new(),
         })
     }
@@ -419,8 +417,12 @@ impl<G: Game + 'static> GameSession<G> {
         }
     }
 
-    fn action_log_with_cursors(&self, perspective: Option<usize>) -> (Vec<String>, Vec<usize>) {
+    fn action_log_entries(
+        &self,
+        perspective: Option<usize>,
+    ) -> (Vec<String>, Vec<String>, Vec<usize>) {
         let mut action_log = Vec::new();
+        let mut action_log_sound_kinds = Vec::new();
         let mut action_log_cursors = Vec::new();
         for (i, entry) in self.history.iter().enumerate() {
             let label = match perspective {
@@ -436,10 +438,14 @@ impl<G: Game + 'static> GameSession<G> {
             if label.is_empty() {
                 continue;
             }
+            let sound_kind =
+                self.presenter
+                    .action_sound_kind(&entry.state, entry.action, entry.is_chance);
             action_log.push(label);
+            action_log_sound_kinds.push(sound_kind.to_string());
             action_log_cursors.push(i + 1);
         }
-        (action_log, action_log_cursors)
+        (action_log, action_log_sound_kinds, action_log_cursors)
     }
 
     fn undo_target_cursor(&self) -> Option<usize> {
@@ -541,7 +547,8 @@ impl<G: Game + 'static> GameSession<G> {
             None
         };
 
-        let (action_log, action_log_cursors) = self.action_log_with_cursors(perspective);
+        let (action_log, action_log_sound_kinds, action_log_cursors) =
+            self.action_log_entries(perspective);
 
         ServerMsg::GameState {
             state: match perspective {
@@ -555,6 +562,7 @@ impl<G: Game + 'static> GameSession<G> {
             is_terminal,
             result,
             action_log,
+            action_log_sound_kinds,
             history_cursor: self.cursor,
             action_log_cursors,
             can_undo: perspective.is_none() && self.undo_target_cursor().is_some(),
@@ -602,6 +610,8 @@ impl<G: Game + 'static> GameSession<G> {
             | ClientMsg::LoadSharedReplay { .. }
             | ClientMsg::DeleteReplay { .. }
             | ClientMsg::SetReplayFavorite { .. }
+            | ClientMsg::GetProfile
+            | ClientMsg::SetUsername { .. }
             | ClientMsg::CreateMultiplayerRoom { .. }
             | ClientMsg::ListMultiplayerRooms
             | ClientMsg::JoinMultiplayerRoom { .. }
@@ -2019,6 +2029,7 @@ mod tests {
                 ServerMsg::GameState {
                     state,
                     action_log,
+                    action_log_sound_kinds,
                     history_cursor,
                     action_log_cursors,
                     can_redo,
@@ -2028,6 +2039,10 @@ mod tests {
                 assert_eq!(state["moves"], serde_json::json!(1));
                 assert_eq!(*history_cursor, 1);
                 assert_eq!(action_log.len(), 2);
+                assert_eq!(
+                    action_log_sound_kinds,
+                    &vec!["generic".to_string(), "generic".to_string()]
+                );
                 assert_eq!(action_log_cursors, &vec![1, 2]);
                 assert!(*can_redo);
             }

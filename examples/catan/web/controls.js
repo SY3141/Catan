@@ -7,6 +7,8 @@
 const BOTTOM_CONTROL_HOVER_TIPS = [
   ['btn-new-game', 'Start a fresh game from the standard board setup.'],
   ['btn-start-edited-game', 'Start a game from the board currently configured in the editor.'],
+  ['btn-undo', 'Undo the previous move, or step backward while viewing a replay.'],
+  ['btn-redo', 'Redo the next move, or step forward while viewing a replay.'],
   ['btn-replay-first', 'Jump to the initial position in this replay.'],
   ['btn-replay-prev', 'Step back one position in this replay.'],
   ['replay-slider', 'Drag to jump to a specific position in this replay.'],
@@ -397,6 +399,12 @@ class Controls {
     });
 
     document.getElementById('btn-undo').addEventListener('click', () => {
+      if (this.replayMode) {
+        const replay = this.lastState?.replay;
+        if (!replay) return;
+        this._setReplayCursor(Math.max(0, replay.cursor - 1));
+        return;
+      }
       this.stopAutoplay();
       this._disableAutoSearch();
       this.pauseBeforeCommand();
@@ -404,6 +412,12 @@ class Controls {
     });
 
     document.getElementById('btn-redo').addEventListener('click', () => {
+      if (this.replayMode) {
+        const replay = this.lastState?.replay;
+        if (!replay) return;
+        this._setReplayCursor(Math.min(replay.len, replay.cursor + 1));
+        return;
+      }
       this.stopAutoplay();
       this._disableAutoSearch();
       this.pauseBeforeCommand();
@@ -540,9 +554,21 @@ class Controls {
     const replay = msg.replay;
     const replayControls = document.getElementById('replay-controls');
     replayControls.classList.toggle('hidden', !replay);
-    document.getElementById('board-history-controls')?.classList.toggle('hidden', !!replay);
 
     document.getElementById('btn-new-game').classList.toggle('hidden', !!replay);
+
+    const undoBtn = document.getElementById('btn-undo');
+    const redoBtn = document.getElementById('btn-redo');
+    if (undoBtn) {
+      undoBtn.textContent = 'Undo';
+      undoBtn.title = replay ? 'Step backward in replay' : 'Undo';
+      undoBtn.setAttribute('aria-label', replay ? 'Step backward in replay' : 'Undo');
+    }
+    if (redoBtn) {
+      redoBtn.textContent = 'Redo';
+      redoBtn.title = replay ? 'Step forward in replay' : 'Redo';
+      redoBtn.setAttribute('aria-label', replay ? 'Step forward in replay' : 'Redo');
+    }
 
     const botMove = document.getElementById('btn-bot-move');
     botMove.disabled = !!replay;
@@ -583,6 +609,8 @@ class Controls {
     document.getElementById('btn-replay-prev').disabled = cursor <= 0;
     document.getElementById('btn-replay-next').disabled = cursor >= len;
     document.getElementById('btn-replay-last').disabled = cursor >= len;
+    if (undoBtn) undoBtn.disabled = cursor <= 0;
+    if (redoBtn) redoBtn.disabled = cursor >= len;
   }
 
   startAutoplay() {

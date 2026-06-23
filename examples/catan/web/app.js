@@ -66,6 +66,23 @@ const EDITOR_NUMBER_BAG = [2, 3, 3, 4, 4, 5, 5, 6, 6, 8, 8, 9, 9, 10, 10, 11, 11
 const EDITOR_PORT_BAG = ['lumber', 'brick', 'wool', 'grain', 'ore', 'generic', 'generic', 'generic', 'generic'];
 const LAST_MULTIPLAYER_ROOM_KEY = 'hexfish-last-multiplayer-room-code';
 const PENDING_SHARED_REPLAY_KEY = 'hexfish-pending-shared-replay-slug';
+const PROFILE_USERNAME_KEY = 'hexfish-profile-username';
+const MOVE_SOUND_ENABLED_KEY = 'hexfish-sound-enabled';
+const MOVE_SOUND_ASSETS = {
+  road: 'sounds/road.wav',
+  settlement: 'sounds/settlement.wav',
+  city: 'sounds/city.wav',
+  roll: 'sounds/dice.mp3',
+  robber: 'sounds/robber.wav',
+  card: 'sounds/card.wav',
+  trade: 'sounds/trade.wav',
+  discard: 'sounds/discard.wav',
+  end: 'sounds/end.wav',
+  generic: 'sounds/generic.wav',
+};
+const MOVE_SOUND_KINDS = Object.keys(MOVE_SOUND_ASSETS);
+const CATAN_ROLL_ACTION = 180;
+const CATAN_END_TURN_ACTION = 181;
 const BASE_DOCUMENT_TITLE = document.title || 'HexFish';
 const MULTIPLAYER_TURN_DOCUMENT_TITLE = 'Your turn - HexFish';
 const MULTIPLAYER_TURN_TITLE_FLASH_MS = 900;
@@ -113,6 +130,15 @@ let previousFrameHands = { analysis: null, replay: null };
 let activeView = 'play-setup';
 let selectedSingleplayerHumanPlayer = 0;
 let selectedMultiplayerHumanPlayer = 0;
+let profileUsername = readStoredProfileUsername();
+let pendingProfileSave = false;
+let moveSoundEnabled = readStoredMoveSoundEnabled();
+let moveSoundUnlocked = false;
+let moveSoundAudios = new Map();
+let lastLiveMoveSoundSignature = null;
+let lastLiveMoveSoundLength = 0;
+let suppressNextLiveMoveSound = true;
+let autoRollEndEnabled = false;
 let selectedPlayMode = 'bot';
 let selectedPlayDifficulty = 5;
 const initialUrlParams = new URLSearchParams(window.location.search);
@@ -129,6 +155,8 @@ let multiplayerLobbyRooms = [];
 let lastMultiplayerRoomCode = normalizeRoomCode(initialUrlRoomCode || readLastMultiplayerRoomCode());
 let multiplayerInviteCopiedCode = '';
 let shownMultiplayerReplayShareSlug = '';
+let savedGameOverReplayLink = '';
+let copiedGameOverReplayLink = '';
 let createRoomSettings = {
   code: '',
   isPublic: true,
@@ -143,6 +171,7 @@ let playMode = {
   humanPlayer: 0,
   botThinking: false,
   forcedMoveKey: null,
+  autoRollEndKey: null,
   pendingHumanMove: false,
   multiplayerRoom: null,
   multiplayerStatus: '',
@@ -152,6 +181,7 @@ let serverSingleplayerHumanPlayer = undefined;
 let multiplayerTurnTitleTimer = null;
 let multiplayerTurnTitleActive = false;
 let nativeAdScriptRequested = false;
+window.hexfishProfileUsername = profileUsername || '';
 
 function loadNativeAdScript() {
   if (nativeAdScriptRequested) return;
@@ -186,18 +216,17 @@ function guestReplayAnalysisLocked() {
 }
 
 function syncGuestUiState() {
-  const guest = guestMode();
-  document.getElementById('singleplayer-setup-section')?.classList.toggle('hidden', guest);
+  document.getElementById('singleplayer-setup-section')?.classList.remove('hidden');
   const startSingleplayer = document.getElementById('btn-start-play-game');
   if (startSingleplayer) {
-    startSingleplayer.disabled = guest;
-    startSingleplayer.setAttribute('aria-disabled', String(guest));
+    startSingleplayer.disabled = false;
+    startSingleplayer.setAttribute('aria-disabled', 'false');
+    startSingleplayer.title = guestSingleplayerDifficultyLocked() ? 'Sign in to use difficulty 6 or higher.' : '';
   }
+}
 
-  if (guest) {
-    selectedPlayMode = 'multiplayer';
-    if (!playMode.active) playMode.mode = 'multiplayer';
-  }
+function guestSingleplayerDifficultyLocked() {
+  return guestMode() && selectedPlayDifficulty >= 6;
 }
 
 function prepareGuestMultiplayerEntry() {
@@ -239,8 +268,15 @@ function signInFromGuestRequiredModal() {
 
 function showGuestFeatureBlocked(feature) {
   if (!guestMode()) return false;
+  if (feature === 'Singleplayer') return showGuestSingleplayerDifficultyBlocked();
   if (guestMultiplayerMode()) prepareGuestMultiplayerEntry();
   showGuestSignInRequiredModal(feature);
+  return true;
+}
+
+function showGuestSingleplayerDifficultyBlocked() {
+  if (!guestSingleplayerDifficultyLocked()) return false;
+  showGuestSignInRequiredModal('Difficulty 6 or higher');
   return true;
 }
 
@@ -268,6 +304,98 @@ function signInToAnalyzeGuestReplay() {
   showGuestSignInRequiredModal('Analysis');
 }
 
+function handleTopbarBrandClick() {
+  if (window.hexfishAuthSignedIn) {
+    showPlayView();
+    return;
+  }
+  if (typeof window.hexfishShowLandingPage === 'function') {
+    window.hexfishShowLandingPage();
+  }
+}
+
+function localProfileName() {
+  return profileUsername || '';
+}
+
+function setProfileStatus(message, isError = false) {
+  const status = document.getElementById('profile-username-status');
+  if (!status) return;
+  status.textContent = message || '';
+  status.classList.toggle('text-accent', !!isError);
+  status.classList.toggle('text-gray-400', !isError);
+}
+
+function updateProfileUi() {
+  const btn = document.getElementById('btn-profile');
+  if (btn) {
+    btn.textContent = profileUsername || 'Profile';
+    btn.title = guestMode()
+      ? 'Sign in to change your username.'
+      : profileUsername ? `Profile: ${profileUsername}` : 'Profile';
+  }
+  const input = document.getElementById('profile-username-input');
+  if (input && document.getElementById('profile-modal')?.classList.contains('hidden')) {
+    input.value = profileUsername;
+  }
+  if (currentState?.state?.frame) {
+    updatePlayerPanel(0, currentState.state);
+    updatePlayerPanel(1, currentState.state);
+  }
+}
+
+function setProfileUsername(username, persist = true) {
+  profileUsername = validProfileUsername(username);
+  window.hexfishProfileUsername = profileUsername;
+  window.hexfishUsername = profileUsername;
+  if (persist) writeStoredProfileUsername(profileUsername);
+  updateProfileUi();
+}
+
+function showProfileModal() {
+  if (guestMode()) {
+    showGuestSignInRequiredModal('Changing your username');
+    return;
+  }
+  const modal = document.getElementById('profile-modal');
+  const input = document.getElementById('profile-username-input');
+  if (!modal || !input) return;
+  input.value = profileUsername;
+  setProfileStatus('');
+  modal.classList.remove('hidden');
+  modal.classList.add('flex');
+  input.focus();
+  input.select();
+}
+
+function hideProfileModal() {
+  const modal = document.getElementById('profile-modal');
+  if (!modal) return;
+  modal.classList.add('hidden');
+  modal.classList.remove('flex');
+  pendingProfileSave = false;
+  const save = document.getElementById('btn-save-profile');
+  if (save) save.disabled = false;
+}
+
+function saveProfileUsername() {
+  if (guestMode()) {
+    showGuestSignInRequiredModal('Changing your username');
+    return;
+  }
+  const input = document.getElementById('profile-username-input');
+  const save = document.getElementById('btn-save-profile');
+  const username = validProfileUsername(input?.value);
+  if (!username) {
+    setProfileStatus('Use 3-24 letters, numbers, dashes, or underscores.', true);
+    return;
+  }
+  pendingProfileSave = true;
+  if (save) save.disabled = true;
+  setProfileStatus('Saving...');
+  session.send({ type: 'SetUsername', username });
+}
+
 controls.isAnalysisBlocked = (target) => (
   guestSharedReplayMode() && (target === 'replay' || !!currentState?.replay)
 );
@@ -281,6 +409,8 @@ function setServerSingleplayerHumanPlayer(player) {
 }
 
 controls.onNewGame = () => {
+  hideGameOverModal();
+  clearSavedGameOverReplayLink();
   if (activeView === 'play') {
     if (playMultiplayerActive()) {
       leaveMultiplayerRoom(false, true);
@@ -290,6 +420,7 @@ controls.onNewGame = () => {
     playMode.mode = selectedPlayMode;
     playMode.botThinking = false;
     playMode.forcedMoveKey = null;
+    playMode.autoRollEndKey = null;
     playMode.pendingHumanMove = false;
     playMode.multiplayerRoom = null;
     playMode.multiplayerStatus = '';
@@ -305,6 +436,7 @@ controls.onNewGame = () => {
   playMode.mode = selectedPlayMode;
   playMode.botThinking = false;
   playMode.forcedMoveKey = null;
+  playMode.autoRollEndKey = null;
   playMode.pendingHumanMove = false;
   mctsPanel.clear();
   board.clearSearchHighlights();
@@ -379,6 +511,110 @@ function activeActionLogLength(msg) {
 
 function activeActionLogIndex(msg) {
   return activeActionLogLength(msg) - 1;
+}
+
+function readStoredMoveSoundEnabled() {
+  try {
+    const value = window.localStorage?.getItem(MOVE_SOUND_ENABLED_KEY);
+    return value == null ? true : value !== 'false';
+  } catch (_error) {
+    return true;
+  }
+}
+
+function writeStoredMoveSoundEnabled(enabled) {
+  try {
+    window.localStorage?.setItem(MOVE_SOUND_ENABLED_KEY, enabled ? 'true' : 'false');
+  } catch (_error) {
+    // Storage may be unavailable in private or embedded contexts.
+  }
+}
+
+function normalizeMoveSoundKind(kind) {
+  return Object.prototype.hasOwnProperty.call(MOVE_SOUND_ASSETS, kind) ? kind : 'generic';
+}
+
+function moveSoundAudio(kind) {
+  const normalized = normalizeMoveSoundKind(kind);
+  let audio = moveSoundAudios.get(normalized);
+  if (!audio) {
+    audio = new Audio(MOVE_SOUND_ASSETS[normalized]);
+    audio.preload = 'auto';
+    audio.volume = 0.38;
+    moveSoundAudios.set(normalized, audio);
+  }
+  return audio;
+}
+
+function preloadMoveSounds() {
+  for (const kind of MOVE_SOUND_KINDS) {
+    moveSoundAudio(kind).load();
+  }
+}
+
+function unlockMoveSounds() {
+  if (moveSoundUnlocked) return;
+  moveSoundUnlocked = true;
+  if (moveSoundEnabled) preloadMoveSounds();
+}
+
+function updateMoveSoundToggle() {
+  const toggle = document.getElementById('sound-toggle');
+  if (toggle) toggle.checked = moveSoundEnabled;
+  const button = document.getElementById('btn-board-sound');
+  if (button) {
+    button.title = moveSoundEnabled ? 'Mute' : 'Unmute';
+    button.setAttribute('aria-label', button.title);
+    button.setAttribute('aria-pressed', moveSoundEnabled ? 'true' : 'false');
+    button.classList.toggle('muted', !moveSoundEnabled);
+  }
+}
+
+function setMoveSoundEnabled(enabled) {
+  moveSoundEnabled = !!enabled;
+  writeStoredMoveSoundEnabled(moveSoundEnabled);
+  updateMoveSoundToggle();
+  if (moveSoundEnabled && moveSoundUnlocked) preloadMoveSounds();
+}
+
+function playMoveSound(kind) {
+  if (!moveSoundEnabled || !moveSoundUnlocked) return;
+  const audio = moveSoundAudio(kind);
+  try {
+    audio.currentTime = 0;
+  } catch (_error) {
+    // Some browsers reject seeking before metadata is ready; playback can still proceed.
+  }
+  const play = audio.play();
+  if (play && typeof play.catch === 'function') play.catch(() => {});
+}
+
+function liveMoveSoundSignature(msg) {
+  const actionLog = Array.isArray(msg?.action_log) ? msg.action_log : [];
+  const cursors = actionLogCursors(msg);
+  const soundKinds = Array.isArray(msg?.action_log_sound_kinds) ? msg.action_log_sound_kinds : [];
+  return actionLog
+    .map((label, index) => `${cursors[index] ?? index + 1}:${soundKinds[index] || 'generic'}:${label}`)
+    .join('|');
+}
+
+function maybePlayMoveSoundForGameState(msg) {
+  if (msg?.replay) return;
+  const actionLog = Array.isArray(msg?.action_log) ? msg.action_log : [];
+  const soundKinds = Array.isArray(msg?.action_log_sound_kinds) ? msg.action_log_sound_kinds : [];
+  const signature = liveMoveSoundSignature(msg);
+  const previousSignature = lastLiveMoveSoundSignature;
+  const previousLength = lastLiveMoveSoundLength;
+
+  lastLiveMoveSoundSignature = signature;
+  lastLiveMoveSoundLength = actionLog.length;
+
+  if (suppressNextLiveMoveSound || previousSignature == null) {
+    suppressNextLiveMoveSound = false;
+    return;
+  }
+  if (!actionLog.length || signature === previousSignature || actionLog.length < previousLength) return;
+  playMoveSound(soundKinds[actionLog.length - 1] || 'generic');
 }
 
 function playViewActive() {
@@ -464,17 +700,18 @@ function playBotName(level = selectedPlayDifficulty) {
 
 function updatePlayBotLabels() {
   const heading = document.getElementById('play-setup-title');
-  if (heading) heading.textContent = 'You Vs HexFish';
+  if (heading) heading.textContent = 'Challenge HexFish';
 }
 
 function playNameForPlayer(idx) {
   if (!playViewActive()) return null;
+  const localName = localProfileName();
   if (playMultiplayerActive()) {
     const roomName = String(playMode.multiplayerRoom?.players?.[idx]?.name || '').trim();
     if (roomName) return roomName;
-    return idx === playMode.humanPlayer ? 'You' : 'Opponent';
+    return idx === playMode.humanPlayer ? (localName || 'You') : 'Opponent';
   }
-  return idx === playMode.humanPlayer ? 'You' : playBotName();
+  return idx === playMode.humanPlayer ? (localName || 'You') : playBotName();
 }
 
 function playerDisplayName(idx) {
@@ -529,6 +766,49 @@ function playForcedMoveKey(msg, action) {
   return `${logHistoryCursor(msg)}:${msg.current_player}:${msg.phase}:${action}`;
 }
 
+function isAutoRollEndAction(action) {
+  return action === CATAN_ROLL_ACTION || action === CATAN_END_TURN_ACTION;
+}
+
+function autoRollEndForcedAction(msg) {
+  if (!autoRollEndEnabled || !playViewActive() || playMode.pendingHumanMove) return null;
+  if (!msg || msg.replay || msg.is_terminal || msg.is_chance) return null;
+  if (msg.current_player !== playMode.humanPlayer) return null;
+  if (!Array.isArray(msg.legal_actions) || msg.legal_actions.length !== 1) return null;
+  if (playMultiplayerActive() && (
+    multiplayerTimeoutWinner() != null ||
+    !multiplayerRoomFull() ||
+    !multiplayerOpponentConnected()
+  )) return null;
+
+  const action = Number(msg.legal_actions[0]?.action);
+  return isAutoRollEndAction(action) ? action : null;
+}
+
+function maybeAutoRollEnd(msg) {
+  const action = autoRollEndForcedAction(msg);
+  if (action == null) {
+    playMode.autoRollEndKey = null;
+    return false;
+  }
+  const key = playForcedMoveKey(msg, action);
+  if (playMode.autoRollEndKey === key) return true;
+  playMode.autoRollEndKey = key;
+  sendPlayAction(action);
+  return true;
+}
+
+function updateAutoRollEndToggle() {
+  const toggle = document.getElementById('auto-roll-end-toggle');
+  if (toggle) toggle.checked = autoRollEndEnabled;
+}
+
+function setAutoRollEndEnabled(enabled) {
+  autoRollEndEnabled = !!enabled;
+  updateAutoRollEndToggle();
+  if (autoRollEndEnabled) maybeAutoRollEnd(currentState);
+}
+
 function sendPlayAction(action) {
   if (playMultiplayerActive() && multiplayerTimeoutWinner() != null) return;
   const msg = playMultiplayerActive()
@@ -557,6 +837,8 @@ function setPlayDifficulty(level) {
   }
   if (label) label.title = detail;
   updatePlayBotLabels();
+  syncGuestUiState();
+  if (guestSingleplayerDifficultyLocked()) showGuestSingleplayerDifficultyBlocked();
 }
 
 function initPlayDifficultySelect() {
@@ -574,8 +856,9 @@ function initPlayDifficultySelect() {
   setPlayDifficulty(selectedPlayDifficulty);
 }
 
-function normalizePlaySide(player) {
-  return player === 1 ? 1 : 0;
+function normalizePlaySide(player, scope = 'singleplayer') {
+  if (scope === 'multiplayer' && player === 'random') return 'random';
+  return Number(player) === 1 ? 1 : 0;
 }
 
 function playSideScope(btn) {
@@ -586,9 +869,13 @@ function selectedPlaySideForScope(scope) {
   return scope === 'multiplayer' ? selectedMultiplayerHumanPlayer : selectedSingleplayerHumanPlayer;
 }
 
+function playSideButtonValue(btn) {
+  return btn?.dataset?.player === 'random' ? 'random' : Number(btn?.dataset?.player);
+}
+
 function updatePlaySideButtons() {
   for (const btn of document.querySelectorAll('.play-side-btn')) {
-    const active = Number(btn.dataset.player) === selectedPlaySideForScope(playSideScope(btn));
+    const active = playSideButtonValue(btn) === selectedPlaySideForScope(playSideScope(btn));
     btn.classList.toggle('bg-accent', active);
     btn.classList.toggle('text-white', active);
     btn.classList.toggle('bg-bg-3', !active);
@@ -599,7 +886,7 @@ function updatePlaySideButtons() {
 }
 
 function setPlaySide(player, scope = 'singleplayer') {
-  const side = normalizePlaySide(player);
+  const side = normalizePlaySide(player, scope);
   if (scope === 'multiplayer') {
     selectedMultiplayerHumanPlayer = side;
   } else {
@@ -616,6 +903,38 @@ function normalizeRoomCode(code) {
 
 function normalizeReplaySlug(slug) {
   return String(slug || '').trim().replace(/[^A-Za-z0-9_-]/g, '').slice(0, 128);
+}
+
+function normalizeProfileUsername(username) {
+  return String(username || '')
+    .trim()
+    .replace(/[^A-Za-z0-9_-]/g, '')
+    .slice(0, 24);
+}
+
+function validProfileUsername(username) {
+  const normalized = normalizeProfileUsername(username);
+  return normalized.length >= 3 ? normalized : '';
+}
+
+function readStoredProfileUsername() {
+  try {
+    return validProfileUsername(window.localStorage?.getItem(PROFILE_USERNAME_KEY));
+  } catch (_error) {
+    return '';
+  }
+}
+
+function writeStoredProfileUsername(username) {
+  try {
+    if (username) {
+      window.localStorage?.setItem(PROFILE_USERNAME_KEY, username);
+    } else {
+      window.localStorage?.removeItem(PROFILE_USERNAME_KEY);
+    }
+  } catch (_error) {
+    // Storage may be unavailable in private or embedded contexts.
+  }
 }
 
 function currentSharedReplaySlugFromUrl() {
@@ -675,7 +994,7 @@ function reconnectRoomCode() {
 }
 
 function setPlayModeChoice(mode) {
-  selectedPlayMode = guestMode() ? 'multiplayer' : mode === 'multiplayer' ? 'multiplayer' : 'bot';
+  selectedPlayMode = mode === 'multiplayer' ? 'multiplayer' : 'bot';
   if (!playMode.active) playMode.mode = selectedPlayMode;
   for (const btn of document.querySelectorAll('.play-mode-btn')) {
     const active = btn.dataset.playMode === selectedPlayMode;
@@ -770,18 +1089,13 @@ function updateVictoryBadge(idx, playerFrame) {
 }
 
 function updateMultiplayerTimeoutWinnerBadge() {
-  const winner = multiplayerWinner();
   for (let player = 0; player < 2; player++) {
     const card = document.getElementById(`player-${player}`);
     const vpEl = document.getElementById(`p${player}-vp`);
     if (!card || !vpEl) continue;
-    const isWinner = playMultiplayerActive() && winner === player;
-    card.classList.toggle('timeout-winner', isWinner);
-    vpEl.classList.toggle('win-badge', isWinner);
-    if (isWinner) {
-      vpEl.textContent = 'WIN';
-      vpEl.title = `${playNameForPlayer(player) || `P${player + 1}`} wins`;
-    } else if (currentState?.state?.frame?.players?.[player]) {
+    card.classList.remove('timeout-winner');
+    vpEl.classList.remove('win-badge');
+    if (currentState?.state?.frame?.players?.[player]) {
       updateVictoryBadge(player, currentState.state.frame.players[player]);
     }
   }
@@ -833,20 +1147,15 @@ function updateMultiplayerClockTimer() {
 }
 
 function updateMultiplayerResultBanner() {
-  const banner = document.getElementById('result-banner');
-  if (!banner) return;
+  hideBottomResultBanner();
   const winner = multiplayerTimeoutWinner();
   if (playMultiplayerActive() && winner != null) {
-    banner.textContent = multiplayerTimeoutResultText();
-    banner.style.background = playerColor(winner) || '';
-    banner.classList.remove('hidden');
     updateMultiplayerTimeoutWinnerBadge();
     controls.onGameOver();
   } else if (!currentState?.result) {
-    banner.classList.add('hidden');
-    banner.style.background = '';
     updateMultiplayerTimeoutWinnerBadge();
   }
+  updateGameOverModal(currentState);
   updateActionPanelStatus(currentState, false);
 }
 
@@ -1138,10 +1447,12 @@ function updateMultiplayerResignButton() {
 }
 
 function resetMultiplayerState(statusText = '') {
+  clearSavedGameOverReplayLink();
   playMode.active = false;
   playMode.mode = 'multiplayer';
   playMode.botThinking = false;
   playMode.forcedMoveKey = null;
+  playMode.autoRollEndKey = null;
   playMode.pendingHumanMove = false;
   playMode.multiplayerRoom = null;
   playMode.multiplayerStatus = statusText;
@@ -1163,9 +1474,12 @@ function createMultiplayerRoom() {
   setPlayModeChoice('multiplayer');
   hideCreateMultiplayerRoomModal();
   resetMultiplayerState(`Creating room ${code}...`);
+  const preferredPlayer = selectedMultiplayerHumanPlayer === 0 || selectedMultiplayerHumanPlayer === 1
+    ? selectedMultiplayerHumanPlayer
+    : null;
   session.send({
     type: 'CreateMultiplayerRoom',
-    preferred_player: selectedMultiplayerHumanPlayer,
+    preferred_player: preferredPlayer,
     code,
     is_public: createRoomSettings.isPublic,
     time_minutes: createRoomSettings.timeMinutes,
@@ -1279,6 +1593,119 @@ function sharedReplayUrl(slug) {
   return url.toString();
 }
 
+function hideBottomResultBanner() {
+  const banner = document.getElementById('result-banner');
+  if (!banner) return;
+  banner.classList.add('hidden');
+  banner.style.background = '';
+  banner.textContent = '';
+}
+
+function hideGameOverModal() {
+  const modal = document.getElementById('game-over-modal');
+  if (!modal) return;
+  modal.classList.add('hidden');
+  modal.classList.remove('flex');
+}
+
+function clearSavedGameOverReplayLink() {
+  savedGameOverReplayLink = '';
+  copiedGameOverReplayLink = '';
+  updateGameOverReplayLink();
+}
+
+function currentGameOverReplayLink() {
+  const multiplayerSlug = normalizeReplaySlug(playMode.multiplayerRoom?.replay_share_slug);
+  if (playMultiplayerActive() && multiplayerSlug) return sharedReplayUrl(multiplayerSlug);
+  return savedGameOverReplayLink;
+}
+
+function gameOverWinnerText(msg = currentState) {
+  if (playMultiplayerActive() && multiplayerWinner() != null) return multiplayerResultText();
+  if (msg?.is_terminal && msg.result) return formatResultBanner(msg.result);
+  return 'Game over';
+}
+
+function shouldShowGameOverModal(msg = currentState) {
+  const boardTab = activeView === 'play' || activeView === 'analysis';
+  if (!boardTab || msg?.replay) return false;
+  if (playMultiplayerActive() && multiplayerWinner() != null) return true;
+  return !!(msg?.is_terminal && msg.result);
+}
+
+function updateGameOverReplayLink() {
+  const input = document.getElementById('game-over-replay-link');
+  const copyBtn = document.getElementById('btn-copy-game-over-replay');
+  if (!input || !copyBtn) return;
+  const link = currentGameOverReplayLink();
+  input.value = link || '';
+  input.placeholder = link ? '' : 'Saving replay link...';
+  copyBtn.disabled = !link;
+  copyBtn.textContent = link && copiedGameOverReplayLink === link ? 'Copied' : 'Copy';
+}
+
+function updateGameOverModal(msg = currentState) {
+  const modal = document.getElementById('game-over-modal');
+  const winner = document.getElementById('game-over-winner');
+  const primary = document.getElementById('btn-game-over-primary');
+  if (!modal || !winner || !primary) return;
+
+  if (!shouldShowGameOverModal(msg)) {
+    hideGameOverModal();
+    return;
+  }
+
+  winner.textContent = gameOverWinnerText(msg);
+  const action = activeView === 'play' ? 'lobby' : 'new-game';
+  primary.dataset.action = action;
+  primary.textContent = action === 'lobby' ? 'Lobby' : 'New Game';
+  updateGameOverReplayLink();
+  modal.classList.remove('hidden');
+  modal.classList.add('flex');
+}
+
+async function copyGameOverReplayLink() {
+  const input = document.getElementById('game-over-replay-link');
+  const link = input?.value || currentGameOverReplayLink();
+  if (!link) return;
+  try {
+    await navigator.clipboard.writeText(link);
+    copiedGameOverReplayLink = link;
+    updateGameOverReplayLink();
+  } catch (_error) {
+    input?.focus();
+    input?.select();
+  }
+}
+
+function returnToPlayLobbyFromGameOver() {
+  hideGameOverModal();
+  clearSavedGameOverReplayLink();
+  controls.stopAutoplay();
+  controls.pauseBeforeCommand();
+  controls.onNewGame?.();
+}
+
+function startNewGameFromGameOver() {
+  hideGameOverModal();
+  clearSavedGameOverReplayLink();
+  controls.stopAutoplay();
+  controls.pauseBeforeCommand();
+  const shouldStartNewGame = controls.onNewGame?.() !== false;
+  if (shouldStartNewGame) {
+    session.send({ type: 'NewGame', seed: null });
+  }
+}
+
+function handleGameOverPrimaryAction() {
+  const action = document.getElementById('btn-game-over-primary')?.dataset.action;
+  if (action === 'lobby') {
+    returnToPlayLobbyFromGameOver();
+  } else {
+    startNewGameFromGameOver();
+  }
+}
+
 function sessionReadyForSharedReplay() {
   return !!(
     session.connected &&
@@ -1350,7 +1777,7 @@ function maybeShowMultiplayerReplayShareModal(room) {
   const slug = normalizeReplaySlug(room?.replay_share_slug);
   if (!slug || shownMultiplayerReplayShareSlug === slug) return;
   shownMultiplayerReplayShareSlug = slug;
-  showReplayShareModal(sharedReplayUrl(slug), false);
+  updateGameOverModal(currentState);
 }
 
 function hideReplayShareModal() {
@@ -1368,6 +1795,7 @@ function hideMultiplayerAnalysisGuard() {
 }
 
 function showMultiplayerAnalysisGuard() {
+  hideGameOverModal();
   activeView = 'analysis-guard';
   setTabState('analysis');
   setEditorChrome(false);
@@ -1425,6 +1853,7 @@ function handleMultiplayerRoomMessage(msg) {
   playMode.humanPlayer = localPlayer;
   playMode.botThinking = false;
   playMode.forcedMoveKey = null;
+  playMode.autoRollEndKey = null;
   playMode.pendingHumanMove = false;
   playMode.rejoiningRoom = false;
   pendingReconnectRoomCode = '';
@@ -1492,6 +1921,7 @@ session.on('GameState', (msg) => {
     }
   } else {
     analysisState = msg;
+    maybePlayMoveSoundForGameState(msg);
     if (pendingSharedReplaySlug && !loadingSharedReplaySlug) {
       maybeLoadSharedReplayFromUrl();
       return;
@@ -1669,24 +2099,15 @@ function renderGameState(msg) {
   document.getElementById('btn-undo').disabled = playBotTurn || playMultiplayerActive() || !msg.can_undo;
   document.getElementById('btn-redo').disabled = playBotTurn || playMultiplayerActive() || !msg.can_redo;
 
-  // Result banner
-  const banner = document.getElementById('result-banner');
+  // Game over modal
+  hideBottomResultBanner();
   const timeoutWinner = multiplayerTimeoutWinner();
   if (timeoutWinner != null) {
-    banner.textContent = multiplayerTimeoutResultText();
-    banner.style.background = playerColor(timeoutWinner) || '';
-    banner.classList.remove('hidden');
     controls.onGameOver();
   } else if (msg.is_terminal && msg.result) {
-    const winner = parseResultWinner(msg.result);
-    banner.textContent = formatResultBanner(msg.result);
-    banner.style.background = playerColor(winner) || '';
-    banner.classList.remove('hidden');
     controls.onGameOver();
-  } else {
-    banner.classList.add('hidden');
-    banner.style.background = '';
   }
+  updateGameOverModal(msg);
 
   controls.onStateUpdate(msg);
   updateViewChrome(msg);
@@ -1697,9 +2118,12 @@ function renderGameState(msg) {
 function updateActionPanelStatus(msg, playBotTurn) {
   const title = document.getElementById('action-panel-title');
   const status = document.getElementById('play-status');
+  const autoRollEndControl = document.getElementById('auto-roll-end-control');
   if (!title || !status) return;
+  autoRollEndControl?.classList.toggle('hidden', !playViewActive());
 
   if (activeView === 'replay-board') {
+    autoRollEndControl?.classList.add('hidden');
     title.textContent = 'Replay';
     status.textContent = replayBoardStatusText;
     status.title = '';
@@ -1708,6 +2132,7 @@ function updateActionPanelStatus(msg, playBotTurn) {
   }
 
   if (!playViewActive()) {
+    autoRollEndControl?.classList.add('hidden');
     title.textContent = 'Legal Moves';
     status.textContent = '';
     status.title = '';
@@ -1752,7 +2177,7 @@ function updateActionPanelStatus(msg, playBotTurn) {
     return;
   }
 
-  title.textContent = msg?.is_terminal ? 'Play' : 'Legal Moves';
+  title.textContent = 'Play';
   status.textContent = '';
   status.title = '';
   status.classList.add('hidden');
@@ -2104,6 +2529,23 @@ session.on('ReplayList', (msg) => {
   renderReplayList(msg.entries || []);
 });
 
+session.on('ReplaySaved', (msg) => {
+  const slug = normalizeReplaySlug(msg.entry?.share_slug);
+  savedGameOverReplayLink = slug ? sharedReplayUrl(slug) : '';
+  copiedGameOverReplayLink = '';
+  updateGameOverModal(currentState);
+});
+
+session.on('Profile', (msg) => {
+  setProfileUsername(msg.username || '', true);
+  if (pendingProfileSave) {
+    pendingProfileSave = false;
+    const save = document.getElementById('btn-save-profile');
+    if (save) save.disabled = false;
+    setProfileStatus('Saved.');
+  }
+});
+
 session.on('Subtree', (msg) => {
   mctsPanel.showSubtree(msg.tree);
 });
@@ -2129,6 +2571,7 @@ session.on('MultiplayerLobby', (msg) => {
 session.on('BotAction', (msg) => {
   playMode.botThinking = false;
   playMode.forcedMoveKey = null;
+  playMode.autoRollEndKey = null;
   playMode.pendingHumanMove = false;
   if (msg.snapshot) {
     mctsPanel.updateSnapshot(msg.snapshot, msg.action_labels || [], currentState?.current_player ?? 0);
@@ -2153,9 +2596,16 @@ session.on('Error', (msg) => {
     pendingReconnectRoomCode = '';
     playMode.rejoiningRoom = false;
   }
+  if (pendingProfileSave) {
+    pendingProfileSave = false;
+    const save = document.getElementById('btn-save-profile');
+    if (save) save.disabled = false;
+    setProfileStatus(msg.message, true);
+  }
   controls.onSearchError();
   playMode.botThinking = false;
   playMode.forcedMoveKey = null;
+  playMode.autoRollEndKey = null;
   playMode.pendingHumanMove = false;
   updateActionPanelStatus(currentState, isPlayBotTurn(currentState));
   updateMultiplayerTurnAttention();
@@ -2168,10 +2618,12 @@ session.on('Error', (msg) => {
 });
 
 session.on('Disconnected', () => {
+  suppressNextLiveMoveSound = true;
   loadingSharedReplaySlug = '';
   controls.onSearchError();
   playMode.botThinking = false;
   playMode.forcedMoveKey = null;
+  playMode.autoRollEndKey = null;
   playMode.pendingHumanMove = false;
   updateMultiplayerTurnAttention();
   if (playMode.mode === 'multiplayer' && playMode.multiplayerRoom?.code && appStarted) {
@@ -2185,6 +2637,7 @@ session.on('Disconnected', () => {
 });
 
 session.on('Connected', () => {
+  session.send({ type: 'GetProfile' });
   if (pendingReconnectRoomCode) {
     session.send({ type: 'JoinMultiplayerRoom', code: pendingReconnectRoomCode });
     return;
@@ -2253,6 +2706,7 @@ function showPlayView() {
 
 function showPlaySetupView() {
   hideMultiplayerAnalysisGuard();
+  hideGameOverModal();
   activeView = 'play-setup';
   setServerSingleplayerHumanPlayer(null);
   setTabState('play');
@@ -2297,6 +2751,7 @@ function showAnalysisView() {
 }
 
 function showReplayView() {
+  hideGameOverModal();
   if (guestSharedReplayMode()) {
     if (replayState || currentState?.replay) {
       showReplayBoardView();
@@ -2335,6 +2790,7 @@ function showReplayView() {
 
 function showReplayBoardView() {
   hideMultiplayerAnalysisGuard();
+  hideGameOverModal();
   activeView = 'replay-board';
   setServerSingleplayerHumanPlayer(null);
   setTabState('replay');
@@ -2356,6 +2812,7 @@ function showReplayBoardView() {
 function showEditorView() {
   if (showGuestFeatureBlocked('Editor')) return;
   hideMultiplayerAnalysisGuard();
+  hideGameOverModal();
   if (multiplayerGameOpen()) {
     rememberMultiplayerRoomForPlayTabReconnect();
     leaveMultiplayerRoom(false, true);
@@ -2483,13 +2940,16 @@ function updateViewChrome(msg) {
 }
 
 function startPlayGame() {
-  if (showGuestFeatureBlocked('Singleplayer')) return;
+  if (showGuestSingleplayerDifficultyBlocked()) return;
+  hideGameOverModal();
+  clearSavedGameOverReplayLink();
   setPlayModeChoice('bot');
   playMode.active = true;
   playMode.mode = 'bot';
   playMode.humanPlayer = selectedSingleplayerHumanPlayer;
   playMode.botThinking = false;
   playMode.forcedMoveKey = null;
+  playMode.autoRollEndKey = null;
   playMode.pendingHumanMove = false;
   playMode.multiplayerRoom = null;
   playMode.multiplayerStatus = '';
@@ -2516,6 +2976,7 @@ function startPlayGame() {
 }
 
 function runPlayAutomation(msg) {
+  if (maybeAutoRollEnd(msg)) return;
   if (playMultiplayerActive()) {
     playMode.botThinking = false;
     playMode.forcedMoveKey = null;
@@ -2981,6 +3442,7 @@ function startEditedGame() {
   playMode.active = false;
   playMode.botThinking = false;
   playMode.forcedMoveKey = null;
+  playMode.autoRollEndKey = null;
   playMode.pendingHumanMove = false;
   setEditorStatus('Starting');
   session.send({
@@ -2998,8 +3460,10 @@ document.getElementById('tab-play').addEventListener('click', showPlayView);
 document.getElementById('tab-board').addEventListener('click', showAnalysisView);
 document.getElementById('tab-replay').addEventListener('click', showReplayView);
 document.getElementById('tab-editor').addEventListener('click', showEditorView);
+document.getElementById('btn-topbar-brand')?.addEventListener('click', handleTopbarBrandClick);
 document.getElementById('btn-refresh-replays').addEventListener('click', requestReplayList);
 document.getElementById('btn-start-play-game').addEventListener('click', startPlayGame);
+document.getElementById('btn-profile')?.addEventListener('click', showProfileModal);
 document.getElementById('btn-create-multiplayer-room')?.addEventListener('click', openCreateMultiplayerRoom);
 document.getElementById('btn-join-multiplayer-room')?.addEventListener('click', () => joinMultiplayerRoom());
 document.getElementById('btn-reconnect-multiplayer-room')?.addEventListener('click', reconnectMultiplayerRoom);
@@ -3010,6 +3474,11 @@ document.getElementById('btn-add-opponent-time-0')?.addEventListener('click', ad
 document.getElementById('btn-add-opponent-time-1')?.addEventListener('click', addOpponentClockTime);
 document.getElementById('btn-close-replay-share-modal')?.addEventListener('click', hideReplayShareModal);
 document.getElementById('btn-copy-replay-share-link')?.addEventListener('click', copyReplayShareModalLink);
+document.getElementById('btn-copy-game-over-replay')?.addEventListener('click', copyGameOverReplayLink);
+document.getElementById('btn-game-over-primary')?.addEventListener('click', handleGameOverPrimaryAction);
+document.getElementById('btn-close-profile-modal')?.addEventListener('click', hideProfileModal);
+document.getElementById('btn-cancel-profile')?.addEventListener('click', hideProfileModal);
+document.getElementById('btn-save-profile')?.addEventListener('click', saveProfileUsername);
 document.getElementById('btn-close-create-multiplayer-room-modal')?.addEventListener('click', hideCreateMultiplayerRoomModal);
 document.getElementById('btn-cancel-create-multiplayer-room')?.addEventListener('click', hideCreateMultiplayerRoomModal);
 document.getElementById('btn-confirm-create-multiplayer-room')?.addEventListener('click', createMultiplayerRoom);
@@ -3040,6 +3509,9 @@ for (const btn of document.querySelectorAll('[data-room-visibility]')) {
 document.getElementById('replay-share-modal')?.addEventListener('click', (event) => {
   if (event.target === event.currentTarget) hideReplayShareModal();
 });
+document.getElementById('profile-modal')?.addEventListener('click', (event) => {
+  if (event.target === event.currentTarget) hideProfileModal();
+});
 document.getElementById('create-multiplayer-room-modal')?.addEventListener('click', (event) => {
   if (event.target === event.currentTarget) hideCreateMultiplayerRoomModal();
 });
@@ -3057,20 +3529,44 @@ document.getElementById('multiplayer-room-code-input')?.addEventListener('input'
 document.getElementById('multiplayer-room-code-input')?.addEventListener('keydown', (event) => {
   if (event.key === 'Enter') joinMultiplayerRoom();
 });
+document.getElementById('profile-username-input')?.addEventListener('input', (event) => {
+  const input = event.target;
+  const normalized = normalizeProfileUsername(input.value);
+  if (input.value !== normalized) input.value = normalized;
+});
+document.getElementById('profile-username-input')?.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') saveProfileUsername();
+});
+document.getElementById('sound-toggle')?.addEventListener('change', (event) => {
+  setMoveSoundEnabled(event.target.checked);
+});
+document.getElementById('btn-board-sound')?.addEventListener('click', () => {
+  setMoveSoundEnabled(!moveSoundEnabled);
+});
+document.getElementById('auto-roll-end-toggle')?.addEventListener('change', (event) => {
+  setAutoRollEndEnabled(event.target.checked);
+});
 document.getElementById('btn-start-edited-game').addEventListener('click', startEditedGame);
 document.getElementById('btn-random-editor-board').addEventListener('click', randomizeEditorBoard);
 for (const btn of document.querySelectorAll('.play-mode-btn')) {
   btn.addEventListener('click', () => setPlayModeChoice(btn.dataset.playMode));
 }
 for (const btn of document.querySelectorAll('.play-side-btn')) {
-  btn.addEventListener('click', () => setPlaySide(Number(btn.dataset.player), playSideScope(btn)));
+  btn.addEventListener('click', () => setPlaySide(btn.dataset.player, playSideScope(btn)));
 }
 initPlayDifficultySelect();
 setPlayModeChoice(selectedPlayMode);
 updatePlaySideButtons();
+updateProfileUi();
+updateMoveSoundToggle();
+updateAutoRollEndToggle();
 initEditorControls();
 initCatanRulesPopover();
 showPlaySetupView();
+
+for (const eventName of ['pointerdown', 'keydown', 'touchstart']) {
+  document.addEventListener(eventName, unlockMoveSounds, { capture: true, once: true });
+}
 
 const boardShellEl = document.getElementById('board-shell');
 if (boardShellEl && window.ResizeObserver) {
@@ -3472,6 +3968,7 @@ function updateDice(state) {
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
     hideReplayShareModal();
+    hideProfileModal();
     hideGuestSignInRequiredModal();
   }
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
@@ -3527,15 +4024,18 @@ window.hexfishStopApp = () => {
 
 document.addEventListener('hexfish-auth-signed-in', () => {
   syncGuestUiState();
+  updateProfileUi();
   window.hexfishStartApp();
 });
 document.addEventListener('hexfish-auth-guest', () => {
   if (guestMultiplayerMode()) enterGuestPlayMode();
   else syncGuestUiState();
+  updateProfileUi();
   window.hexfishStartApp();
 });
 document.addEventListener('hexfish-auth-signed-out', () => {
   syncGuestUiState();
+  updateProfileUi();
   window.hexfishStopApp();
 });
 

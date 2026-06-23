@@ -5,7 +5,12 @@ use hexfish::player::Player;
 use hexfish::server::GamePresenter;
 
 use crate::game;
-use crate::game::action::{ActionId, DISCARD_END, DISCARD_START, ROLL};
+use crate::game::action::{
+    ActionId, BUY_DEV_CARD, CITY_END, CITY_START, DISCARD_END, DISCARD_START, END_TURN,
+    MARITIME_END, MARITIME_START, MONOPOLY_END, MONOPOLY_START, PLAY_KNIGHT, PLAY_ROAD_BUILDING,
+    ROAD_END, ROAD_START, ROBBER_END, ROBBER_START, ROLL, SETTLEMENT_END, SETTLEMENT_START,
+    YOP_END, YOP_START,
+};
 use crate::game::board::Terrain;
 use crate::game::dev_card::{DevCardDeck, DevCardKind};
 use crate::game::dice::Dice;
@@ -439,6 +444,31 @@ impl GamePresenter<GameState> for CatanPresenter {
                 }
             }
             _ => String::new(),
+        }
+    }
+
+    fn action_sound_kind(&self, state: &GameState, action: usize, is_chance: bool) -> &'static str {
+        if is_chance {
+            return match state.phase {
+                Phase::Roll => "roll",
+                Phase::DevCardDraw => "card",
+                _ => "generic",
+            };
+        }
+
+        match action as u8 {
+            SETTLEMENT_START..SETTLEMENT_END => "settlement",
+            ROAD_START..ROAD_END => "road",
+            CITY_START..CITY_END => "city",
+            ROLL => "roll",
+            END_TURN => "end",
+            BUY_DEV_CARD | PLAY_KNIGHT | PLAY_ROAD_BUILDING => "card",
+            YOP_START..YOP_END => "card",
+            MONOPOLY_START..MONOPOLY_END => "card",
+            ROBBER_START..ROBBER_END => "robber",
+            DISCARD_START..DISCARD_END => "discard",
+            MARITIME_START..MARITIME_END => "trade",
+            _ => "generic",
         }
     }
 

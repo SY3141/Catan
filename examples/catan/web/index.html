@@ -21,7 +21,7 @@ tailwind.config = {
   }
 }
 </script>
-<link rel="stylesheet" href="style.css?v=landing-editor-cleanup-20260623">
+<link rel="stylesheet" href="style.css?v=board-sound-toggle-20260623">
 <script
   defer
   crossorigin="anonymous"
@@ -75,9 +75,12 @@ tailwind.config = {
 <div id="app" class="app-shell is-hidden flex flex-col h-full" aria-hidden="true">
   <!-- Header -->
   <header class="flex items-center gap-4 px-4 py-2 bg-bg-2 border-b border-gray-700">
-    <h1 class="topbar-brand text-sm font-semibold text-gray-100">
-      <span class="topbar-mark" aria-hidden="true"></span>
-      <span>HexFish</span>
+    <h1 class="m-0">
+      <button id="btn-topbar-brand" type="button" class="topbar-brand text-sm font-semibold text-gray-100" aria-label="HexFish home">
+        <span class="topbar-mark" aria-hidden="true"></span>
+        <span>HexFish</span>
+        <span id="app-version" class="topbar-version" aria-label="Version V1.0.8">V1.0.8</span>
+      </button>
     </h1>
     <div class="flex items-center gap-1 text-xs" role="tablist" aria-label="Main views">
       <button id="tab-play" class="view-tab active px-2 py-1 rounded text-gray-100 bg-bg-3" type="button" role="tab" aria-selected="true">Play</button>
@@ -89,7 +92,7 @@ tailwind.config = {
     <span id="turn-label" class="text-xs text-gray-500"></span>
     <div id="auth-controls" class="ml-auto flex items-center gap-2">
       <a id="ko-fi-link" href="https://ko-fi.com/hexfish" target="_blank" rel="noopener noreferrer" class="px-2 py-0.5 rounded border border-gray-700 bg-bg text-[10px] font-semibold tracking-wide text-gray-300 hover:text-gray-100 hover:bg-bg-3 transition-colors">Donate</a>
-      <span id="app-version" class="px-2 py-0.5 rounded border border-gray-700 bg-bg text-[10px] font-semibold tracking-wide text-gray-400" aria-label="Version V1.0.7">V1.0.7</span>
+      <button id="btn-profile" type="button" class="px-2 py-0.5 rounded border border-gray-700 bg-bg text-[10px] font-semibold tracking-wide text-gray-300 hover:text-gray-100 hover:bg-bg-3 transition-colors">Profile</button>
       <button id="btn-guest-sign-up" type="button" class="hidden px-2 py-0.5 rounded border border-accent bg-accent text-[10px] font-semibold tracking-wide text-white hover:bg-red-600 transition-colors">Sign up</button>
       <div id="clerk-user-button" class="hidden"></div>
       <span id="clerk-status" class="sr-only" aria-live="polite"></span>
@@ -136,6 +139,9 @@ tailwind.config = {
             </div>
             <button id="btn-catan-rules" class="piece-rules-button" type="button" title="Catan rules" aria-label="Open Catan rules">
               <span class="rules-book-icon" aria-hidden="true"></span>
+            </button>
+            <button id="btn-board-sound" class="board-sound-button" type="button" title="Mute" aria-label="Mute move sounds" aria-pressed="true">
+              <span class="sound-icon" aria-hidden="true"></span>
             </button>
           </div>
           <div id="catan-rules-popover" class="catan-rules-popover hidden" role="dialog" aria-modal="false" aria-labelledby="catan-rules-title">
@@ -218,10 +224,33 @@ tailwind.config = {
               </div>
             </div>
           </div>
+          <div id="game-over-modal" class="hidden absolute inset-0 z-[70] items-center justify-center bg-black/60 px-4" role="dialog" aria-modal="true" aria-labelledby="game-over-title">
+            <div class="game-over-dialog w-full max-w-sm rounded border border-gray-700 bg-bg-2 p-4 shadow-xl">
+              <div class="mb-3">
+                <h2 id="game-over-title" class="text-sm font-semibold text-gray-100">Game Over</h2>
+                <p id="game-over-winner" class="mt-1 text-lg font-semibold text-white">P1 wins</p>
+              </div>
+              <div class="mb-4">
+                <label for="game-over-replay-link" class="mb-1 block text-xs font-medium text-gray-400">Replay</label>
+                <div class="flex items-center gap-2">
+                  <input id="game-over-replay-link" type="text" readonly class="min-w-0 flex-1 rounded border border-gray-700 bg-bg-3 px-2 py-1.5 text-xs text-gray-300" aria-label="Game replay link" placeholder="Saving replay link...">
+                  <button id="btn-copy-game-over-replay" type="button" class="py-1.5 px-3 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-default" disabled>Copy</button>
+                </div>
+              </div>
+              <div class="flex justify-end">
+                <button id="btn-game-over-primary" type="button" class="py-1.5 px-3 text-xs bg-accent border border-accent text-white rounded cursor-pointer hover:bg-red-600 transition-colors">New Game</button>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
       <aside id="action-panel" class="w-44 min-w-44 max-w-52 shrink-0 min-h-0 flex flex-col border-l border-gray-700">
-        <h2 id="action-panel-title" class="px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-gray-500 border-b border-gray-700">Legal Moves</h2>
+        <div id="action-panel-header" class="flex items-center justify-between gap-2 border-b border-gray-700 px-2 py-1">
+          <h2 id="action-panel-title" class="min-w-0 text-[10px] font-semibold uppercase tracking-wide text-gray-500">Legal Moves</h2>
+          <label id="auto-roll-end-control" class="hidden shrink-0 flex items-center gap-1 text-[10px] font-medium normal-case tracking-normal text-gray-400 cursor-pointer" title="Automatically roll or end turn when it is the only legal move">
+            <input type="checkbox" id="auto-roll-end-toggle" class="h-3 w-3 accent-accent"> AutoRoll/End
+          </label>
+        </div>
         <div id="play-status" class="hidden border-b border-gray-700 px-2 py-2 text-xs text-gray-300"></div>
         <div id="action-list" class="flex-1 min-h-0 overflow-y-auto p-1 flex flex-col gap-1"></div>
       </aside>
@@ -339,7 +368,7 @@ tailwind.config = {
         <div class="flex flex-wrap items-start justify-between gap-3">
           <div>
             <h2 class="text-sm font-semibold text-gray-100">Singleplayer</h2>
-            <p id="play-setup-title" class="mt-1 text-xs font-medium text-gray-400">You Vs HexFish</p>
+            <p id="play-setup-title" class="mt-1 text-xs font-medium text-gray-400">Challenge HexFish</p>
           </div>
         </div>
 
@@ -361,7 +390,7 @@ tailwind.config = {
 
       <section class="bg-bg-2 border border-gray-700 rounded p-4">
         <div class="flex flex-wrap items-start justify-between gap-3">
-          <h2 class="text-sm font-semibold text-gray-100">Multiplayer</h2>
+          <h2 class="text-sm font-semibold text-gray-100">Casual Multiplayer</h2>
         </div>
 
         <div id="play-online-options" class="mt-4 flex flex-col gap-3">
@@ -420,6 +449,22 @@ tailwind.config = {
     </div>
   </div>
 
+  <div id="profile-modal" class="hidden fixed inset-0 z-40 items-center justify-center bg-black/65 px-4" role="dialog" aria-modal="true" aria-labelledby="profile-modal-title">
+    <div class="w-full max-w-sm rounded border border-gray-700 bg-bg-2 p-4 shadow-xl">
+      <div class="mb-3 flex items-center justify-between gap-3">
+        <h2 id="profile-modal-title" class="text-sm font-semibold text-gray-100">Profile</h2>
+        <button id="btn-close-profile-modal" type="button" class="h-7 w-7 rounded border border-gray-700 bg-bg-3 text-gray-300 hover:bg-bg hover:text-gray-100" aria-label="Close profile dialog">&times;</button>
+      </div>
+      <label for="profile-username-input" class="mb-1 block text-xs font-medium text-gray-400">Username</label>
+      <input id="profile-username-input" type="text" maxlength="24" autocomplete="username" class="w-full rounded border border-gray-700 bg-bg-3 px-2 py-1.5 text-sm text-gray-100" aria-describedby="profile-username-status">
+      <p id="profile-username-status" class="mt-2 min-h-4 text-xs text-gray-400" aria-live="polite"></p>
+      <div class="mt-4 flex justify-end gap-2">
+        <button id="btn-cancel-profile" type="button" class="py-1.5 px-3 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-bg transition-colors">Cancel</button>
+        <button id="btn-save-profile" type="button" class="py-1.5 px-3 text-xs bg-accent border border-accent text-white rounded cursor-pointer hover:bg-red-600 transition-colors disabled:opacity-40 disabled:cursor-default">Save</button>
+      </div>
+    </div>
+  </div>
+
   <div id="create-multiplayer-room-modal" class="hidden fixed inset-0 z-40 items-center justify-center bg-black/65 px-4" role="dialog" aria-modal="true" aria-labelledby="create-multiplayer-room-title">
     <div class="create-room-dialog w-full max-w-lg rounded border border-gray-700 bg-bg-2 p-4 shadow-xl">
       <div class="mb-3 flex items-start justify-between gap-3">
@@ -437,6 +482,7 @@ tailwind.config = {
             <div class="flex rounded border border-gray-700 overflow-hidden" role="group" aria-label="Choose your multiplayer side">
               <button id="create-room-side-p1" type="button" class="play-side-btn px-3 py-1 text-xs bg-accent text-white" data-play-scope="multiplayer" data-player="0" aria-pressed="true">P1</button>
               <button id="create-room-side-p2" type="button" class="play-side-btn px-3 py-1 text-xs bg-bg-3 text-gray-300 hover:bg-bg border-l border-gray-700" data-play-scope="multiplayer" data-player="1" aria-pressed="false">P2</button>
+              <button id="create-room-side-random" type="button" class="play-side-btn px-3 py-1 text-xs bg-bg-3 text-gray-300 hover:bg-bg border-l border-gray-700" data-play-scope="multiplayer" data-player="random" aria-pressed="false">Random</button>
             </div>
           </div>
         </section>
@@ -573,6 +619,9 @@ tailwind.config = {
         <label id="autosearch-control" class="flex items-center gap-2 px-1.5 py-1 text-xs text-gray-300 cursor-pointer rounded hover:bg-bg-3">
           <input type="checkbox" id="autosearch-toggle" class="accent-accent"> Auto-search
         </label>
+        <label id="sound-control" class="flex items-center gap-2 px-1.5 py-1 text-xs text-gray-300 cursor-pointer rounded hover:bg-bg-3">
+          <input type="checkbox" id="sound-toggle" class="accent-accent"> Sound
+        </label>
       </div>
     </div>
     <div id="result-banner" class="hidden px-3 py-1 bg-accent rounded font-semibold text-sm text-white"></div>
@@ -580,11 +629,11 @@ tailwind.config = {
 </div>
 <div id="svg-tooltip"></div>
 
-<script src="session.js?v=username-auth-20260623"></script>
+<script src="session.js?v=default-profile-20260623"></script>
 <script src="board.js?v=tile-textures-20260623"></script>
 <script src="mcts.js?v=cpu-load-20260622"></script>
 <script src="controls.js?v=guest-shared-replay-20260623"></script>
-<script src="auth.js?v=landing-username-removed-20260623"></script>
-<script src="app.js?v=editor-piece-count-reset-20260623"></script>
+<script src="auth.js?v=brand-home-20260623"></script>
+<script src="app.js?v=board-sound-toggle-20260623"></script>
 </body>
 </html>
