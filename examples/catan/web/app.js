@@ -121,6 +121,7 @@ const initialUrlRoomCode = normalizeRoomCode(initialUrlParams.get('room'));
 let pendingSharedReplaySlug = initialSharedReplaySlug || readPendingSharedReplaySlug();
 let loadingSharedReplaySlug = '';
 let pendingAutoJoinRoomCode = pendingSharedReplaySlug ? '' : initialUrlRoomCode;
+let pendingReconnectRoomCode = '';
 if (pendingAutoJoinRoomCode) selectedPlayMode = 'multiplayer';
 let autoJoinRoomAttempted = false;
 let multiplayerLobbyRooms = [];
@@ -128,6 +129,7 @@ let lastMultiplayerRoomCode = normalizeRoomCode(initialUrlRoomCode || readLastMu
 let multiplayerInviteCopiedCode = '';
 let createRoomSettings = {
   code: '',
+  isPublic: true,
   timeMinutes: DEFAULT_MULTIPLAYER_TIME_MINUTES,
   incrementSeconds: DEFAULT_MULTIPLAYER_INCREMENT_SECONDS,
 };
@@ -628,6 +630,35 @@ function multiplayerTimeoutResultText() {
   return winner === playMode.humanPlayer ? 'You win on time' : 'Opponent wins on time';
 }
 
+function updateVictoryBadge(idx, playerFrame) {
+  const vpEl = document.getElementById(`p${idx}-vp`);
+  if (!vpEl || !playerFrame) return;
+  const publicVp = publicVictoryPoints(playerFrame);
+  const totalVp = Number(playerFrame.vp) || 0;
+  vpEl.textContent = formatVictoryPoints(idx, publicVp, totalVp);
+  vpEl.title = totalVp > publicVp
+    ? `${publicVp} public VP, ${totalVp} total VP`
+    : `${totalVp} VP`;
+}
+
+function updateMultiplayerTimeoutWinnerBadge() {
+  const winner = multiplayerTimeoutWinner();
+  for (let player = 0; player < 2; player++) {
+    const card = document.getElementById(`player-${player}`);
+    const vpEl = document.getElementById(`p${player}-vp`);
+    if (!card || !vpEl) continue;
+    const isWinner = playMultiplayerActive() && winner === player;
+    card.classList.toggle('timeout-winner', isWinner);
+    vpEl.classList.toggle('win-badge', isWinner);
+    if (isWinner) {
+      vpEl.textContent = 'WIN';
+      vpEl.title = `${playNameForPlayer(player) || `P${player + 1}`} wins on time`;
+    } else if (currentState?.state?.frame?.players?.[player]) {
+      updateVictoryBadge(player, currentState.state.frame.players[player]);
+    }
+  }
+}
+
 function updateMultiplayerClockUi() {
   const room = playMode.multiplayerRoom;
   const show = playMultiplayerActive() && !!room;
@@ -680,10 +711,12 @@ function updateMultiplayerResultBanner() {
     banner.textContent = multiplayerTimeoutResultText();
     banner.style.background = playerColor(winner) || '';
     banner.classList.remove('hidden');
+    updateMultiplayerTimeoutWinnerBadge();
     controls.onGameOver();
   } else if (!currentState?.result) {
     banner.classList.add('hidden');
     banner.style.background = '';
+    updateMultiplayerTimeoutWinnerBadge();
   }
   updateActionPanelStatus(currentState, false);
 }
@@ -729,6 +762,11 @@ function ensureCreateRoomCode() {
 }
 
 function updateCreateRoomPresetButtons() {
+  for (const btn of document.querySelectorAll('[data-room-visibility]')) {
+    const active = (btn.dataset.roomVisibility === 'public') === createRoomSettings.isPublic;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+  }
   for (const btn of document.querySelectorAll('[data-time-minutes]')) {
     const active = Number(btn.dataset.timeMinutes) === createRoomSettings.timeMinutes;
     btn.classList.toggle('active', active);
@@ -764,6 +802,11 @@ function setCreateRoomTimeMinutes(value) {
 
 function setCreateRoomIncrementSeconds(value) {
   createRoomSettings.incrementSeconds = clampInteger(value, 0, 120, DEFAULT_MULTIPLAYER_INCREMENT_SECONDS);
+  updateCreateRoomModalUi();
+}
+
+function setCreateRoomVisibility(value) {
+  createRoomSettings.isPublic = value !== 'private';
   updateCreateRoomModalUi();
 }
 
@@ -931,6 +974,7 @@ function resetMultiplayerState(statusText = '') {
   playMode.multiplayerRoom = null;
   playMode.multiplayerStatus = statusText;
   playMode.rejoiningRoom = false;
+  pendingReconnectRoomCode = '';
   updateMultiplayerRoomUi();
   if (statusText) setMultiplayerSetupStatus(statusText);
   updateMultiplayerTurnAttention();
@@ -949,6 +993,7 @@ function createMultiplayerRoom() {
     type: 'CreateMultiplayerRoom',
     preferred_player: selectedMultiplayerHumanPlayer,
     code,
+    is_public: createRoomSettings.isPublic,
     time_minutes: createRoomSettings.timeMinutes,
     increment_seconds: createRoomSettings.incrementSeconds,
   });
@@ -1171,6 +1216,7 @@ function handleMultiplayerRoomMessage(msg) {
   playMode.forcedMoveKey = null;
   playMode.pendingHumanMove = false;
   playMode.rejoiningRoom = false;
+  pendingReconnectRoomCode = '';
   playMode.multiplayerRoom = {
     code: normalizeRoomCode(msg.code),
     status: msg.status,
@@ -1286,8 +1332,8 @@ function renderGameState(msg) {
   // Player panels
   updatePlayerPanel(0, state);
   updatePlayerPanel(1, state);
+  updateMultiplayerTimeoutWinnerBadge();
   updateBoardResourceLegend(msg, state);
-  updateBoardPieceCounts(msg, state);
   updateBank(state);
   updateDice(state);
 
@@ -1307,8 +1353,10 @@ function renderGameState(msg) {
     msg.current_player !== playMode.humanPlayer
   );
   updateActionPanelStatus(msg, playBotTurn);
+  const canUseLegalActions = !msg.replay && !msg.is_terminal && !msg.is_chance && !playBotTurn && !playMultiplayerBlocked;
+  updateBoardPieceCounts(msg, state, canUseLegalActions);
 
-  if (!msg.replay && !msg.is_terminal && !msg.is_chance && !playBotTurn && !playMultiplayerBlocked) {
+  if (canUseLegalActions) {
     // Board overlays for spatial actions
     if (currentBoard) {
       board.showLegalActions(msg.legal_actions, currentBoard, msg.current_player);
@@ -1875,6 +1923,10 @@ session.on('Error', (msg) => {
     pendingEditorStart = false;
     setEditorStatus(msg.message);
   }
+  if (pendingReconnectRoomCode) {
+    pendingReconnectRoomCode = '';
+    playMode.rejoiningRoom = false;
+  }
   controls.onSearchError();
   playMode.botThinking = false;
   playMode.forcedMoveKey = null;
@@ -1897,15 +1949,20 @@ session.on('Disconnected', () => {
   playMode.pendingHumanMove = false;
   updateMultiplayerTurnAttention();
   if (playMode.mode === 'multiplayer' && playMode.multiplayerRoom?.code && appStarted) {
-    writeLastMultiplayerRoomCode(playMode.multiplayerRoom.code);
+    const code = normalizeRoomCode(playMode.multiplayerRoom.code);
+    pendingReconnectRoomCode = code;
+    writeLastMultiplayerRoomCode(code);
     playMode.rejoiningRoom = true;
-    setMultiplayerSetupStatus(`Reconnecting ${playMode.multiplayerRoom.code}...`);
+    setMultiplayerSetupStatus(`Reconnecting ${code}...`);
     updateActionPanelStatus(currentState, false);
-    session.send({ type: 'JoinMultiplayerRoom', code: playMode.multiplayerRoom.code });
   }
 });
 
 session.on('Connected', () => {
+  if (pendingReconnectRoomCode) {
+    session.send({ type: 'JoinMultiplayerRoom', code: pendingReconnectRoomCode });
+    return;
+  }
   if (pendingSharedReplaySlug || currentSharedReplaySlugFromUrl() || readPendingSharedReplaySlug()) {
     maybeLoadSharedReplayFromUrl();
   }
@@ -2238,6 +2295,19 @@ function setReplayStatus(text) {
   status.classList.toggle('hidden', !text);
 }
 
+function replayOutcome(entry) {
+  const result = String(entry?.result || 'incomplete').toLowerCase();
+  return ['won', 'lost', 'draw', 'incomplete'].includes(result) ? result : 'incomplete';
+}
+
+function replayOutcomeLabel(entry) {
+  const outcome = replayOutcome(entry);
+  if (outcome === 'won') return 'Won';
+  if (outcome === 'lost') return 'Lost';
+  if (outcome === 'draw') return 'Draw';
+  return 'Incomplete';
+}
+
 function renderReplayList(entries) {
   const favoriteList = document.getElementById('favorite-replay-list');
   const list = document.getElementById('replay-list');
@@ -2291,8 +2361,16 @@ function renderReplaySection(list, entries, emptyText) {
     actions.className = 'text-[11px] text-gray-400 whitespace-nowrap';
     actions.textContent = `${entry.action_count} actions`;
 
+    const outcome = document.createElement('span');
+    outcome.className = `replay-outcome ${replayOutcome(entry)}`;
+    outcome.textContent = replayOutcomeLabel(entry);
+
+    const meta = document.createElement('span');
+    meta.className = 'flex shrink-0 items-center gap-1.5';
+    meta.append(outcome, actions);
+
     load.appendChild(saved);
-    load.appendChild(actions);
+    load.appendChild(meta);
     load.addEventListener('click', () => {
       controls.stopAutoplay();
       controls._disableAutoSearch();
@@ -2675,6 +2753,9 @@ for (const btn of document.querySelectorAll('[data-time-minutes]')) {
 for (const btn of document.querySelectorAll('[data-increment-seconds]')) {
   btn.addEventListener('click', () => setCreateRoomIncrementSeconds(btn.dataset.incrementSeconds));
 }
+for (const btn of document.querySelectorAll('[data-room-visibility]')) {
+  btn.addEventListener('click', () => setCreateRoomVisibility(btn.dataset.roomVisibility));
+}
 document.getElementById('replay-share-modal')?.addEventListener('click', (event) => {
   if (event.target === event.currentTarget) hideReplayShareModal();
 });
@@ -2704,6 +2785,7 @@ initPlayDifficultySelect();
 setPlayModeChoice(selectedPlayMode);
 updatePlaySideButtons();
 initEditorControls();
+initCatanRulesPopover();
 showPlaySetupView();
 
 const boardShellEl = document.getElementById('board-shell');
@@ -2777,13 +2859,7 @@ function updatePlayerPanel(idx, state) {
     `${resourceCount} ${resourceCount === 1 ? 'Card' : 'Cards'}`;
 
   // VP
-  const vpEl = document.getElementById(`p${idx}-vp`);
-  const publicVp = publicVictoryPoints(pf);
-  const totalVp = Number(pf.vp) || 0;
-  vpEl.textContent = formatVictoryPoints(idx, publicVp, totalVp);
-  vpEl.title = totalVp > publicVp
-    ? `${publicVp} public VP, ${totalVp} total VP`
-    : `${totalVp} VP`;
+  updateVictoryBadge(idx, pf);
 
   // Hand — always show all 5 resources as colored rectangles
   const handEl = document.getElementById(`p${idx}-hand`);
@@ -2898,7 +2974,25 @@ function updateBoardResourceLegend(msg, state) {
   }
 }
 
-function updateBoardPieceCounts(msg, state) {
+function legalBuildAvailability(msg, canUseLegalActions) {
+  const available = { settlement: false, city: false, road: false };
+  if (!canUseLegalActions || !Array.isArray(msg?.legal_actions)) return available;
+
+  for (const entry of msg.legal_actions) {
+    const action = Number(entry?.action);
+    if (!Number.isInteger(action)) continue;
+    if (action >= 0 && action < 54) {
+      available.settlement = true;
+    } else if (action >= 54 && action < 126) {
+      available.road = true;
+    } else if (action >= 126 && action < 180) {
+      available.city = true;
+    }
+  }
+  return available;
+}
+
+function updateBoardPieceCounts(msg, state, canUseLegalActions = false) {
   const panel = document.getElementById('board-piece-counts');
   if (!panel || !state?.frame?.buildings) return;
 
@@ -2919,12 +3013,49 @@ function updateBoardPieceCounts(msg, state) {
   document.getElementById('piece-count-cities').textContent = cities;
   document.getElementById('piece-count-roads').textContent = roads;
 
+  const available = legalBuildAvailability(msg, canUseLegalActions);
+  for (const item of panel.querySelectorAll('[data-piece-kind]')) {
+    const kind = item.dataset.pieceKind;
+    item.classList.toggle('can-build', !!available[kind]);
+  }
+
   panel.classList.remove('hidden', 'p1', 'p2');
   panel.classList.add(playerIndex === 0 ? 'p1' : 'p2');
   panel.setAttribute(
     'aria-label',
     `${playerDisplayName(playerIndex)} pieces remaining: ${settlements} settlements, ${cities} cities, ${roads} roads`
   );
+}
+
+function initCatanRulesPopover() {
+  const button = document.getElementById('btn-catan-rules');
+  const popover = document.getElementById('catan-rules-popover');
+  const closeButton = document.getElementById('btn-close-catan-rules');
+  if (!button || !popover) return;
+
+  const show = () => {
+    popover.classList.remove('hidden');
+    button.classList.add('active');
+    button.setAttribute('aria-expanded', 'true');
+  };
+  const hide = () => {
+    popover.classList.add('hidden');
+    button.classList.remove('active');
+    button.setAttribute('aria-expanded', 'false');
+  };
+
+  button.setAttribute('aria-expanded', 'false');
+  button.addEventListener('click', (event) => {
+    event.stopPropagation();
+    if (popover.classList.contains('hidden')) show();
+    else hide();
+  });
+  closeButton?.addEventListener('click', hide);
+  popover.addEventListener('click', (event) => event.stopPropagation());
+  document.addEventListener('click', hide);
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') hide();
+  });
 }
 
 function capitalizeResourceName(name) {

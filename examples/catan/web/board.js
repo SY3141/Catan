@@ -18,6 +18,52 @@ const PORT_COLORS = {
   ore: '#7a7a7a',
   generic: '#ffffff',
 };
+const TERRAIN_TEXTURES = {
+  forest: {
+    base: '#2d5a27',
+    strokes: [
+      ['path', { d: 'M 2 18 L 8 6 L 14 18 Z M 14 18 L 21 4 L 28 18 Z', fill: 'none', stroke: '#163f1d', 'stroke-width': 1.4 }],
+      ['path', { d: 'M 5 23 H 25', fill: 'none', stroke: '#3d7a34', 'stroke-width': 1, opacity: 0.55 }],
+    ],
+  },
+  hills: {
+    base: '#b85c38',
+    strokes: [
+      ['path', { d: 'M -2 19 C 7 8, 16 8, 31 18', fill: 'none', stroke: '#8d3f2a', 'stroke-width': 1.5 }],
+      ['path', { d: 'M 2 25 C 10 17, 19 17, 29 24', fill: 'none', stroke: '#d27a50', 'stroke-width': 1.2, opacity: 0.65 }],
+    ],
+  },
+  pasture: {
+    base: '#7ec850',
+    strokes: [
+      ['path', { d: 'M 4 22 C 7 16, 10 16, 12 22 M 15 20 C 18 13, 22 13, 25 20', fill: 'none', stroke: '#4d9a3f', 'stroke-width': 1.3 }],
+      ['circle', { cx: 7, cy: 8, r: 1.5, fill: '#b8e58c', opacity: 0.75 }],
+      ['circle', { cx: 22, cy: 12, r: 1.2, fill: '#d8f4ad', opacity: 0.65 }],
+    ],
+  },
+  fields: {
+    base: '#e8b430',
+    strokes: [
+      ['path', { d: 'M 5 0 V 30 M 13 0 V 30 M 21 0 V 30', fill: 'none', stroke: '#bd7f1f', 'stroke-width': 1.1, opacity: 0.65 }],
+      ['path', { d: 'M 2 8 H 28 M 0 20 H 30', fill: 'none', stroke: '#f7d66d', 'stroke-width': 1.2, opacity: 0.75 }],
+    ],
+  },
+  mountains: {
+    base: '#7a7a7a',
+    strokes: [
+      ['path', { d: 'M 1 24 L 10 7 L 16 24 M 12 24 L 21 4 L 30 24', fill: 'none', stroke: '#4e5358', 'stroke-width': 1.6 }],
+      ['path', { d: 'M 10 7 L 13 13 L 16 8 M 21 4 L 24 12 L 27 8', fill: 'none', stroke: '#c8c8c8', 'stroke-width': 1, opacity: 0.8 }],
+    ],
+  },
+  desert: {
+    base: '#d4c088',
+    strokes: [
+      ['path', { d: 'M 0 10 C 8 6, 16 14, 30 9 M -2 22 C 8 17, 17 25, 32 19', fill: 'none', stroke: '#b69b62', 'stroke-width': 1.2, opacity: 0.7 }],
+      ['circle', { cx: 8, cy: 18, r: 1, fill: '#ead7a0', opacity: 0.8 }],
+      ['circle', { cx: 23, cy: 4, r: 0.9, fill: '#a98c56', opacity: 0.55 }],
+    ],
+  },
+};
 
 const HEX_SIZE = 50;
 const SQRT3 = Math.sqrt(3);
@@ -103,6 +149,10 @@ class Board {
     this.boardCenter = [centerX, centerY];
     this.svg.setAttribute('viewBox',
       `${viewX} ${viewY} ${viewW} ${viewH}`);
+
+    const defs = this._el('defs', {});
+    this.svg.appendChild(defs);
+    this._defineTileTextures(defs);
 
     // Ocean background
     this.svg.appendChild(this._el('rect', {
@@ -599,7 +649,7 @@ class Board {
 
     const attrs = {
       points: this._hexPoints(cx, cy, HEX_SIZE),
-      fill: color,
+      fill: terrain ? `url(#terrain-texture-${terrain})` : color,
       stroke: tile.selected ? '#e94560' : (terrain ? '#111' : '#637089'),
       'stroke-width': tile.selected ? 3 : 1
     };
@@ -634,6 +684,24 @@ class Board {
       }
 
       parent.appendChild(this._keepUpright(tokenG, cx, cy));
+    }
+  }
+
+  _defineTileTextures(defs) {
+    for (const [terrain, texture] of Object.entries(TERRAIN_TEXTURES)) {
+      const pattern = this._el('pattern', {
+        id: `terrain-texture-${terrain}`,
+        patternUnits: 'userSpaceOnUse',
+        width: 30,
+        height: 30,
+      });
+      pattern.appendChild(this._el('rect', {
+        x: 0, y: 0, width: 30, height: 30, fill: texture.base,
+      }));
+      for (const [tag, attrs] of texture.strokes) {
+        pattern.appendChild(this._el(tag, attrs));
+      }
+      defs.appendChild(pattern);
     }
   }
 

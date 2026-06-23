@@ -21,7 +21,7 @@ tailwind.config = {
   }
 }
 </script>
-<link rel="stylesheet" href="style.css?v=multiplayer-clock-card-alerts-20260622">
+<link rel="stylesheet" href="style.css?v=tasklist-rules-20260623">
 <script
   defer
   crossorigin="anonymous"
@@ -86,7 +86,7 @@ tailwind.config = {
     <span id="turn-label" class="text-xs text-gray-500"></span>
     <div id="auth-controls" class="ml-auto flex items-center gap-2">
       <a id="ko-fi-link" href="https://ko-fi.com/hexfish" target="_blank" rel="noopener noreferrer" class="px-2 py-0.5 rounded border border-gray-700 bg-bg text-[10px] font-semibold tracking-wide text-gray-300 hover:text-gray-100 hover:bg-bg-3 transition-colors">Donate</a>
-      <span id="app-version" class="px-2 py-0.5 rounded border border-gray-700 bg-bg text-[10px] font-semibold tracking-wide text-gray-400" aria-label="Version V1.0.4">V1.0.4</span>
+      <span id="app-version" class="px-2 py-0.5 rounded border border-gray-700 bg-bg text-[10px] font-semibold tracking-wide text-gray-400" aria-label="Version V1.0.5">V1.0.5</span>
       <div id="clerk-user-button" class="hidden"></div>
       <span id="clerk-status" class="sr-only" aria-live="polite"></span>
     </div>
@@ -118,17 +118,72 @@ tailwind.config = {
           </aside>
           <button id="btn-rotate-left" class="absolute top-0 left-0 z-10 w-8 h-8 flex items-center justify-center bg-bg-3/90 border border-gray-700 text-gray-100 rounded cursor-pointer hover:bg-accent transition-colors" title="Rotate board counterclockwise" aria-label="Rotate board counterclockwise">&#8634;</button>
           <div id="board-piece-counts" class="board-piece-counts hidden" aria-label="Pieces remaining">
-            <div class="piece-count" title="Settlements remaining">
+            <div class="piece-count" title="Town cost: Lumber, Brick, Wool, Grain" tabindex="0" data-piece-kind="settlement" data-piece-cost="Town: Lumber, Brick, Wool, Grain">
               <span class="piece-icon settlement-icon" aria-hidden="true"></span>
               <span id="piece-count-settlements">5</span>
             </div>
-            <div class="piece-count" title="Cities remaining">
+            <div class="piece-count" title="City cost: 3 Ore, 2 Grain" tabindex="0" data-piece-kind="city" data-piece-cost="City: 3 Ore, 2 Grain">
               <span class="piece-icon city-icon" aria-hidden="true"></span>
               <span id="piece-count-cities">4</span>
             </div>
-            <div class="piece-count" title="Roads remaining">
+            <div class="piece-count" title="Road cost: Lumber, Brick" tabindex="0" data-piece-kind="road" data-piece-cost="Road: Lumber, Brick">
               <span class="piece-icon road-icon" aria-hidden="true"></span>
               <span id="piece-count-roads">15</span>
+            </div>
+            <button id="btn-catan-rules" class="piece-rules-button" type="button" title="Catan rules" aria-label="Open Catan rules">
+              <span class="rules-book-icon" aria-hidden="true"></span>
+            </button>
+          </div>
+          <div id="catan-rules-popover" class="catan-rules-popover hidden" role="dialog" aria-modal="false" aria-labelledby="catan-rules-title">
+            <div class="catan-rules-header">
+              <h2 id="catan-rules-title">Catan Rules</h2>
+              <button id="btn-close-catan-rules" type="button" aria-label="Close Catan rules">x</button>
+            </div>
+            <div class="catan-rules-content">
+              <section>
+                <h3>1v1 Rules</h3>
+                <p>Win by reaching 15 victory points. On a 7, discard half only when holding more than 9 resource cards. Friendly robber protects players with fewer than 3 public victory points: the robber cannot be placed on tiles touching their towns or cities, and steal is skipped when there is no eligible target.</p>
+              </section>
+              <section>
+                <h3>Goal</h3>
+                <p>Reach the victory point target on your turn. Points come from towns, cities, development cards, longest road, and largest army.</p>
+              </section>
+              <section>
+                <h3>Setup</h3>
+                <p>Players place two towns and two roads. The second town gives starting resources from adjacent non-desert tiles.</p>
+              </section>
+              <section>
+                <h3>Turn</h3>
+                <p>Roll dice, collect production, then trade, build, and optionally play one development card bought on an earlier turn.</p>
+              </section>
+              <section>
+                <h3>Production</h3>
+                <p>Each tile with the rolled number produces its resource for adjacent towns and cities. Towns collect one card; cities collect two.</p>
+              </section>
+              <section>
+                <h3>Seven And Robber</h3>
+                <p>On a 7, players over the discard limit discard half rounded down. Move the robber, block that tile, and steal one random card from an eligible adjacent opponent.</p>
+              </section>
+              <section>
+                <h3>Trading</h3>
+                <p>Trade with the bank at 4:1, at ports for 3:1 or matching 2:1 rates, or make any mutually agreed trade with another player on your turn.</p>
+              </section>
+              <section>
+                <h3>Building</h3>
+                <p>Road: Lumber and Brick. Town: Lumber, Brick, Wool, and Grain. City: 3 Ore and 2 Grain. Development card: Ore, Wool, and Grain.</p>
+              </section>
+              <section>
+                <h3>Development Cards</h3>
+                <p>Play at most one development card per turn, and not on the turn you bought it. Knights move the robber. Road Building places two roads. Year of Plenty takes two resources. Monopoly names one resource and takes all copies from opponents. Victory point cards stay hidden until they win the game.</p>
+              </section>
+              <section>
+                <h3>Placement</h3>
+                <p>Roads connect to your road network. Towns must connect to your road and be at least two edges away from every other town or city.</p>
+              </section>
+              <section>
+                <h3>Bonuses</h3>
+                <p>Longest road is 2 points for the first player with at least five continuous roads. Largest army is 2 points for the first player with at least three played knights.</p>
+              </section>
             </div>
           </div>
           <button id="btn-mirror-board" class="absolute top-0 left-1/2 -translate-x-1/2 z-10 w-8 h-8 flex items-center justify-center bg-bg-3/90 border border-gray-700 text-gray-100 rounded cursor-pointer hover:bg-accent transition-colors" title="Mirror board" aria-label="Mirror board">&#8644;</button>
@@ -385,6 +440,16 @@ tailwind.config = {
         </section>
 
         <section class="create-room-section">
+          <div class="flex items-center justify-between gap-3">
+            <span class="text-xs font-medium text-gray-300">Visibility</span>
+            <div class="flex rounded border border-gray-700 overflow-hidden" role="group" aria-label="Choose room visibility">
+              <button id="create-room-public" type="button" class="create-room-visibility-btn px-3 py-1 text-xs bg-accent text-white" data-room-visibility="public" aria-pressed="true">Public</button>
+              <button id="create-room-private" type="button" class="create-room-visibility-btn px-3 py-1 text-xs bg-bg-3 text-gray-300 hover:bg-bg border-l border-gray-700" data-room-visibility="private" aria-pressed="false">Private</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="create-room-section">
           <div class="mb-2 flex items-center justify-between gap-3">
             <label for="create-room-time-input" class="text-xs font-medium text-gray-300">Time</label>
             <div class="flex items-center gap-1.5">
@@ -485,10 +550,10 @@ tailwind.config = {
 <div id="svg-tooltip"></div>
 
 <script src="session.js?v=connected-event-20260621"></script>
-<script src="board.js?v=building-icons-20260620"></script>
+<script src="board.js?v=tile-textures-20260623"></script>
 <script src="mcts.js?v=cpu-load-20260622"></script>
 <script src="controls.js?v=replay-slider-20260620"></script>
 <script src="auth.js?v=frontend-auth-gate-20260621"></script>
-<script src="app.js?v=lazy-native-ads-20260622"></script>
+<script src="app.js?v=tasklist-rules-20260623"></script>
 </body>
 </html>

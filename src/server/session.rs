@@ -359,16 +359,10 @@ impl<G: Game + 'static> GameSession<G> {
         self.cursor
     }
 
-    /// Advance cursor to the end of the timeline, setting the search state
-    /// to the last entry's `next_state`. No-op if history is empty.
+    /// Advance cursor to the end of the timeline, setting the search state to
+    /// the final replayed position. No-op if history is empty.
     pub fn seek_to_end(&mut self) {
-        if self.history.is_empty() || self.cursor == self.history.len() {
-            return;
-        }
-        if let Some(ref next) = self.history.last().unwrap().next_state {
-            self.search.reset(next.clone());
-        }
-        self.cursor = self.history.len();
+        let _ = self.set_cursor(self.history.len());
     }
 
     /// Roll back to a previous cursor position, resetting the search state.
@@ -880,6 +874,13 @@ impl<G: Game + 'static> GameSession<G> {
 
     pub fn current_game_ended(&self) -> bool {
         self.is_terminal()
+    }
+
+    pub fn current_result_reward(&self) -> Option<f32> {
+        match self.search.state().status() {
+            Status::Terminal(reward) => Some(reward),
+            _ => None,
+        }
     }
 
     /// Returns true when automatic background search is useful.
@@ -2192,6 +2193,24 @@ mod tests {
             }
             _ => panic!("expected GameState"),
         }
+    }
+
+    #[test]
+    fn seek_to_end_reaches_loaded_replay_result() {
+        let mut session = test_session();
+        let log = GameLog {
+            initial_state: "9".into(),
+            actions: vec![0, 0],
+        };
+        session
+            .load_saved_replay_log("saved.log", &log)
+            .expect("valid replay");
+
+        assert_eq!(session.current_result_reward(), None);
+        session.seek_to_end();
+
+        assert_eq!(session.cursor(), 2);
+        assert_eq!(session.current_result_reward(), Some(1.0));
     }
 
     #[test]

@@ -43,6 +43,7 @@ pub struct ReplayEntry {
     pub id: String,
     pub saved_at_ms: u64,
     pub action_count: usize,
+    pub result: String,
     pub favorite: bool,
     pub share_slug: String,
 }
@@ -72,6 +73,7 @@ pub struct MultiplayerLobbyRoom {
     pub status: String,
     pub occupied: u8,
     pub connected: u8,
+    pub is_public: bool,
     pub time_minutes: Option<u32>,
     pub increment_seconds: Option<u32>,
     pub last_activity_ms: u64,
@@ -155,6 +157,7 @@ pub enum ClientMsg {
     CreateMultiplayerRoom {
         preferred_player: Option<u8>,
         code: Option<String>,
+        is_public: Option<bool>,
         time_minutes: Option<u32>,
         increment_seconds: Option<u32>,
     },
