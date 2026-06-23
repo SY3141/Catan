@@ -22,19 +22,39 @@ tailwind.config = {
 }
 </script>
 <link rel="stylesheet" href="style.css?v=board-sound-toggle-20260623">
-<script
-  defer
-  crossorigin="anonymous"
-  src="https://romantic-mollusk-80.clerk.accounts.dev/npm/@clerk/ui@1/dist/ui.browser.js"
-  type="text/javascript"
-></script>
-<script
-  defer
-  crossorigin="anonymous"
-  data-clerk-publishable-key="pk_test_cm9tYW50aWMtbW9sbHVzay04MC5jbGVyay5hY2NvdW50cy5kZXYk"
-  src="https://romantic-mollusk-80.clerk.accounts.dev/npm/@clerk/clerk-js@6/dist/clerk.browser.js"
-  type="text/javascript"
-></script>
+<script>
+(() => {
+  const production = {
+    name: 'production',
+    frontendApi: 'https://clerk.hexfish.org',
+    publishableKey: 'pk_live_Y2xlcmsuaGV4ZmlzaC5vcmck',
+  };
+  const development = {
+    name: 'development',
+    frontendApi: 'https://romantic-mollusk-80.clerk.accounts.dev',
+    publishableKey: 'pk_test_cm9tYW50aWMtbW9sbHVzay04MC5jbGVyay5hY2NvdW50cy5kZXYk',
+  };
+  const host = window.location.hostname.toLowerCase();
+  const useProduction = host === 'hexfish.org' || host.endsWith('.hexfish.org');
+  const config = useProduction ? production : development;
+  window.hexfishClerkConfig = config;
+
+  const load = (name, src, publishableKey = '') => {
+    const script = document.createElement('script');
+    script.async = false;
+    script.defer = true;
+    script.crossOrigin = 'anonymous';
+    script.type = 'text/javascript';
+    script.src = src;
+    script.dataset.hexfishClerkScript = name;
+    if (publishableKey) script.dataset.clerkPublishableKey = publishableKey;
+    document.head.appendChild(script);
+  };
+
+  load('ui', `${config.frontendApi}/npm/@clerk/ui@1/dist/ui.browser.js`);
+  load('js', `${config.frontendApi}/npm/@clerk/clerk-js@6/dist/clerk.browser.js`, config.publishableKey);
+})();
+</script>
 </head>
 <body class="bg-bg text-gray-200 font-sans h-screen flex flex-col">
 
@@ -629,11 +649,11 @@ tailwind.config = {
 </div>
 <div id="svg-tooltip"></div>
 
-<script src="session.js?v=default-profile-20260623"></script>
+<script src="session.js?v=anonymous-session-v2-20260623"></script>
 <script src="board.js?v=tile-textures-20260623"></script>
 <script src="mcts.js?v=cpu-load-20260622"></script>
 <script src="controls.js?v=guest-shared-replay-20260623"></script>
-<script src="auth.js?v=brand-home-20260623"></script>
-<script src="app.js?v=board-sound-toggle-20260623"></script>
+<script src="auth.js?v=clerk-origin-aware-20260623"></script>
+<script src="app.js?v=clerk-production-20260623"></script>
 </body>
 </html>

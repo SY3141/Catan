@@ -1581,6 +1581,7 @@ impl<G: Game + 'static> MultiplayerRoomStore<G> {
         sockets.retain(|_, tx| tx.send(json.clone()).is_ok());
     }
 
+    #[cfg(test)]
     fn create_room(
         &self,
         user_id: &str,
@@ -1667,6 +1668,7 @@ impl<G: Game + 'static> MultiplayerRoomStore<G> {
         Err("Could not create a unique room code".into())
     }
 
+    #[cfg(test)]
     fn join_room(
         &self,
         user_id: &str,
@@ -2916,6 +2918,7 @@ fn handle_profile_message<G: Game + 'static>(
     }
 }
 
+#[cfg(test)]
 async fn handle_multiplayer_message<G: Game + 'static>(
     rooms: &Arc<MultiplayerRoomStore<G>>,
     user_id: &str,

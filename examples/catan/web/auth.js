@@ -75,6 +75,81 @@
     }
   };
 
+  const clerkErrorMessage = (error) => (
+    String(error?.message || error || 'Unknown Clerk error').replace(/\s+/g, ' ').trim().slice(0, 180)
+  );
+
+  const fallbackClerkConfig = () => {
+    const production = {
+      name: 'production',
+      frontendApi: 'https://clerk.hexfish.org',
+      publishableKey: 'pk_live_Y2xlcmsuaGV4ZmlzaC5vcmck',
+    };
+    const development = {
+      name: 'development',
+      frontendApi: 'https://romantic-mollusk-80.clerk.accounts.dev',
+      publishableKey: 'pk_test_cm9tYW50aWMtbW9sbHVzay04MC5jbGVyay5hY2NvdW50cy5kZXYk',
+    };
+    const host = window.location.hostname.toLowerCase();
+    return host === 'hexfish.org' || host.endsWith('.hexfish.org') ? production : development;
+  };
+
+  const clerkConfig = () => window.hexfishClerkConfig || fallbackClerkConfig();
+
+  const waitForClerkGlobal = (isReady, label) => new Promise((resolve, reject) => {
+    if (isReady()) {
+      resolve();
+      return;
+    }
+    const timeout = window.setTimeout(() => {
+      reject(new Error(`${label} did not initialize`));
+    }, 8000);
+    const interval = window.setInterval(() => {
+      if (!isReady()) return;
+      window.clearTimeout(timeout);
+      window.clearInterval(interval);
+      resolve();
+    }, 50);
+  });
+
+  const appendClerkScript = (name, src, publishableKey = '') => {
+    const script = document.createElement('script');
+    script.async = true;
+    script.crossOrigin = 'anonymous';
+    script.type = 'text/javascript';
+    script.src = src;
+    script.dataset.hexfishClerkScript = name;
+    if (publishableKey) script.dataset.clerkPublishableKey = publishableKey;
+    document.head.appendChild(script);
+    return script;
+  };
+
+  const ensureClerkJsBundle = async () => {
+    if (window.Clerk) return;
+    const config = clerkConfig();
+    const existing = document.querySelector('script[src*="/npm/@clerk/clerk-js@"]');
+    if (!existing) {
+      appendClerkScript(
+        'js',
+        `${config.frontendApi}/npm/@clerk/clerk-js@6/dist/clerk.browser.js`,
+        config.publishableKey
+      );
+    }
+    await waitForClerkGlobal(() => !!window.Clerk, 'Clerk');
+  };
+
+  const ensureClerkUiBundle = async () => {
+    if (window.__internal_ClerkUICtor) {
+      return;
+    }
+    const config = clerkConfig();
+    const existing = document.querySelector('script[src*="/npm/@clerk/ui@"]');
+    if (!existing) {
+      appendClerkScript('ui', `${config.frontendApi}/npm/@clerk/ui@1/dist/ui.browser.js`);
+    }
+    await waitForClerkGlobal(() => !!window.__internal_ClerkUICtor, 'Clerk UI');
+  };
+
   const emitAuthEvent = (name) => {
     document.dispatchEvent(new Event(name));
   };
@@ -224,16 +299,10 @@
     if (!target) return null;
     const targetUrl = typeof target === 'string' ? target : String(target);
     const lowerTarget = targetUrl.toLowerCase();
-    if (
-      lowerTarget.includes('accounts.dev/sign-in')
-      && lowerTarget.includes('verify-email-address')
-    ) {
+    if (lowerTarget.includes('verify-email-address')) {
       return `${currentPageUrl()}#/verify-email-address`;
     }
-    if (
-      lowerTarget.includes('accounts.dev/sign-in')
-      && lowerTarget.includes('verify-phone-number')
-    ) {
+    if (lowerTarget.includes('verify-phone-number')) {
       return `${currentPageUrl()}#/verify-phone-number`;
     }
     return null;
@@ -286,15 +355,33 @@
     guestSignUpButton?.classList.toggle('hidden', !visible);
   };
 
+  const hasMountedClerkUi = (mount) => !!mount.querySelector('.cl-rootBox, .cl-card, [data-clerk-element]');
+
+  const mountClerkForm = (clerk, kind) => {
+    const isSignUp = kind === 'sign-up';
+    const mount = isSignUp ? signUpMount : signInMount;
+    const mounted = isSignUp ? signUpMounted : signInMounted;
+    const mountFn = isSignUp ? clerk.mountSignUp : clerk.mountSignIn;
+    const unmountFn = isSignUp ? clerk.unmountSignUp : clerk.unmountSignIn;
+    if (typeof mountFn !== 'function') return false;
+    if (mounted && hasMountedClerkUi(mount)) return true;
+    if (mounted && typeof unmountFn === 'function') {
+      try {
+        unmountFn.call(clerk, mount);
+      } catch (_error) {
+        // The mount may already have been cleared by Clerk during sign-out.
+      }
+    }
+    mount.innerHTML = '';
+    mountFn.call(clerk, mount);
+    if (isSignUp) signUpMounted = true;
+    else signInMounted = true;
+    return true;
+  };
+
   const mountCurrentAuthForm = (clerk) => {
-    if (activeAuthView === 'sign-in' && !signInMounted && typeof clerk.mountSignIn === 'function') {
-      clerk.mountSignIn(signInMount);
-      signInMounted = true;
-    }
-    if (activeAuthView === 'sign-up' && !signUpMounted && typeof clerk.mountSignUp === 'function') {
-      clerk.mountSignUp(signUpMount);
-      signUpMounted = true;
-    }
+    if (activeAuthView === 'sign-in') mountClerkForm(clerk, 'sign-in');
+    if (activeAuthView === 'sign-up') mountClerkForm(clerk, 'sign-up');
     if (activeAuthView === 'sign-up' && !signUpMounted) {
       setStatus('Sign-up is unavailable from Clerk right now.');
     }
@@ -387,12 +474,14 @@
   window.hexfishShowSignUpFromGuest = showSignUpPageFromGuest;
   window.hexfishShowLandingPage = showSignInPageFromGuest;
 
+  const signedIn = (clerk) => clerk?.isSignedIn === true;
+
   const renderAuthState = () => {
     const clerk = window.Clerk;
     if (!clerk) return;
     installClerkNavigationGuard(clerk);
 
-    if (clerk.isSignedIn || clerk.session || clerk.user) {
+    if (signedIn(clerk)) {
       showAppShell();
       mountUserControl(clerk);
       suppressInviteGuestMode = false;
@@ -446,20 +535,9 @@
   });
 
   window.addEventListener('load', async () => {
-    if (!window.Clerk) {
-      if (currentReplaySlug()) {
-        enterGuestSharedReplayMode();
-        return;
-      }
-      if (currentRoomCode()) {
-        enterGuestMode();
-        return;
-      }
-      setStatus('Clerk failed to load');
-      return;
-    }
-
     try {
+      await ensureClerkJsBundle();
+      await ensureClerkUiBundle();
       await window.Clerk.load({
         ui: { ClerkUI: window.__internal_ClerkUICtor },
       });
@@ -471,7 +549,15 @@
       }
     } catch (error) {
       console.error('Clerk failed to initialize:', error);
-      setStatus('Clerk failed to initialize');
+      if (currentReplaySlug()) {
+        enterGuestSharedReplayMode();
+        return;
+      }
+      if (currentRoomCode()) {
+        enterGuestMode();
+        return;
+      }
+      setStatus(`Clerk failed to initialize: ${clerkErrorMessage(error)}`);
     }
   });
 })();

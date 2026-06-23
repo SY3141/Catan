@@ -2,6 +2,9 @@
 //
 // Dispatches incoming messages to registered handlers.
 
+const ANONYMOUS_SESSION_KEY_V1 = 'hexfish-anonymous-session-id';
+const ANONYMOUS_SESSION_KEY_V2 = 'hexfish-anonymous-session-id-v2';
+
 class Session {
   constructor(options = {}) {
     this.ws = null;
@@ -43,7 +46,7 @@ class Session {
       ws.send(JSON.stringify({
         type: 'Authenticate',
         token,
-        anonymous_session: this.anonymousSessionId,
+        anonymous_session: token ? null : this.anonymousSessionId,
         username: this._getAuthUsername(),
       }));
     };
@@ -165,14 +168,14 @@ class Session {
   }
 
   _loadAnonymousSessionId() {
-    const key = 'hexfish-anonymous-session-id';
     try {
-      let id = window.localStorage && window.localStorage.getItem(key);
+      window.localStorage?.removeItem(ANONYMOUS_SESSION_KEY_V1);
+      let id = window.localStorage && window.localStorage.getItem(ANONYMOUS_SESSION_KEY_V2);
       if (!id) {
         id = window.crypto && typeof window.crypto.randomUUID === 'function'
           ? window.crypto.randomUUID()
           : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-        window.localStorage && window.localStorage.setItem(key, id);
+        window.localStorage && window.localStorage.setItem(ANONYMOUS_SESSION_KEY_V2, id);
       }
       return id;
     } catch (_error) {
