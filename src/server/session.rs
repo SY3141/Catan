@@ -187,8 +187,14 @@ impl<G: Game + 'static> GameSession<G> {
         log: &GameLog,
     ) -> Result<(), String> {
         let initial_state = self.presenter.deserialize_log_state(&log.initial_state)?;
-        validate_replay_log(initial_state.clone(), log)?;
-        self.load_saved_replay(id, initial_state, log);
+        let log = GameLog {
+            initial_state: log.initial_state.clone(),
+            actions: self
+                .presenter
+                .normalize_replay_actions(&initial_state, &log.actions),
+        };
+        validate_replay_log(initial_state.clone(), &log)?;
+        self.load_saved_replay(id, initial_state, &log);
         Ok(())
     }
 
@@ -199,13 +205,35 @@ impl<G: Game + 'static> GameSession<G> {
         }
         let first = self.history.first()?;
         let initial_state = self.presenter.serialize_log_state(&first.state)?;
-        let actions = self.history[..self.cursor]
+        let actions: Vec<usize> = self.history[..self.cursor]
             .iter()
             .map(|entry| entry.action)
             .collect();
+        let actions = self
+            .presenter
+            .normalize_replay_actions(&first.state, &actions);
         Some(GameLog {
             initial_state,
             actions,
+        })
+    }
+
+    /// Export the current live game as a replay, allowing a zero-action log.
+    pub fn export_current_log_allow_empty(&self) -> Option<GameLog> {
+        if self.replay.is_some() {
+            return None;
+        }
+        if let Some(log) = self.export_current_log() {
+            return Some(log);
+        }
+        if self.cursor != 0 {
+            return None;
+        }
+        Some(GameLog {
+            initial_state: self
+                .presenter
+                .serialize_log_state(self.search.state())?,
+            actions: Vec::new(),
         })
     }
 
@@ -579,6 +607,7 @@ impl<G: Game + 'static> GameSession<G> {
             | ClientMsg::JoinMultiplayerRoom { .. }
             | ClientMsg::LeaveMultiplayerRoom
             | ClientMsg::PlayMultiplayerAction { .. }
+            | ClientMsg::ResignMultiplayerGame
             | ClientMsg::AddMultiplayerOpponentTime => vec![ServerMsg::Error {
                 message: "Replay storage is not available in this session".into(),
             }],

@@ -122,11 +122,13 @@ let pendingSharedReplaySlug = initialSharedReplaySlug || readPendingSharedReplay
 let loadingSharedReplaySlug = '';
 let pendingAutoJoinRoomCode = pendingSharedReplaySlug ? '' : initialUrlRoomCode;
 let pendingReconnectRoomCode = '';
+let pendingPlayTabReconnectRoomCode = '';
 if (pendingAutoJoinRoomCode) selectedPlayMode = 'multiplayer';
 let autoJoinRoomAttempted = false;
 let multiplayerLobbyRooms = [];
 let lastMultiplayerRoomCode = normalizeRoomCode(initialUrlRoomCode || readLastMultiplayerRoomCode());
 let multiplayerInviteCopiedCode = '';
+let shownMultiplayerReplayShareSlug = '';
 let createRoomSettings = {
   code: '',
   isPublic: true,
@@ -166,6 +168,110 @@ function loadNativeAdScript() {
 
 window.hexfishLoadNativeAds = loadNativeAdScript;
 document.addEventListener('hexfish-auth-signed-in', loadNativeAdScript);
+
+function guestMultiplayerMode() {
+  return window.hexfishGuestMultiplayer === true;
+}
+
+function guestSharedReplayMode() {
+  return window.hexfishGuestSharedReplay === true;
+}
+
+function guestMode() {
+  return guestMultiplayerMode() || guestSharedReplayMode();
+}
+
+function guestReplayAnalysisLocked() {
+  return guestSharedReplayMode() && (activeView === 'replay-board' || !!currentState?.replay);
+}
+
+function syncGuestUiState() {
+  const guest = guestMode();
+  document.getElementById('singleplayer-setup-section')?.classList.toggle('hidden', guest);
+  const startSingleplayer = document.getElementById('btn-start-play-game');
+  if (startSingleplayer) {
+    startSingleplayer.disabled = guest;
+    startSingleplayer.setAttribute('aria-disabled', String(guest));
+  }
+
+  if (guest) {
+    selectedPlayMode = 'multiplayer';
+    if (!playMode.active) playMode.mode = 'multiplayer';
+  }
+}
+
+function prepareGuestMultiplayerEntry() {
+  if (!guestMultiplayerMode()) return;
+  const guestRoomCode = normalizeRoomCode(window.hexfishGuestRoomCode || initialUrlRoomCode);
+  pendingSharedReplaySlug = '';
+  loadingSharedReplaySlug = '';
+  if (guestRoomCode && !autoJoinRoomAttempted) {
+    pendingAutoJoinRoomCode = guestRoomCode;
+  }
+  setPlayModeChoice('multiplayer');
+}
+
+function showGuestSignInRequiredModal(feature) {
+  const modal = document.getElementById('guest-signin-required-modal');
+  const copy = document.getElementById('guest-signin-required-copy');
+  if (!modal) return;
+  if (copy) {
+    copy.textContent = `${feature} requires a signed-in account. Sign in to use it and keep access to your account features.`;
+  }
+  modal.classList.remove('hidden');
+  modal.classList.add('flex');
+  document.getElementById('btn-guest-signin-required-signin')?.focus();
+}
+
+function hideGuestSignInRequiredModal() {
+  const modal = document.getElementById('guest-signin-required-modal');
+  if (!modal) return;
+  modal.classList.add('hidden');
+  modal.classList.remove('flex');
+}
+
+function signInFromGuestRequiredModal() {
+  hideGuestSignInRequiredModal();
+  if (typeof window.hexfishShowSignInFromGuest === 'function') {
+    window.hexfishShowSignInFromGuest();
+  }
+}
+
+function showGuestFeatureBlocked(feature) {
+  if (!guestMode()) return false;
+  if (guestMultiplayerMode()) prepareGuestMultiplayerEntry();
+  showGuestSignInRequiredModal(feature);
+  return true;
+}
+
+function enterGuestPlayMode() {
+  if (!guestMultiplayerMode()) return;
+  prepareGuestMultiplayerEntry();
+  if (playMode.active && playMode.mode === 'multiplayer') {
+    showPlayView();
+  } else {
+    showPlaySetupView();
+  }
+}
+
+function enterGuestSharedReplayMode() {
+  if (!guestSharedReplayMode()) return false;
+  syncGuestUiState();
+  return maybeLoadSharedReplayFromUrl();
+}
+
+function signInToAnalyzeGuestReplay() {
+  if (typeof window.hexfishShowSignInFromGuest === 'function') {
+    window.hexfishShowSignInFromGuest();
+    return;
+  }
+  showGuestSignInRequiredModal('Analysis');
+}
+
+controls.isAnalysisBlocked = (target) => (
+  guestSharedReplayMode() && (target === 'replay' || !!currentState?.replay)
+);
+controls.onAnalysisBlocked = () => showGuestSignInRequiredModal('Analysis');
 
 function setServerSingleplayerHumanPlayer(player) {
   const humanPlayer = player == null ? null : player;
@@ -364,6 +470,8 @@ function updatePlayBotLabels() {
 function playNameForPlayer(idx) {
   if (!playViewActive()) return null;
   if (playMultiplayerActive()) {
+    const roomName = String(playMode.multiplayerRoom?.players?.[idx]?.name || '').trim();
+    if (roomName) return roomName;
     return idx === playMode.humanPlayer ? 'You' : 'Opponent';
   }
   return idx === playMode.humanPlayer ? 'You' : playBotName();
@@ -381,7 +489,8 @@ function formatPlayerRefs(text) {
 function formatResultBanner(text) {
   const winner = parseResultWinner(text);
   if (playViewActive() && winner === playMode.humanPlayer) {
-    return `${playerDisplayName(winner)} win`;
+    const name = playerDisplayName(winner);
+    return name === 'You' ? 'You win' : `${name} wins`;
   }
   return formatPlayerRefs(text);
 }
@@ -566,7 +675,7 @@ function reconnectRoomCode() {
 }
 
 function setPlayModeChoice(mode) {
-  selectedPlayMode = mode === 'multiplayer' ? 'multiplayer' : 'bot';
+  selectedPlayMode = guestMode() ? 'multiplayer' : mode === 'multiplayer' ? 'multiplayer' : 'bot';
   if (!playMode.active) playMode.mode = selectedPlayMode;
   for (const btn of document.querySelectorAll('.play-mode-btn')) {
     const active = btn.dataset.playMode === selectedPlayMode;
@@ -579,6 +688,7 @@ function setPlayModeChoice(mode) {
   }
   updatePlayBotLabels();
   updatePlaySideButtons();
+  syncGuestUiState();
   updateMultiplayerRoomUi();
 }
 
@@ -598,7 +708,13 @@ function roomInviteUrl(code) {
   return url.toString();
 }
 
+function multiplayerRoomHasClock(room = playMode.multiplayerRoom) {
+  return room?.time_minutes != null;
+}
+
 function formatMultiplayerTimeControl(room = playMode.multiplayerRoom) {
+  if (!room) return '';
+  if (!multiplayerRoomHasClock(room)) return 'Unlimited';
   const time = Number(room?.time_minutes);
   const increment = Number(room?.increment_seconds);
   if (!Number.isFinite(time) || time <= 0) return '';
@@ -617,17 +733,29 @@ function formatClockMillis(milliseconds) {
   return `${minutes}:${String(secs).padStart(2, '0')}`;
 }
 
-function multiplayerTimeoutWinner() {
+function multiplayerWinner() {
   const rawWinner = playMode.multiplayerRoom?.winner;
   if (rawWinner == null) return null;
   const winner = Number(rawWinner);
   return winner === 0 || winner === 1 ? winner : null;
 }
 
-function multiplayerTimeoutResultText() {
-  const winner = multiplayerTimeoutWinner();
+function multiplayerResultText() {
+  const winner = multiplayerWinner();
   if (winner == null) return '';
-  return winner === playMode.humanPlayer ? 'You win on time' : 'Opponent wins on time';
+  const youWon = winner === playMode.humanPlayer;
+  const reason = String(playMode.multiplayerRoom?.finish_reason || '').toLowerCase();
+  if (reason === 'timeout') return youWon ? 'You win on time' : 'Opponent wins on time';
+  if (reason === 'resignation') return youWon ? 'You win by resignation' : 'Opponent wins by resignation';
+  return youWon ? 'You win' : 'Opponent wins';
+}
+
+function multiplayerTimeoutWinner() {
+  return multiplayerWinner();
+}
+
+function multiplayerTimeoutResultText() {
+  return multiplayerResultText();
 }
 
 function updateVictoryBadge(idx, playerFrame) {
@@ -642,7 +770,7 @@ function updateVictoryBadge(idx, playerFrame) {
 }
 
 function updateMultiplayerTimeoutWinnerBadge() {
-  const winner = multiplayerTimeoutWinner();
+  const winner = multiplayerWinner();
   for (let player = 0; player < 2; player++) {
     const card = document.getElementById(`player-${player}`);
     const vpEl = document.getElementById(`p${player}-vp`);
@@ -652,7 +780,7 @@ function updateMultiplayerTimeoutWinnerBadge() {
     vpEl.classList.toggle('win-badge', isWinner);
     if (isWinner) {
       vpEl.textContent = 'WIN';
-      vpEl.title = `${playNameForPlayer(player) || `P${player + 1}`} wins on time`;
+      vpEl.title = `${playNameForPlayer(player) || `P${player + 1}`} wins`;
     } else if (currentState?.state?.frame?.players?.[player]) {
       updateVictoryBadge(player, currentState.state.frame.players[player]);
     }
@@ -661,7 +789,7 @@ function updateMultiplayerTimeoutWinnerBadge() {
 
 function updateMultiplayerClockUi() {
   const room = playMode.multiplayerRoom;
-  const show = playMultiplayerActive() && !!room;
+  const show = playMultiplayerActive() && multiplayerRoomHasClock(room);
   const increment = Number(room?.increment_seconds);
   const incrementText = Number.isFinite(increment) ? `+${Math.max(0, Math.round(increment))}s inc` : '+0s inc';
   const elapsedMs = Date.now() - multiplayerClockSyncedAtMs;
@@ -693,6 +821,7 @@ function updateMultiplayerClockUi() {
 
 function updateMultiplayerClockTimer() {
   const shouldRun = playMultiplayerActive() &&
+    multiplayerRoomHasClock() &&
     multiplayerTimeoutWinner() == null &&
     (playMode.multiplayerRoom?.players || []).some(player => player?.clock_active);
   if (shouldRun && !multiplayerClockTimer) {
@@ -746,6 +875,15 @@ function clampInteger(value, min, max, fallback) {
   return Math.max(min, Math.min(max, Math.round(number)));
 }
 
+function createRoomHasClock() {
+  return createRoomSettings.timeMinutes != null;
+}
+
+function parseCreateRoomTimeMinutes(value) {
+  if (String(value).toLowerCase() === 'unlimited') return null;
+  return clampInteger(value, 1, 180, DEFAULT_MULTIPLAYER_TIME_MINUTES);
+}
+
 function randomMultiplayerRoomCode() {
   let code = '';
   for (let i = 0; i < 6; i++) {
@@ -768,14 +906,17 @@ function updateCreateRoomPresetButtons() {
     btn.setAttribute('aria-pressed', active ? 'true' : 'false');
   }
   for (const btn of document.querySelectorAll('[data-time-minutes]')) {
-    const active = Number(btn.dataset.timeMinutes) === createRoomSettings.timeMinutes;
+    const preset = parseCreateRoomTimeMinutes(btn.dataset.timeMinutes);
+    const active = preset === createRoomSettings.timeMinutes;
     btn.classList.toggle('active', active);
     btn.setAttribute('aria-pressed', active ? 'true' : 'false');
   }
   for (const btn of document.querySelectorAll('[data-increment-seconds]')) {
-    const active = Number(btn.dataset.incrementSeconds) === createRoomSettings.incrementSeconds;
+    const active = createRoomHasClock() && Number(btn.dataset.incrementSeconds) === createRoomSettings.incrementSeconds;
     btn.classList.toggle('active', active);
+    btn.disabled = !createRoomHasClock();
     btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+    btn.setAttribute('aria-disabled', createRoomHasClock() ? 'false' : 'true');
   }
 }
 
@@ -785,18 +926,34 @@ function updateCreateRoomModalUi() {
   const timeSlider = document.getElementById('create-room-time-slider');
   const incrementInput = document.getElementById('create-room-increment-input');
   const incrementSlider = document.getElementById('create-room-increment-slider');
+  const hasClock = createRoomHasClock();
 
   if (codeEl) codeEl.textContent = ensureCreateRoomCode();
-  if (timeInput) timeInput.value = String(createRoomSettings.timeMinutes);
-  if (timeSlider) timeSlider.value = String(Math.min(Number(timeSlider.max), createRoomSettings.timeMinutes));
+  if (timeInput) {
+    timeInput.value = hasClock ? String(createRoomSettings.timeMinutes) : '';
+    timeInput.placeholder = hasClock ? '' : 'Unlimited';
+  }
+  if (timeSlider) {
+    timeSlider.value = String(Math.min(Number(timeSlider.max), createRoomSettings.timeMinutes || Number(timeSlider.max)));
+    timeSlider.disabled = !hasClock;
+    timeSlider.setAttribute('aria-disabled', hasClock ? 'false' : 'true');
+  }
   if (incrementInput) incrementInput.value = String(createRoomSettings.incrementSeconds);
-  if (incrementSlider) incrementSlider.value = String(Math.min(Number(incrementSlider.max), createRoomSettings.incrementSeconds));
+  if (incrementInput) {
+    incrementInput.disabled = !hasClock;
+    incrementInput.setAttribute('aria-disabled', hasClock ? 'false' : 'true');
+  }
+  if (incrementSlider) {
+    incrementSlider.value = String(Math.min(Number(incrementSlider.max), createRoomSettings.incrementSeconds));
+    incrementSlider.disabled = !hasClock;
+    incrementSlider.setAttribute('aria-disabled', hasClock ? 'false' : 'true');
+  }
   updateCreateRoomPresetButtons();
   updatePlaySideButtons();
 }
 
 function setCreateRoomTimeMinutes(value) {
-  createRoomSettings.timeMinutes = clampInteger(value, 1, 180, DEFAULT_MULTIPLAYER_TIME_MINUTES);
+  createRoomSettings.timeMinutes = parseCreateRoomTimeMinutes(value);
   updateCreateRoomModalUi();
 }
 
@@ -938,7 +1095,9 @@ function updateMultiplayerRoomUi() {
 
   const side = playMode.humanPlayer === 1 ? 'P2' : 'P1';
   const timeControl = formatMultiplayerTimeControl(room);
-  const timeText = timeControl ? ` Clock ${timeControl}.` : '';
+  const timeText = multiplayerRoomHasClock(room)
+    ? timeControl ? ` Clock ${timeControl}.` : ''
+    : ' No clock.';
   if (room.status === 'waiting' || !multiplayerRoomFull(room)) {
     setMultiplayerSetupStatus(`Room ${code} is waiting. You are ${side}.${timeText}`);
   } else if (!multiplayerOpponentConnected(room)) {
@@ -965,6 +1124,19 @@ function updateMultiplayerInviteModal() {
   copyBtn.textContent = show && multiplayerInviteCopiedCode === code ? 'Copied' : 'Copy';
 }
 
+function updateMultiplayerResignButton() {
+  const btn = document.getElementById('btn-resign-multiplayer');
+  if (!btn) return;
+  const show = playMultiplayerActive() && multiplayerWinner() == null && !currentState?.is_terminal;
+  const player = playMode.humanPlayer === 1 ? 1 : 0;
+  const actions = document.getElementById(`player-${player}-actions`);
+  if (actions && btn.parentElement !== actions) {
+    actions.appendChild(btn);
+  }
+  btn.classList.toggle('hidden', !show);
+  btn.disabled = !show || !multiplayerRoomFull();
+}
+
 function resetMultiplayerState(statusText = '') {
   playMode.active = false;
   playMode.mode = 'multiplayer';
@@ -975,7 +1147,9 @@ function resetMultiplayerState(statusText = '') {
   playMode.multiplayerStatus = statusText;
   playMode.rejoiningRoom = false;
   pendingReconnectRoomCode = '';
+  shownMultiplayerReplayShareSlug = '';
   updateMultiplayerRoomUi();
+  updateMultiplayerResignButton();
   if (statusText) setMultiplayerSetupStatus(statusText);
   updateMultiplayerTurnAttention();
 }
@@ -995,11 +1169,11 @@ function createMultiplayerRoom() {
     code,
     is_public: createRoomSettings.isPublic,
     time_minutes: createRoomSettings.timeMinutes,
-    increment_seconds: createRoomSettings.incrementSeconds,
+    increment_seconds: createRoomHasClock() ? createRoomSettings.incrementSeconds : null,
   });
 }
 
-function joinMultiplayerRoom(code = null) {
+function joinMultiplayerRoom(code = null, statusText = null) {
   const input = document.getElementById('multiplayer-room-code-input');
   const roomCode = normalizeRoomCode(code ?? input?.value);
   setPlayModeChoice('multiplayer');
@@ -1008,7 +1182,7 @@ function joinMultiplayerRoom(code = null) {
     return;
   }
   if (input) input.value = roomCode;
-  resetMultiplayerState(`Joining ${roomCode}...`);
+  resetMultiplayerState(statusText || `Joining ${roomCode}...`);
   session.send({ type: 'JoinMultiplayerRoom', code: roomCode });
 }
 
@@ -1023,6 +1197,25 @@ function reconnectMultiplayerRoom() {
   const input = document.getElementById('multiplayer-room-code-input');
   if (input) input.value = code;
   joinMultiplayerRoom(code);
+}
+
+function rememberMultiplayerRoomForPlayTabReconnect() {
+  const code = normalizeRoomCode(playMode.multiplayerRoom?.code);
+  if (!code) return;
+  pendingPlayTabReconnectRoomCode = code;
+  writeLastMultiplayerRoomCode(code);
+}
+
+function reconnectMultiplayerRoomFromPlayTab() {
+  const code = normalizeRoomCode(pendingPlayTabReconnectRoomCode);
+  if (!code) return false;
+  pendingPlayTabReconnectRoomCode = '';
+  setPlayModeChoice('multiplayer');
+  const input = document.getElementById('multiplayer-room-code-input');
+  if (input) input.value = code;
+  showPlaySetupView();
+  joinMultiplayerRoom(code, `Reconnecting ${code}...`);
+  return true;
 }
 
 function leaveMultiplayerRoom(showSetup = true, preserveReconnect = false) {
@@ -1042,7 +1235,15 @@ function leaveMultiplayerRoom(showSetup = true, preserveReconnect = false) {
 
 function addOpponentClockTime() {
   if (!playMultiplayerActive() || !playMode.multiplayerRoom) return;
+  if (!multiplayerRoomHasClock()) return;
   session.send({ type: 'AddMultiplayerOpponentTime' });
+}
+
+function resignMultiplayerGame() {
+  if (!playMultiplayerActive() || multiplayerWinner() != null) return;
+  if (!multiplayerRoomFull()) return;
+  if (!window.confirm('Resign this multiplayer game?')) return;
+  session.send({ type: 'ResignMultiplayerGame' });
 }
 
 async function copyMultiplayerInviteLink() {
@@ -1088,8 +1289,10 @@ function sessionReadyForSharedReplay() {
 }
 
 function maybeLoadSharedReplayFromUrl() {
+  if (guestMultiplayerMode()) return false;
   const slug = normalizeReplaySlug(
     pendingSharedReplaySlug ||
+    window.hexfishGuestReplaySlug ||
     currentSharedReplaySlugFromUrl() ||
     readPendingSharedReplaySlug()
   );
@@ -1141,6 +1344,13 @@ function showReplayShareModal(link, copied) {
   } else {
     copyBtn.focus();
   }
+}
+
+function maybeShowMultiplayerReplayShareModal(room) {
+  const slug = normalizeReplaySlug(room?.replay_share_slug);
+  if (!slug || shownMultiplayerReplayShareSlug === slug) return;
+  shownMultiplayerReplayShareSlug = slug;
+  showReplayShareModal(sharedReplayUrl(slug), false);
 }
 
 function hideReplayShareModal() {
@@ -1197,6 +1407,7 @@ function handleMultiplayerRoomMessage(msg) {
   if (msg.status === 'left') {
     setRoomCodeInUrl('');
     resetMultiplayerState('');
+    shownMultiplayerReplayShareSlug = '';
     if (activeView === 'play') showPlaySetupView();
     updateMultiplayerTurnAttention();
     return;
@@ -1217,24 +1428,39 @@ function handleMultiplayerRoomMessage(msg) {
   playMode.pendingHumanMove = false;
   playMode.rejoiningRoom = false;
   pendingReconnectRoomCode = '';
+  const previousRoomCode = normalizeRoomCode(playMode.multiplayerRoom?.code);
+  const nextRoomCode = normalizeRoomCode(msg.code);
+  if (previousRoomCode && previousRoomCode !== nextRoomCode) {
+    shownMultiplayerReplayShareSlug = '';
+  }
   playMode.multiplayerRoom = {
-    code: normalizeRoomCode(msg.code),
+    code: nextRoomCode,
     status: msg.status,
     players: Array.isArray(msg.players) ? msg.players : [],
     time_minutes: msg.time_minutes,
     increment_seconds: msg.increment_seconds,
     winner: msg.winner,
+    finish_reason: msg.finish_reason,
+    replay_share_slug: msg.replay_share_slug,
   };
   multiplayerClockSyncedAtMs = Date.now();
   writeLastMultiplayerRoomCode(playMode.multiplayerRoom.code);
   setRoomCodeInUrl(playMode.multiplayerRoom.code);
   setPlaySide(localPlayer, 'multiplayer');
   updateMultiplayerRoomUi();
+  updateMultiplayerResignButton();
 
   if (activeView === 'play-setup' || activeView === 'play') {
     showPlayView();
   }
   updateActionPanelStatus(currentState, false);
+  updateMultiplayerResultBanner();
+  if (multiplayerWinner() != null) {
+    const actionList = document.getElementById('action-list');
+    if (actionList) actionList.innerHTML = '';
+    board.clearOverlays();
+  }
+  maybeShowMultiplayerReplayShareModal(playMode.multiplayerRoom);
   updateMultiplayerTurnAttention();
 }
 
@@ -1963,7 +2189,7 @@ session.on('Connected', () => {
     session.send({ type: 'JoinMultiplayerRoom', code: pendingReconnectRoomCode });
     return;
   }
-  if (pendingSharedReplaySlug || currentSharedReplaySlugFromUrl() || readPendingSharedReplaySlug()) {
+  if (!guestMultiplayerMode() && (pendingSharedReplaySlug || currentSharedReplaySlugFromUrl() || readPendingSharedReplaySlug())) {
     maybeLoadSharedReplayFromUrl();
   }
 });
@@ -1994,6 +2220,7 @@ function setTabState(tab) {
 
 function showPlayView() {
   hideMultiplayerAnalysisGuard();
+  if (reconnectMultiplayerRoomFromPlayTab()) return;
   if (!playMode.active) {
     showPlaySetupView();
     return;
@@ -2045,6 +2272,7 @@ function showPlaySetupView() {
 }
 
 function showAnalysisView() {
+  if (showGuestFeatureBlocked('Analysis')) return;
   if (multiplayerGameOpen()) {
     showMultiplayerAnalysisGuard();
     return;
@@ -2069,8 +2297,25 @@ function showAnalysisView() {
 }
 
 function showReplayView() {
+  if (guestSharedReplayMode()) {
+    if (replayState || currentState?.replay) {
+      showReplayBoardView();
+      return;
+    }
+    const loadingSharedReplay = maybeLoadSharedReplayFromUrl();
+    if (loadingSharedReplay) {
+      showReplayBoardView();
+      return;
+    }
+    showGuestFeatureBlocked('Replays');
+    return;
+  }
+  if (showGuestFeatureBlocked('Replays')) return;
   hideMultiplayerAnalysisGuard();
-  if (multiplayerGameOpen()) leaveMultiplayerRoom(false, true);
+  if (multiplayerGameOpen()) {
+    rememberMultiplayerRoomForPlayTabReconnect();
+    leaveMultiplayerRoom(false, true);
+  }
   activeView = 'replay-list';
   setServerSingleplayerHumanPlayer(null);
   setTabState('replay');
@@ -2109,8 +2354,12 @@ function showReplayBoardView() {
 }
 
 function showEditorView() {
+  if (showGuestFeatureBlocked('Editor')) return;
   hideMultiplayerAnalysisGuard();
-  if (multiplayerGameOpen()) leaveMultiplayerRoom(false, true);
+  if (multiplayerGameOpen()) {
+    rememberMultiplayerRoomForPlayTabReconnect();
+    leaveMultiplayerRoom(false, true);
+  }
   activeView = 'editor';
   setServerSingleplayerHumanPlayer(null);
   setTabState('editor');
@@ -2143,8 +2392,25 @@ function updateNewGameButtonLabel() {
   btn.textContent = activeView === 'play' ? 'Lobby' : 'New Game';
 }
 
+function resetBoardPieceCounts() {
+  const panel = document.getElementById('board-piece-counts');
+  document.getElementById('piece-count-settlements').textContent = PIECE_LIMITS.settlements;
+  document.getElementById('piece-count-cities').textContent = PIECE_LIMITS.cities;
+  document.getElementById('piece-count-roads').textContent = PIECE_LIMITS.roads;
+  if (!panel) return;
+  panel.classList.remove('p1', 'p2');
+  panel.setAttribute(
+    'aria-label',
+    `${PIECE_LIMITS.settlements} settlements, ${PIECE_LIMITS.cities} cities, ${PIECE_LIMITS.roads} roads remaining`
+  );
+  for (const item of panel.querySelectorAll('[data-piece-kind]')) {
+    item.classList.remove('can-build');
+  }
+}
+
 function setEditorChrome(enabled) {
   updateNewGameButtonLabel();
+  if (enabled) resetBoardPieceCounts();
   if (enabled) hideRollBadge();
   if (enabled) clearResourceProductionAnimations();
   document.getElementById('left-ad-panel')?.classList.toggle('hidden', enabled);
@@ -2181,20 +2447,25 @@ function updateViewChrome(msg) {
   updateNewGameButtonLabel();
   const inPlay = playViewActive();
   const replay = !!msg?.replay || activeView === 'replay-board';
+  const guestReplayLocked = guestSharedReplayMode() && replay;
   document.getElementById('btn-new-game')?.classList.toggle('hidden', replay);
-  setMctsMoveDetailsVisible(!inPlay);
-  document.getElementById('analysis-bar-panel')?.classList.toggle('hidden', activeView === 'editor');
+  setMctsMoveDetailsVisible(!inPlay && !guestReplayLocked);
+  document.getElementById('guest-replay-analysis-control')?.classList.toggle('hidden', !guestReplayLocked);
+  document.getElementById('guest-replay-analysis-panel')?.classList.toggle('hidden', !guestReplayLocked);
+  document.getElementById('search-info')?.classList.toggle('hidden', guestReplayLocked);
+  document.getElementById('analysis-bar-panel')?.classList.toggle('hidden', activeView === 'editor' || guestReplayLocked);
   document.getElementById('board-resource-legend')?.classList.toggle('hidden', activeView === 'editor');
   document.getElementById('board-piece-counts')?.classList.toggle('hidden', activeView === 'editor');
   document.getElementById('board-history-controls')?.classList.toggle('hidden', activeView === 'editor' || playMultiplayerActive());
   document.getElementById('resource-animation-layer')?.classList.toggle('hidden', activeView === 'editor');
 
-  document.getElementById('search-action-control')?.classList.toggle('hidden', inPlay);
-  document.getElementById('budget-control')?.classList.toggle('hidden', inPlay);
+  document.getElementById('search-action-control')?.classList.toggle('hidden', inPlay || guestReplayLocked);
+  document.getElementById('budget-control')?.classList.toggle('hidden', inPlay || guestReplayLocked);
+  updateMultiplayerResignButton();
 
   const botMove = document.getElementById('btn-bot-move');
   if (botMove) {
-    if (inPlay) {
+    if (inPlay || guestReplayLocked) {
       botMove.classList.add('hidden');
       botMove.disabled = true;
     } else if (activeView === 'analysis' && !replay) {
@@ -2207,11 +2478,12 @@ function updateViewChrome(msg) {
     btn.disabled = true;
   }
 
-  controls.setOptionsAvailable(activeView === 'analysis' && !replay);
-  if (inPlay) board.clearSearchHighlights();
+  controls.setOptionsAvailable(activeView === 'analysis' && !replay && !guestReplayLocked);
+  if (inPlay || guestReplayLocked) board.clearSearchHighlights();
 }
 
 function startPlayGame() {
+  if (showGuestFeatureBlocked('Singleplayer')) return;
   setPlayModeChoice('bot');
   playMode.active = true;
   playMode.mode = 'bot';
@@ -2284,6 +2556,7 @@ function runPlayPonderSearch(msg) {
 }
 
 function requestReplayList() {
+  if (showGuestFeatureBlocked('Replays')) return;
   setReplayStatus('Loading...');
   session.send({ type: 'ListReplays' });
 }
@@ -2698,6 +2971,7 @@ function validateEditorDraft() {
 }
 
 function startEditedGame() {
+  if (showGuestFeatureBlocked('Editor')) return;
   const error = validateEditorDraft();
   if (error) {
     setEditorStatus(error);
@@ -2731,6 +3005,7 @@ document.getElementById('btn-join-multiplayer-room')?.addEventListener('click', 
 document.getElementById('btn-reconnect-multiplayer-room')?.addEventListener('click', reconnectMultiplayerRoom);
 document.getElementById('btn-copy-multiplayer-invite')?.addEventListener('click', copyMultiplayerInviteLink);
 document.getElementById('btn-refresh-multiplayer-lobby')?.addEventListener('click', requestMultiplayerLobby);
+document.getElementById('btn-resign-multiplayer')?.addEventListener('click', resignMultiplayerGame);
 document.getElementById('btn-add-opponent-time-0')?.addEventListener('click', addOpponentClockTime);
 document.getElementById('btn-add-opponent-time-1')?.addEventListener('click', addOpponentClockTime);
 document.getElementById('btn-close-replay-share-modal')?.addEventListener('click', hideReplayShareModal);
@@ -2739,6 +3014,12 @@ document.getElementById('btn-close-create-multiplayer-room-modal')?.addEventList
 document.getElementById('btn-cancel-create-multiplayer-room')?.addEventListener('click', hideCreateMultiplayerRoomModal);
 document.getElementById('btn-confirm-create-multiplayer-room')?.addEventListener('click', createMultiplayerRoom);
 document.getElementById('btn-return-to-multiplayer-game')?.addEventListener('click', showPlayView);
+document.getElementById('btn-close-guest-signin-required')?.addEventListener('click', hideGuestSignInRequiredModal);
+document.getElementById('btn-cancel-guest-signin-required')?.addEventListener('click', hideGuestSignInRequiredModal);
+document.getElementById('btn-guest-signin-required-signin')?.addEventListener('click', signInFromGuestRequiredModal);
+for (const btn of document.querySelectorAll('.guest-replay-analysis-signin')) {
+  btn.addEventListener('click', signInToAnalyzeGuestReplay);
+}
 document.getElementById('btn-regenerate-create-room-code')?.addEventListener('click', () => {
   createRoomSettings.code = randomMultiplayerRoomCode();
   updateCreateRoomModalUi();
@@ -2761,6 +3042,9 @@ document.getElementById('replay-share-modal')?.addEventListener('click', (event)
 });
 document.getElementById('create-multiplayer-room-modal')?.addEventListener('click', (event) => {
   if (event.target === event.currentTarget) hideCreateMultiplayerRoomModal();
+});
+document.getElementById('guest-signin-required-modal')?.addEventListener('click', (event) => {
+  if (event.target === event.currentTarget) hideGuestSignInRequiredModal();
 });
 window.addEventListener('focus', updateMultiplayerTurnAttention);
 window.addEventListener('blur', updateMultiplayerTurnAttention);
@@ -2823,6 +3107,10 @@ document.getElementById('btn-rotate-right').addEventListener('click', () => {
 // ── MCTS explore ─────────────────────────────────────────────────────
 
 mctsPanel.onExplore = (actionPath) => {
+  if (guestReplayAnalysisLocked()) {
+    showGuestSignInRequiredModal('Analysis');
+    return;
+  }
   session.send({
     type: 'ExploreSubtree',
     action_path: actionPath,
@@ -2950,7 +3238,8 @@ function publicVictoryPoints(playerFrame) {
 }
 
 function formatVictoryPoints(playerIndex, publicVp, totalVp) {
-  if (playViewActive() && playerIndex !== playMode.humanPlayer) {
+  const revealFinalScore = !!currentState?.is_terminal || multiplayerWinner() != null;
+  if (playViewActive() && playerIndex !== playMode.humanPlayer && !revealFinalScore) {
     return String(publicVp);
   }
   return totalVp > publicVp ? `${publicVp}(${totalVp})` : String(totalVp);
@@ -3181,7 +3470,10 @@ function updateDice(state) {
 // ── Keyboard shortcuts ────────────────────────────────────────────────
 
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') hideReplayShareModal();
+  if (e.key === 'Escape') {
+    hideReplayShareModal();
+    hideGuestSignInRequiredModal();
+  }
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
   if (activeView === 'replay-list' || activeView === 'editor' || activeView === 'play-setup') return;
   if (isPlayBotTurn()) return;
@@ -3213,8 +3505,14 @@ let appStarted = false;
 window.hexfishStartApp = () => {
   if (appStarted) return;
   appStarted = true;
+  if (guestMultiplayerMode()) enterGuestPlayMode();
+  else syncGuestUiState();
   session.connect();
-  const loadingSharedReplay = maybeLoadSharedReplayFromUrl();
+  const loadingSharedReplay = guestMultiplayerMode()
+    ? false
+    : guestSharedReplayMode()
+      ? enterGuestSharedReplayMode()
+      : maybeLoadSharedReplayFromUrl();
   if (!loadingSharedReplay) {
     requestMultiplayerLobby();
     maybeAutoJoinRoomFromUrl();
@@ -3227,9 +3525,20 @@ window.hexfishStopApp = () => {
   session.disconnect();
 };
 
-document.addEventListener('hexfish-auth-signed-in', window.hexfishStartApp);
-document.addEventListener('hexfish-auth-signed-out', window.hexfishStopApp);
+document.addEventListener('hexfish-auth-signed-in', () => {
+  syncGuestUiState();
+  window.hexfishStartApp();
+});
+document.addEventListener('hexfish-auth-guest', () => {
+  if (guestMultiplayerMode()) enterGuestPlayMode();
+  else syncGuestUiState();
+  window.hexfishStartApp();
+});
+document.addEventListener('hexfish-auth-signed-out', () => {
+  syncGuestUiState();
+  window.hexfishStopApp();
+});
 
-if (window.hexfishAuthSignedIn) {
+if (window.hexfishAuthSignedIn || guestMode()) {
   window.hexfishStartApp();
 }

@@ -62,6 +62,8 @@ pub struct MultiplayerPlayer {
     pub occupied: bool,
     pub connected: bool,
     pub you: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub time_millis: Option<u64>,
     pub clock_active: bool,
 }
@@ -129,6 +131,8 @@ pub enum ClientMsg {
     Authenticate {
         token: String,
         anonymous_session: Option<String>,
+        #[serde(default)]
+        username: Option<String>,
     },
     /// Start a new game (optionally with a seed).
     NewGame { seed: Option<u64> },
@@ -169,6 +173,8 @@ pub enum ClientMsg {
     LeaveMultiplayerRoom,
     /// Human plays an action in the current multiplayer room.
     PlayMultiplayerAction { action: usize },
+    /// Resign the current multiplayer game and award the win to the opponent.
+    ResignMultiplayerGame,
     /// Add a small clock bonus to the opponent in the current multiplayer room.
     AddMultiplayerOpponentTime,
     /// Request the bot to play an action.
@@ -259,6 +265,8 @@ pub enum ServerMsg {
         time_minutes: Option<u32>,
         increment_seconds: Option<u32>,
         winner: Option<u8>,
+        finish_reason: Option<String>,
+        replay_share_slug: Option<String>,
     },
     /// Public multiplayer lobby room list.
     MultiplayerLobby { rooms: Vec<MultiplayerLobbyRoom> },

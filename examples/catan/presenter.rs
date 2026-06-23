@@ -512,6 +512,10 @@ impl GamePresenter<GameState> for CatanPresenter {
         Ok(state)
     }
 
+    fn normalize_replay_actions(&self, initial_state: &GameState, actions: &[usize]) -> Vec<usize> {
+        game::action::canonicalize_replay_actions(initial_state, actions)
+    }
+
     fn static_dir(&self) -> &Path {
         &self.static_dir
     }

@@ -70,6 +70,8 @@ class Controls {
       pv_depth: 8,
     };
     this.onNewGame = null;
+    this.isAnalysisBlocked = null;
+    this.onAnalysisBlocked = null;
     this._setBudgetMode(this.budgetMode);
     this._bind();
     this._initHoverTips();
@@ -129,7 +131,18 @@ class Controls {
     }
   }
 
+  _analysisBlocked(target = this._searchTarget(), notify = true) {
+    const blocked = this.isAnalysisBlocked?.(target) === true;
+    if (blocked && notify) this.onAnalysisBlocked?.(target);
+    return blocked;
+  }
+
   _syncAutoSearch() {
+    if (this._analysisBlocked(this._searchTarget())) {
+      this.autoSearch = false;
+      document.getElementById('autosearch-toggle').checked = false;
+      return;
+    }
     const budget = this._currentBudget();
     const target = budget.mode === 'simulations' ? budget.value : 0;
     this.session.send({ type: 'SetAutoSearch', enabled: this.autoSearch, target, budget });
@@ -139,6 +152,7 @@ class Controls {
     if (!this.autoSearch) return;
     this.autoSearch = false;
     document.getElementById('autosearch-toggle').checked = false;
+    if (this._analysisBlocked(this._searchTarget(), false)) return;
     this.session.send({
       type: 'SetAutoSearch',
       enabled: false,
@@ -284,6 +298,7 @@ class Controls {
 
   runSearchWithBudget(budget, target = this._searchTarget()) {
     if (this.searchRunning) return false;
+    if (this._analysisBlocked(target)) return false;
     this.session.send({
       type: 'RunSearch',
       budget,
@@ -313,6 +328,7 @@ class Controls {
 
   pauseSearch() {
     if (!this.searchRunning || this.pauseRequested) return;
+    if (this._analysisBlocked(this._searchTarget())) return;
     this.pauseRequested = true;
     this._updateSearchButtons();
     this.session.send({
@@ -396,6 +412,7 @@ class Controls {
 
     document.getElementById('btn-bot-move').addEventListener('click', () => {
       if (this.replayMode) return;
+      if (this._analysisBlocked('analysis')) return;
       const budget = this._currentBudget();
       const msg = { type: 'BotMove', budget };
       if (budget.mode === 'simulations') msg.simulations = budget.value;
@@ -442,7 +459,7 @@ class Controls {
     });
 
     document.getElementById('autosearch-toggle').addEventListener('change', (e) => {
-      if (this.replayMode) {
+      if (this.replayMode || this._analysisBlocked(this._searchTarget())) {
         e.target.checked = false;
         this.autoSearch = false;
         return;
@@ -570,6 +587,7 @@ class Controls {
 
   startAutoplay() {
     if (this.replayMode) return;
+    if (this._analysisBlocked(this._searchTarget())) return;
     this.autoplay = true;
     this.pendingAutoplay = false;
     if (this._playForcedMove(this.lastState)) return;

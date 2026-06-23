@@ -80,6 +80,15 @@ pub trait GamePresenter<G: Game>: Send + Sync {
         Err("this game presenter does not support web replay logs".into())
     }
 
+    /// Rewrite a replay action list into the engine's canonical replay order.
+    ///
+    /// The default preserves actions exactly. Games with UI-relaxed action
+    /// ordering can override this so saved logs validate against search legal
+    /// actions when they are loaded later.
+    fn normalize_replay_actions(&self, _initial_state: &G, actions: &[usize]) -> Vec<usize> {
+        actions.to_vec()
+    }
+
     /// Directory containing static web assets (index.html, JS, CSS).
     fn static_dir(&self) -> &Path;
 

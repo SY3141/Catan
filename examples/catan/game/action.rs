@@ -39,6 +39,7 @@
 //! |                 | RoadBuilding, YOP, Monopoly, MaritimeTrade                 |
 //! | RoadBuilding    | Road (or EndTurn if none legal / no roads left)            |
 
+use hexfish::game::{Game, Status};
 use hexfish::player::Player;
 
 use super::board::{EdgeId, NodeId, TileId};
@@ -335,6 +336,103 @@ pub fn human_legal_actions(state: &GameState, actions: &mut Vec<ActionId>) {
             legal_actions(&relaxed, actions);
         }
     }
+}
+
+/// Rewrite replay actions so discard batches follow the canonical
+/// lexicographic order used by MCTS legal action generation.
+///
+/// Human-facing discard controls allow any resource order; `legal_actions`
+/// only accepts a canonical order to avoid duplicate discard permutations.
+/// This keeps the same discarded-resource multiset while making saved logs
+/// validate as replay/training data.
+pub fn canonicalize_replay_actions(initial_state: &GameState, actions: &[usize]) -> Vec<usize> {
+    let mut state = initial_state.clone();
+    let mut normalized = Vec::with_capacity(actions.len());
+    let mut i = 0;
+
+    while i < actions.len() {
+        if let Phase::Discard { remaining, .. } = &state.phase {
+            let remaining = *remaining;
+            if let Some((batch, next_state)) =
+                canonical_discard_batch(&state, &actions[i..], remaining)
+            {
+                normalized.extend(batch.iter().map(|action| action.0 as usize));
+                state = next_state;
+                i += usize::from(remaining);
+                continue;
+            }
+        }
+
+        let action = actions[i];
+        normalized.push(action);
+        if !apply_if_replay_legal(&mut state, action) {
+            normalized.extend_from_slice(&actions[i + 1..]);
+            break;
+        }
+        i += 1;
+    }
+
+    normalized
+}
+
+fn canonical_discard_batch(
+    state: &GameState,
+    actions: &[usize],
+    remaining: u8,
+) -> Option<(Vec<ActionId>, GameState)> {
+    let remaining = usize::from(remaining);
+    if actions.len() < remaining {
+        return None;
+    }
+
+    let mut counts = [0u8; 5];
+    for &action in &actions[..remaining] {
+        let action = u8::try_from(action).ok()?;
+        if !(DISCARD_START..DISCARD_END).contains(&action) {
+            return None;
+        }
+        counts[usize::from(action - DISCARD_START)] += 1;
+    }
+
+    let mut trial = state.clone();
+    let mut out = Vec::with_capacity(remaining);
+    let mut legal = Vec::new();
+    for _ in 0..remaining {
+        legal_actions(&trial, &mut legal);
+        let next = legal.iter().copied().find(|action| {
+            if !(DISCARD_START..DISCARD_END).contains(&action.0) {
+                return false;
+            }
+            counts[usize::from(action.0 - DISCARD_START)] > 0
+        })?;
+        counts[usize::from(next.0 - DISCARD_START)] -= 1;
+        super::apply(&mut trial, next);
+        out.push(next);
+    }
+
+    counts.iter().all(|&count| count == 0).then_some((out, trial))
+}
+
+fn apply_if_replay_legal(state: &mut GameState, action: usize) -> bool {
+    match state.status() {
+        Status::Terminal(_) => return false,
+        Status::Decision(_) => {
+            let mut legal = Vec::new();
+            state.legal_actions(&mut legal);
+            if !legal.contains(&action) {
+                return false;
+            }
+        }
+        Status::Chance => {
+            let mut chance = Vec::new();
+            state.chance_outcomes(&mut chance);
+            if !chance.is_empty() && !chance.iter().any(|&(outcome, _)| outcome == action) {
+                return false;
+            }
+        }
+    }
+    state.apply_action(action);
+    true
 }
 
 /// Minimum total pips for a setup settlement spot. Spots below this threshold
@@ -861,7 +959,7 @@ mod tests {
     use crate::game::board::Port;
     use crate::game::dev_card::DevCardDeck;
     use crate::game::dice::Dice;
-    use crate::game::resource::{ROAD_COST, ResourceArray};
+    use crate::game::resource::{ROAD_COST, Resource, ResourceArray};
     use crate::game::topology::Topology;
     use hexfish::game::Game;
     use std::sync::Arc;
@@ -1091,6 +1189,44 @@ mod tests {
             human.contains(&lumber) && human.contains(&brick) && human.contains(&wool),
             "human discard should include every resource currently held"
         );
+    }
+
+    #[test]
+    fn replay_discard_actions_are_canonicalized() {
+        let mut state = make_state();
+        state.current_player = Player::One;
+        state.players[Player::One].hand = ResourceArray::new(1, 6, 2, 1, 1);
+        state.phase = Phase::Discard {
+            player: Player::One,
+            remaining: 5,
+            roller: Player::One,
+            min_resource: 0,
+        };
+
+        let brick = discard_id(Resource::Brick).0 as usize;
+        let wool = discard_id(Resource::Wool).0 as usize;
+        let grain = discard_id(Resource::Grain).0 as usize;
+        let ore = discard_id(Resource::Ore).0 as usize;
+        let original = vec![ore, grain, wool, brick, brick];
+        let normalized = canonicalize_replay_actions(&state, &original);
+
+        assert_eq!(
+            normalized,
+            vec![brick, brick, wool, grain, ore],
+            "same discard multiset should be rewritten to MCTS canonical order"
+        );
+
+        let mut replay = state;
+        for action in normalized {
+            let mut legal = Vec::new();
+            replay.legal_actions(&mut legal);
+            assert!(
+                legal.contains(&action),
+                "normalized action {action} should be legal in canonical replay"
+            );
+            replay.apply_action(action);
+        }
+        assert!(matches!(replay.phase, Phase::MoveRobber));
     }
 
     /// The Main phase must always include END_TURN as a legal action,

@@ -21,7 +21,7 @@ tailwind.config = {
   }
 }
 </script>
-<link rel="stylesheet" href="style.css?v=tasklist-rules-20260623">
+<link rel="stylesheet" href="style.css?v=landing-editor-cleanup-20260623">
 <script
   defer
   crossorigin="anonymous"
@@ -45,10 +45,7 @@ tailwind.config = {
         <span class="login-mark" aria-hidden="true"></span>
         <span>HexFish</span>
       </div>
-      <h1 id="login-title">
-        Play sharper Catan<br>
-        with HexFish
-      </h1>
+      <h1 id="login-title">The fastest Catan games on the web</h1>
       <p class="login-intro">Practice against HexFish from beginner to expert difficulty, review every move, save your games, and share replay links with friends.</p>
       <div class="login-preview" aria-hidden="true">
         <img src="hexfish.png" alt="">
@@ -67,6 +64,9 @@ tailwind.config = {
         <div id="clerk-sign-in-mount" class="clerk-auth-panel"></div>
         <div id="clerk-sign-up-mount" class="clerk-auth-panel is-hidden"></div>
       </div>
+      <div class="login-guest-panel">
+        <button id="btn-continue-guest" class="login-guest-button" type="button">Continue as guest</button>
+      </div>
       <p id="clerk-login-status" class="login-status" aria-live="polite">Loading secure sign-in...</p>
     </div>
   </section>
@@ -75,7 +75,10 @@ tailwind.config = {
 <div id="app" class="app-shell is-hidden flex flex-col h-full" aria-hidden="true">
   <!-- Header -->
   <header class="flex items-center gap-4 px-4 py-2 bg-bg-2 border-b border-gray-700">
-    <h1 class="text-sm font-semibold text-gray-100">HexFish</h1>
+    <h1 class="topbar-brand text-sm font-semibold text-gray-100">
+      <span class="topbar-mark" aria-hidden="true"></span>
+      <span>HexFish</span>
+    </h1>
     <div class="flex items-center gap-1 text-xs" role="tablist" aria-label="Main views">
       <button id="tab-play" class="view-tab active px-2 py-1 rounded text-gray-100 bg-bg-3" type="button" role="tab" aria-selected="true">Play</button>
       <button id="tab-board" class="view-tab px-2 py-1 rounded text-gray-400 hover:text-gray-100 hover:bg-bg-3" type="button" role="tab" aria-selected="false">Analysis</button>
@@ -86,7 +89,8 @@ tailwind.config = {
     <span id="turn-label" class="text-xs text-gray-500"></span>
     <div id="auth-controls" class="ml-auto flex items-center gap-2">
       <a id="ko-fi-link" href="https://ko-fi.com/hexfish" target="_blank" rel="noopener noreferrer" class="px-2 py-0.5 rounded border border-gray-700 bg-bg text-[10px] font-semibold tracking-wide text-gray-300 hover:text-gray-100 hover:bg-bg-3 transition-colors">Donate</a>
-      <span id="app-version" class="px-2 py-0.5 rounded border border-gray-700 bg-bg text-[10px] font-semibold tracking-wide text-gray-400" aria-label="Version V1.0.5">V1.0.5</span>
+      <span id="app-version" class="px-2 py-0.5 rounded border border-gray-700 bg-bg text-[10px] font-semibold tracking-wide text-gray-400" aria-label="Version V1.0.7">V1.0.7</span>
+      <button id="btn-guest-sign-up" type="button" class="hidden px-2 py-0.5 rounded border border-accent bg-accent text-[10px] font-semibold tracking-wide text-white hover:bg-red-600 transition-colors">Sign up</button>
       <div id="clerk-user-button" class="hidden"></div>
       <span id="clerk-status" class="sr-only" aria-live="polite"></span>
     </div>
@@ -267,6 +271,9 @@ tailwind.config = {
         <div class="flex flex-wrap gap-1 text-xs" id="p0-hand"></div>
         <div class="flex flex-wrap gap-1 text-xs mt-1" id="p0-dev"></div>
         <div class="text-xs text-gray-400 mt-1" id="p0-stats"></div>
+        <div id="player-0-actions" class="player-card-actions">
+          <button id="btn-resign-multiplayer" type="button" class="hidden mt-2 w-full py-1.5 px-3 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-default">Resign</button>
+        </div>
         <button class="takeover-btn hidden mt-2 w-full py-1 text-xs bg-bg-3 border border-gray-700 text-gray-300 rounded hover:bg-accent transition-colors cursor-pointer" data-player="0">Take Over</button>
       </div>
       <div class="bg-bg rounded-md p-2.5 border border-gray-700 player-card" id="player-1">
@@ -285,6 +292,7 @@ tailwind.config = {
         <div class="flex flex-wrap gap-1 text-xs" id="p1-hand"></div>
         <div class="flex flex-wrap gap-1 text-xs mt-1" id="p1-dev"></div>
         <div class="text-xs text-gray-400 mt-1" id="p1-stats"></div>
+        <div id="player-1-actions" class="player-card-actions"></div>
         <button class="takeover-btn hidden mt-2 w-full py-1 text-xs bg-bg-3 border border-gray-700 text-gray-300 rounded hover:bg-accent transition-colors cursor-pointer" data-player="1">Take Over</button>
       </div>
       <div class="bg-bg rounded-md p-2.5 border border-gray-700" id="dice-panel" style="display:none">
@@ -314,6 +322,10 @@ tailwind.config = {
         <h4 class="text-xs font-medium mb-1 text-gray-300">Tree Explorer</h4>
         <div id="tree-view" class="text-[11px] max-h-60 overflow-y-auto font-mono"></div>
       </div>
+      <div id="guest-replay-analysis-panel" class="hidden border-t border-gray-700 p-2.5 text-xs text-gray-400">
+        <p class="leading-5">Sign in to analyze this replay.</p>
+        <button type="button" class="guest-replay-analysis-signin mt-2 py-1.5 px-3 text-xs bg-accent border border-accent text-white rounded cursor-pointer hover:bg-red-600 transition-colors">Sign In</button>
+      </div>
       <div id="game-log" class="border-t border-gray-700 p-1.5">
         <h4 class="text-xs font-medium mb-1 text-gray-300">Game Log</h4>
         <div id="log-view" class="text-[11px] max-h-48 overflow-y-auto text-gray-400"></div>
@@ -323,7 +335,7 @@ tailwind.config = {
 
   <section id="play-setup-view" class="flex-1 overflow-auto bg-bg p-3">
     <div class="mx-auto flex w-full max-w-xl flex-col gap-3">
-      <section class="bg-bg-2 border border-gray-700 rounded p-4">
+      <section id="singleplayer-setup-section" class="bg-bg-2 border border-gray-700 rounded p-4">
         <div class="flex flex-wrap items-start justify-between gap-3">
           <div>
             <h2 class="text-sm font-semibold text-gray-100">Singleplayer</h2>
@@ -464,6 +476,7 @@ tailwind.config = {
             <button type="button" class="create-room-preset-btn" data-time-minutes="15">15</button>
             <button type="button" class="create-room-preset-btn" data-time-minutes="30">30</button>
             <button type="button" class="create-room-preset-btn" data-time-minutes="60">60</button>
+            <button type="button" class="create-room-preset-btn" data-time-minutes="unlimited">Unlimited</button>
           </div>
         </section>
 
@@ -504,6 +517,20 @@ tailwind.config = {
     </div>
   </div>
 
+  <div id="guest-signin-required-modal" class="hidden fixed inset-0 z-40 items-center justify-center bg-black/65 px-4" role="dialog" aria-modal="true" aria-labelledby="guest-signin-required-title">
+    <div class="w-full max-w-sm rounded border border-gray-700 bg-bg-2 p-4 shadow-xl">
+      <div class="mb-3 flex items-center justify-between gap-3">
+        <h2 id="guest-signin-required-title" class="text-sm font-semibold text-gray-100">Sign In Required</h2>
+        <button id="btn-close-guest-signin-required" type="button" class="h-7 w-7 rounded border border-gray-700 bg-bg-3 text-gray-300 hover:bg-bg hover:text-gray-100" aria-label="Close sign in required dialog">&times;</button>
+      </div>
+      <p id="guest-signin-required-copy" class="text-xs leading-5 text-gray-400">This feature requires a signed-in account.</p>
+      <div class="mt-4 flex justify-end gap-2">
+        <button id="btn-cancel-guest-signin-required" type="button" class="py-1.5 px-3 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-bg transition-colors">Not Now</button>
+        <button id="btn-guest-signin-required-signin" type="button" class="py-1.5 px-3 text-xs bg-accent border border-accent text-white rounded cursor-pointer hover:bg-red-600 transition-colors">Sign In</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Bottom: Controls -->
   <div id="controls" class="hidden flex items-center gap-2 px-4 py-2 bg-bg-2 border-t border-gray-700 flex-wrap">
     <button id="btn-new-game" class="py-1.5 px-3 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors">New Game</button>
@@ -530,6 +557,10 @@ tailwind.config = {
         <input type="number" id="sims-input" min="0" max="2000" value="50" step="50" class="w-24 bg-bg-3 border border-gray-700 text-gray-200 rounded px-1.5 py-0.5 text-xs">
       </label>
     </div>
+    <div id="guest-replay-analysis-control" class="hidden flex items-center gap-2 text-xs text-gray-300">
+      <span>Sign in to analyze this replay.</span>
+      <button type="button" class="guest-replay-analysis-signin py-1.5 px-3 text-xs bg-accent border border-accent text-white rounded cursor-pointer hover:bg-red-600 transition-colors">Sign In</button>
+    </div>
     <div id="options-menu-control" class="relative">
       <button id="btn-options-menu" type="button" class="py-1.5 px-3 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors" aria-haspopup="menu" aria-expanded="false" aria-controls="options-flyout">Options</button>
       <div id="options-flyout" class="hidden absolute left-0 bottom-full mb-2 z-20 min-w-36 rounded border border-gray-700 bg-bg-2 p-2 shadow-lg" role="menu">
@@ -549,11 +580,11 @@ tailwind.config = {
 </div>
 <div id="svg-tooltip"></div>
 
-<script src="session.js?v=connected-event-20260621"></script>
+<script src="session.js?v=username-auth-20260623"></script>
 <script src="board.js?v=tile-textures-20260623"></script>
 <script src="mcts.js?v=cpu-load-20260622"></script>
-<script src="controls.js?v=replay-slider-20260620"></script>
-<script src="auth.js?v=frontend-auth-gate-20260621"></script>
-<script src="app.js?v=tasklist-rules-20260623"></script>
+<script src="controls.js?v=guest-shared-replay-20260623"></script>
+<script src="auth.js?v=landing-username-removed-20260623"></script>
+<script src="app.js?v=editor-piece-count-reset-20260623"></script>
 </body>
 </html>

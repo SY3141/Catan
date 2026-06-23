@@ -220,10 +220,15 @@ fn private_player_frame(state: &GameState, pid: Player, perspective: Player) -> 
     }
 
     let known_dev_cards: u8 = ps.dev_cards.0.iter().sum();
+    let reveal_score = matches!(state.phase, Phase::GameOver(_));
     PlayerFrame {
         hand: [0; 5],
         hand_total: ps.hand.total(),
-        vp: state.public_vps(pid),
+        vp: if reveal_score {
+            state.total_vps(pid)
+        } else {
+            state.public_vps(pid)
+        },
         dev_cards: [0; 5],
         dev_cards_bought_this_turn: [0; 5],
         hidden_dev_cards: known_dev_cards + ps.hidden_dev_cards,

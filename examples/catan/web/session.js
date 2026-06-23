@@ -44,6 +44,7 @@ class Session {
         type: 'Authenticate',
         token,
         anonymous_session: this.anonymousSessionId,
+        username: this._getAuthUsername(),
       }));
     };
 
@@ -148,6 +149,19 @@ class Session {
   async _getAuthToken() {
     if (typeof this.getAuthToken !== 'function') return null;
     return this.getAuthToken();
+  }
+
+  _getAuthUsername() {
+    if (!window.hexfishAuthSignedIn) return null;
+    const value = typeof window.hexfishAuthUsername === 'function'
+      ? window.hexfishAuthUsername()
+      : window.hexfishUsername;
+    const username = String(value || '')
+      .replace(/[\u0000-\u001f\u007f]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 24);
+    return username || null;
   }
 
   _loadAnonymousSessionId() {

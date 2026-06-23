@@ -8,6 +8,8 @@
   const signUpTab = document.getElementById('login-tab-sign-up');
   const loginPanelTitle = document.getElementById('login-panel-title');
   const loginPanelCopy = document.getElementById('login-panel-copy');
+  const continueGuestButton = document.getElementById('btn-continue-guest');
+  const guestSignUpButton = document.getElementById('btn-guest-sign-up');
   const userButton = document.getElementById('clerk-user-button');
   const loginStatus = document.getElementById('clerk-login-status');
   const status = document.getElementById('clerk-status');
@@ -15,6 +17,7 @@
   let signInMounted = false;
   let signUpMounted = false;
   let clerkNavigationGuardInstalled = false;
+  let suppressInviteGuestMode = false;
 
   if (!loginPage || !appShell || !authMount || !signInMount || !signUpMount || !signInTab || !signUpTab || !userButton) {
     return;
@@ -30,6 +33,39 @@
       panel: 'Create a free account to save replay history, copy share links, and continue games across devices.',
     },
   };
+
+  const normalizeUsername = (value) => (
+    String(value || '')
+      .replace(/[\u0000-\u001f\u007f]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 24)
+  );
+
+  const clerkUsername = () => (
+    normalizeUsername(window.Clerk?.user?.username)
+  );
+
+  const clerkUserDisplayNameFallback = () => {
+    const user = window.Clerk?.user;
+    if (!user) return '';
+    const firstLast = [user.firstName, user.lastName].filter(Boolean).join(' ');
+    const emailPrefix = user.primaryEmailAddress?.emailAddress?.split('@')[0] || '';
+    const candidates = [firstLast, user.fullName, emailPrefix];
+    return normalizeUsername(candidates.find((candidate) => normalizeUsername(candidate)) || '');
+  };
+
+  const currentAuthUsername = () => (
+    normalizeUsername(
+      clerkUsername()
+      || clerkUserDisplayNameFallback()
+    )
+  );
+
+  window.hexfishUsername = currentAuthUsername();
+  window.hexfishAuthUsername = () => (
+    window.hexfishAuthSignedIn ? currentAuthUsername() : ''
+  );
 
   const syncAuthMountHeight = () => {
     const update = () => {
@@ -61,6 +97,22 @@
 
   const currentPageUrl = () => (
     `${window.location.origin}${window.location.pathname}${window.location.search}`
+  );
+
+  const normalizeRoomCode = (code) => (
+    String(code || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 12)
+  );
+
+  const currentRoomCode = () => (
+    normalizeRoomCode(new URLSearchParams(window.location.search).get('room'))
+  );
+
+  const normalizeReplaySlug = (slug) => (
+    String(slug || '').trim().replace(/[^A-Za-z0-9_-]/g, '').slice(0, 128)
+  );
+
+  const currentReplaySlug = () => (
+    normalizeReplaySlug(new URLSearchParams(window.location.search).get('replay'))
   );
 
   const stripClerkRedirectParams = () => {
@@ -151,6 +203,39 @@
     window.history.replaceState(window.history.state, '', currentPageUrl());
   };
 
+  const showLocalAuthTab = (view) => {
+    suppressInviteGuestMode = true;
+    setActiveTab(view);
+    clearAuthHash();
+    renderAuthState();
+  };
+
+  const authViewForTarget = (target) => {
+    if (!target) return null;
+    const value = typeof target === 'string' ? target : String(target);
+    const lowerValue = value.toLowerCase();
+    if (
+      lowerValue.includes('verify-email-address')
+      || lowerValue.includes('verify-phone-number')
+      || lowerValue.includes('factor-one')
+      || lowerValue.includes('factor-two')
+      || lowerValue.includes('continue')
+      || lowerValue.includes('reset-password')
+    ) {
+      return null;
+    }
+    if (lowerValue.includes('sign-up')) return 'sign-up';
+    if (lowerValue.includes('sign-in')) return 'sign-in';
+    return null;
+  };
+
+  const maybeUseLocalAuthNavigation = (target) => {
+    const view = authViewForTarget(target);
+    if (!view) return false;
+    showLocalAuthTab(view);
+    return true;
+  };
+
   const getLocalVerificationTarget = (target) => {
     if (!target) return null;
     const targetUrl = typeof target === 'string' ? target : String(target);
@@ -180,9 +265,18 @@
         setActiveTab('sign-up');
         return originalNavigate(localTarget, ...args);
       }
+      if (maybeUseLocalAuthNavigation(target)) return;
       return originalNavigate(target, ...args);
     };
     clerkNavigationGuardInstalled = true;
+  };
+
+  const handleAuthMountClick = (event) => {
+    const link = event.target?.closest?.('a[href]');
+    if (!link || !authMount.contains(link)) return;
+    if (!maybeUseLocalAuthNavigation(link.href)) return;
+    event.preventDefault();
+    event.stopPropagation();
   };
 
   const showLoginPage = () => {
@@ -191,15 +285,21 @@
     appShell.classList.add('is-hidden');
     appShell.setAttribute('aria-hidden', 'true');
     document.body.classList.add('auth-active');
+    guestSignUpButton?.classList.add('hidden');
   };
 
-  const showAppShell = () => {
+  const showAppShell = (options = {}) => {
+    const showUserControl = options.showUserControl !== false;
     loginPage.classList.add('is-hidden');
     loginPage.setAttribute('aria-hidden', 'true');
     appShell.classList.remove('is-hidden');
     appShell.removeAttribute('aria-hidden');
     document.body.classList.remove('auth-active');
-    userButton.classList.remove('hidden');
+    userButton.classList.toggle('hidden', !showUserControl);
+  };
+
+  const setGuestHeaderSignUpVisible = (visible) => {
+    guestSignUpButton?.classList.toggle('hidden', !visible);
   };
 
   const mountCurrentAuthForm = (clerk) => {
@@ -227,13 +327,80 @@
 
   const unmountUserControl = (clerk) => {
     if (!userButton.dataset.clerkMounted) return;
-    if (typeof clerk.unmountUserButton === 'function') {
+    if (clerk && typeof clerk.unmountUserButton === 'function') {
       clerk.unmountUserButton(userButton);
     }
     userButton.innerHTML = '';
     userButton.classList.add('hidden');
     delete userButton.dataset.clerkMounted;
   };
+
+  const clearGuestState = () => {
+    window.hexfishGuestMultiplayer = false;
+    window.hexfishGuestRoomCode = '';
+    window.hexfishGuestSharedReplay = false;
+    window.hexfishGuestReplaySlug = '';
+  };
+
+  const enterGuestMode = () => {
+    const clerk = window.Clerk;
+    suppressInviteGuestMode = false;
+    window.hexfishAuthSignedIn = false;
+    window.hexfishGuestMultiplayer = true;
+    window.hexfishGuestRoomCode = currentRoomCode();
+    window.hexfishGuestSharedReplay = false;
+    window.hexfishGuestReplaySlug = '';
+    unmountUserControl(clerk);
+    showAppShell({ showUserControl: false });
+    setGuestHeaderSignUpVisible(true);
+    setStatus('Guest multiplayer');
+    emitAuthEvent('hexfish-auth-guest');
+  };
+
+  const enterGuestSharedReplayMode = () => {
+    const clerk = window.Clerk;
+    const slug = currentReplaySlug();
+    if (!slug) return false;
+    suppressInviteGuestMode = false;
+    window.hexfishAuthSignedIn = false;
+    window.hexfishGuestMultiplayer = false;
+    window.hexfishGuestRoomCode = '';
+    window.hexfishGuestSharedReplay = true;
+    window.hexfishGuestReplaySlug = slug;
+    unmountUserControl(clerk);
+    showAppShell({ showUserControl: false });
+    setGuestHeaderSignUpVisible(true);
+    setStatus('Viewing shared replay');
+    emitAuthEvent('hexfish-auth-guest');
+    return true;
+  };
+
+  const showAuthPageFromGuest = (view) => {
+    const clerk = window.Clerk;
+    const nextView = view === 'sign-up' ? 'sign-up' : 'sign-in';
+    suppressInviteGuestMode = true;
+    window.hexfishAuthSignedIn = false;
+    clearGuestState();
+    setGuestHeaderSignUpVisible(false);
+    emitAuthEvent('hexfish-auth-signed-out');
+    setActiveTab(nextView);
+    showLoginPage();
+    if (!clerk) {
+      setStatus(nextView === 'sign-up' ? 'Sign-up is unavailable right now.' : 'Sign-in is unavailable right now.');
+      return;
+    }
+    installClerkNavigationGuard(clerk);
+    mountCurrentAuthForm(clerk);
+    if ((nextView === 'sign-up' && signUpMounted) || (nextView === 'sign-in' && signInMounted)) {
+      setStatus('');
+    }
+  };
+
+  const showSignUpPageFromGuest = () => showAuthPageFromGuest('sign-up');
+  const showSignInPageFromGuest = () => showAuthPageFromGuest('sign-in');
+
+  window.hexfishShowSignInFromGuest = showSignInPageFromGuest;
+  window.hexfishShowSignUpFromGuest = showSignUpPageFromGuest;
 
   const renderAuthState = () => {
     const clerk = window.Clerk;
@@ -243,13 +410,28 @@
     if (clerk.isSignedIn || clerk.session || clerk.user) {
       showAppShell();
       mountUserControl(clerk);
+      suppressInviteGuestMode = false;
       window.hexfishAuthSignedIn = true;
+      window.hexfishUsername = currentAuthUsername();
+      clearGuestState();
+      setGuestHeaderSignUpVisible(false);
       emitAuthEvent('hexfish-auth-signed-in');
       setStatus('Signed in');
       return;
     }
 
+    if (window.hexfishGuestSharedReplay || (!suppressInviteGuestMode && currentReplaySlug())) {
+      enterGuestSharedReplayMode();
+      return;
+    }
+
+    if (window.hexfishGuestMultiplayer || (!suppressInviteGuestMode && currentRoomCode())) {
+      enterGuestMode();
+      return;
+    }
+
     window.hexfishAuthSignedIn = false;
+    clearGuestState();
     unmountUserControl(clerk);
     showLoginPage();
     mountCurrentAuthForm(clerk);
@@ -258,16 +440,20 @@
   };
 
   signInTab.addEventListener('click', () => {
-    setActiveTab('sign-in');
-    clearAuthHash();
-    renderAuthState();
+    showLocalAuthTab('sign-in');
   });
 
   signUpTab.addEventListener('click', () => {
-    setActiveTab('sign-up');
-    clearAuthHash();
-    renderAuthState();
+    showLocalAuthTab('sign-up');
   });
+
+  continueGuestButton?.addEventListener('click', () => {
+    clearAuthHash();
+    enterGuestMode();
+  });
+
+  guestSignUpButton?.addEventListener('click', showSignUpPageFromGuest);
+  authMount.addEventListener('click', handleAuthMountClick, true);
 
   window.addEventListener('hashchange', () => {
     syncAuthViewFromHash();
@@ -276,6 +462,14 @@
 
   window.addEventListener('load', async () => {
     if (!window.Clerk) {
+      if (currentReplaySlug()) {
+        enterGuestSharedReplayMode();
+        return;
+      }
+      if (currentRoomCode()) {
+        enterGuestMode();
+        return;
+      }
       setStatus('Clerk failed to load');
       return;
     }

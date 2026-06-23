@@ -891,6 +891,7 @@ impl<G: Game + 'static> UserSession<G> {
 struct SeatOwner {
     user_id: String,
     account_key: String,
+    display_name: Option<String>,
 }
 
 struct MultiplayerSocket {
@@ -912,6 +913,13 @@ struct RoomClock {
     active_since_ms: Option<u64>,
     started: bool,
     winner: Option<usize>,
+}
+
+#[derive(Clone)]
+struct RoomOutcome {
+    winner: Option<usize>,
+    reason: String,
+    replay_share_slug: Option<String>,
 }
 
 impl RoomClock {
@@ -981,6 +989,7 @@ struct MultiplayerRoom<G: Game + 'static> {
     seats: StdMutex<[Option<SeatOwner>; 2]>,
     sockets: StdMutex<HashMap<u64, MultiplayerSocket>>,
     clock: StdMutex<RoomClock>,
+    outcome: StdMutex<Option<RoomOutcome>>,
     clock_generation: AtomicU64,
     next_socket_id: AtomicU64,
     replay_store: Option<Arc<ReplayStore>>,
@@ -1014,6 +1023,7 @@ impl<G: Game + 'static> MultiplayerRoom<G> {
             seats: StdMutex::new(seats),
             sockets: StdMutex::new(HashMap::new()),
             clock: StdMutex::new(RoomClock::new(time_minutes)),
+            outcome: StdMutex::new(None),
             clock_generation: AtomicU64::new(0),
             next_socket_id: AtomicU64::new(1),
             replay_store,
@@ -1033,6 +1043,10 @@ impl<G: Game + 'static> MultiplayerRoom<G> {
             seat.as_ref()
                 .map_or(false, |seat| seat.user_id == owner.user_id)
         }) {
+            if owner.display_name.is_some() {
+                seats[player] = Some(owner);
+                self.touch();
+            }
             return Ok(player);
         }
         if let Some(player) = seats.iter().position(Option::is_none) {
@@ -1103,6 +1117,11 @@ impl<G: Game + 'static> MultiplayerRoom<G> {
         let seats = self.seats.lock().expect("room seats lock poisoned");
         let sockets = self.sockets.lock().expect("room sockets lock poisoned");
         let clock = self.clock_snapshot();
+        let outcome = self.outcome_snapshot();
+        let winner = outcome
+            .as_ref()
+            .and_then(|outcome| outcome.winner)
+            .or(clock.winner);
         let occupied = [
             seats[0].as_ref().map(|seat| seat.user_id.as_str()),
             seats[1].as_ref().map(|seat| seat.user_id.as_str()),
@@ -1118,12 +1137,15 @@ impl<G: Game + 'static> MultiplayerRoom<G> {
                     occupied: occupied[player].is_some(),
                     connected,
                     you: local_player == Some(player),
+                    name: seats[player]
+                        .as_ref()
+                        .and_then(|seat| seat.display_name.clone()),
                     time_millis: clock.time_millis[player],
                     clock_active: clock.active_player == Some(player),
                 }
             })
             .collect::<Vec<_>>();
-        let status = if clock.winner.is_some() {
+        let status = if outcome.is_some() || clock.winner.is_some() {
             "finished"
         } else if occupied.iter().all(Option::is_some) {
             "active"
@@ -1137,7 +1159,9 @@ impl<G: Game + 'static> MultiplayerRoom<G> {
             players,
             time_minutes: self.time_minutes,
             increment_seconds: self.increment_seconds,
-            winner: clock.winner.map(|player| player as u8),
+            winner: winner.map(|player| player as u8),
+            finish_reason: outcome.as_ref().map(|outcome| outcome.reason.clone()),
+            replay_share_slug: outcome.and_then(|outcome| outcome.replay_share_slug),
         }
     }
 
@@ -1161,7 +1185,9 @@ impl<G: Game + 'static> MultiplayerRoom<G> {
                 connected_count += 1;
             }
         }
-        let status = if occupied_count == 2 {
+        let status = if self.outcome_snapshot().is_some() {
+            "finished"
+        } else if occupied_count == 2 {
             "active"
         } else {
             "waiting"
@@ -1188,6 +1214,7 @@ impl<G: Game + 'static> MultiplayerRoom<G> {
                     occupied: false,
                     connected: false,
                     you: false,
+                    name: None,
                     time_millis: None,
                     clock_active: false,
                 },
@@ -1195,6 +1222,7 @@ impl<G: Game + 'static> MultiplayerRoom<G> {
                     occupied: false,
                     connected: false,
                     you: false,
+                    name: None,
                     time_millis: None,
                     clock_active: false,
                 },
@@ -1202,6 +1230,8 @@ impl<G: Game + 'static> MultiplayerRoom<G> {
             time_minutes: None,
             increment_seconds: None,
             winner: None,
+            finish_reason: None,
+            replay_share_slug: None,
         }
     }
 
@@ -1213,12 +1243,56 @@ impl<G: Game + 'static> MultiplayerRoom<G> {
         if changed && snapshot.winner.is_some() {
             self.clock_generation.fetch_add(1, Ordering::Relaxed);
             self.touch();
+            self.mark_finished(snapshot.winner, "timeout");
         }
         snapshot
     }
 
     fn clock_winner(&self) -> Option<usize> {
         self.clock_snapshot().winner
+    }
+
+    fn outcome_snapshot(&self) -> Option<RoomOutcome> {
+        self.outcome
+            .lock()
+            .expect("room outcome lock poisoned")
+            .clone()
+    }
+
+    fn is_finished(&self) -> bool {
+        self.outcome_snapshot().is_some() || self.clock_winner().is_some()
+    }
+
+    fn mark_finished(&self, winner: Option<usize>, reason: &str) -> bool {
+        let mut outcome = self.outcome.lock().expect("room outcome lock poisoned");
+        if outcome.is_some() {
+            return false;
+        }
+        *outcome = Some(RoomOutcome {
+            winner,
+            reason: reason.to_string(),
+            replay_share_slug: None,
+        });
+        drop(outcome);
+
+        let mut clock = self.clock.lock().expect("room clock lock poisoned");
+        clock.winner = winner;
+        clock.active_player = None;
+        clock.active_since_ms = None;
+        drop(clock);
+
+        self.clock_generation.fetch_add(1, Ordering::Relaxed);
+        self.touch();
+        true
+    }
+
+    fn set_replay_share_slug(&self, slug: String) {
+        let mut outcome = self.outcome.lock().expect("room outcome lock poisoned");
+        if let Some(outcome) = outcome.as_mut() {
+            if outcome.replay_share_slug.is_none() {
+                outcome.replay_share_slug = Some(slug);
+            }
+        }
     }
 
     fn finish_clock_turn(&self, moved_player: usize, next_player: usize, game_over: bool) {
@@ -1295,10 +1369,14 @@ impl<G: Game + 'static> MultiplayerRoom<G> {
         let before = clock.winner;
         let changed = clock.refresh(current_unix_ms());
         let timed_out = before.is_none() && clock.winner.is_some();
+        let winner = clock.winner;
         drop(clock);
         if changed {
             self.clock_generation.fetch_add(1, Ordering::Relaxed);
             self.touch();
+        }
+        if timed_out {
+            self.mark_finished(winner, "timeout");
         }
         timed_out
     }
@@ -1359,7 +1437,12 @@ impl<G: Game + 'static> MultiplayerRoom<G> {
         let Some(store) = self.replay_store.as_ref() else {
             return Vec::new();
         };
-        let Some(log) = session.export_current_log() else {
+        let log = if require_terminal {
+            session.export_current_log()
+        } else {
+            session.export_current_log_allow_empty()
+        };
+        let Some(log) = log else {
             return Vec::new();
         };
 
@@ -1372,11 +1455,20 @@ impl<G: Game + 'static> MultiplayerRoom<G> {
                 .collect::<Vec<_>>()
         };
         let mut errors = Vec::new();
+        let mut first_share_slug = None;
         for account_key in account_keys {
             let counter = self.next_replay_counter.fetch_add(1, Ordering::Relaxed);
-            if let Err(message) = store.save(&account_key, self.room_id, counter, &log).await {
-                errors.push(ServerMsg::Error { message });
+            match store.save(&account_key, self.room_id, counter, &log).await {
+                Ok(entry) => {
+                    if first_share_slug.is_none() {
+                        first_share_slug = Some(entry.share_slug);
+                    }
+                }
+                Err(message) => errors.push(ServerMsg::Error { message }),
             }
+        }
+        if let Some(slug) = first_share_slug {
+            self.set_replay_share_slug(slug);
         }
         errors
     }
@@ -1483,6 +1575,27 @@ impl<G: Game + 'static> MultiplayerRoomStore<G> {
         time_minutes: Option<u32>,
         increment_seconds: Option<u32>,
     ) -> Result<(Arc<MultiplayerRoom<G>>, usize), String> {
+        self.create_room_with_display_name(
+            user_id,
+            None,
+            preferred_player,
+            requested_code,
+            is_public,
+            time_minutes,
+            increment_seconds,
+        )
+    }
+
+    fn create_room_with_display_name(
+        &self,
+        user_id: &str,
+        display_name: Option<&str>,
+        preferred_player: Option<u8>,
+        requested_code: Option<String>,
+        is_public: Option<bool>,
+        time_minutes: Option<u32>,
+        increment_seconds: Option<u32>,
+    ) -> Result<(Arc<MultiplayerRoom<G>>, usize), String> {
         let player = match preferred_player {
             Some(1) => 1,
             _ => 0,
@@ -1490,6 +1603,7 @@ impl<G: Game + 'static> MultiplayerRoomStore<G> {
         let owner = SeatOwner {
             user_id: user_id.to_string(),
             account_key: redacted_account_key(user_id),
+            display_name: display_name.map(str::to_string),
         };
         let room_id = self.next_room_id.fetch_add(1, Ordering::Relaxed);
         let mut rooms = self.rooms.lock().expect("room store lock poisoned");
@@ -1542,6 +1656,15 @@ impl<G: Game + 'static> MultiplayerRoomStore<G> {
         user_id: &str,
         code: &str,
     ) -> Result<(Arc<MultiplayerRoom<G>>, usize), String> {
+        self.join_room_with_display_name(user_id, None, code)
+    }
+
+    fn join_room_with_display_name(
+        &self,
+        user_id: &str,
+        display_name: Option<&str>,
+        code: &str,
+    ) -> Result<(Arc<MultiplayerRoom<G>>, usize), String> {
         let code = normalize_room_code(code)?;
         let room = self
             .rooms
@@ -1553,6 +1676,7 @@ impl<G: Game + 'static> MultiplayerRoomStore<G> {
         let owner = SeatOwner {
             user_id: user_id.to_string(),
             account_key: redacted_account_key(user_id),
+            display_name: display_name.map(str::to_string),
         };
         let player = room.assign_or_find_seat(owner)?;
         Ok((room, player))
@@ -1694,6 +1818,14 @@ fn replay_result_for_log<G: Game + 'static>(factory: &SessionFactory<G>, log: &G
     }
 }
 
+fn winner_from_reward(reward: Option<f32>) -> Option<usize> {
+    match reward {
+        Some(reward) if reward > 0.0 => Some(0),
+        Some(reward) if reward < 0.0 => Some(1),
+        _ => None,
+    }
+}
+
 fn responses_include_terminal_game_state(responses: &[ServerMsg]) -> bool {
     responses.iter().any(|msg| {
         matches!(
@@ -1781,6 +1913,7 @@ fn board_fingerprint_in_use<G: Game + 'static>(
 
 struct SocketSessionKey {
     user_id: String,
+    display_name: Option<String>,
     ephemeral: bool,
     scope: &'static str,
 }
@@ -2126,7 +2259,8 @@ async fn handle_socket<G: Game + 'static>(
         Ok(session_key) => session_key,
         Err(()) => return,
     };
-    let user_id = session_key.user_id;
+    let user_id = session_key.user_id.clone();
+    let display_name = session_key.display_name.clone();
     let session_scope = session_key.scope;
     let account_key = redacted_account_key(&user_id);
     let (user_session, created) = store.get_or_create(&user_id);
@@ -2158,6 +2292,7 @@ async fn handle_socket<G: Game + 'static>(
         Arc::clone(&user_session),
         rooms,
         user_id.clone(),
+        display_name,
         socket_id,
         outbound_tx,
         outbound_rx,
@@ -2213,11 +2348,13 @@ async fn authenticate_socket(socket: &mut WebSocket) -> Result<SocketSessionKey,
     let ClientMsg::Authenticate {
         token,
         anonymous_session,
+        username,
     } = client_msg
     else {
         send_unauthorized(socket).await;
         return Err(());
     };
+    let display_name = normalize_display_name(username);
 
     if let Some(user_id) = anonymous_session
         .as_deref()
@@ -2225,22 +2362,56 @@ async fn authenticate_socket(socket: &mut WebSocket) -> Result<SocketSessionKey,
     {
         Ok(SocketSessionKey {
             user_id,
+            display_name,
             ephemeral: false,
             scope: "anonymous",
         })
     } else if let Some(user_id) = anonymous_user_id_from_token(&token) {
         Ok(SocketSessionKey {
             user_id,
+            display_name,
             ephemeral: false,
             scope: "anonymous",
         })
     } else {
         Ok(SocketSessionKey {
             user_id: format!("anonymous:{}", fastrand::u64(..)),
+            display_name,
             ephemeral: true,
             scope: "anonymous-ephemeral",
         })
     }
+}
+
+fn normalize_display_name(name: Option<String>) -> Option<String> {
+    const MAX_DISPLAY_NAME_CHARS: usize = 24;
+    let name = name?;
+    let mut normalized = String::new();
+    let mut last_was_space = false;
+    let mut chars = 0;
+
+    for ch in name.trim().chars() {
+        if chars >= MAX_DISPLAY_NAME_CHARS {
+            break;
+        }
+        if ch.is_control() {
+            continue;
+        }
+        if ch.is_whitespace() {
+            if normalized.is_empty() || last_was_space {
+                continue;
+            }
+            normalized.push(' ');
+            last_was_space = true;
+        } else {
+            normalized.push(ch);
+            last_was_space = false;
+        }
+        chars += 1;
+    }
+
+    let normalized = normalized.trim().to_string();
+    (!normalized.is_empty()).then_some(normalized)
 }
 
 fn anonymous_user_id_from_token(token: &str) -> Option<String> {
@@ -2263,6 +2434,7 @@ async fn handle_authenticated_socket<G: Game + 'static>(
     user_session: Arc<UserSession<G>>,
     rooms: Arc<MultiplayerRoomStore<G>>,
     user_id: String,
+    display_name: Option<String>,
     socket_id: u64,
     outbound_tx: mpsc::UnboundedSender<String>,
     mut outbound_rx: mpsc::UnboundedReceiver<String>,
@@ -2301,6 +2473,7 @@ async fn handle_authenticated_socket<G: Game + 'static>(
                     &user_session,
                     &rooms,
                     &user_id,
+                    display_name.as_deref(),
                     socket_id,
                     &outbound_tx,
                     &mut active_room,
@@ -2328,6 +2501,7 @@ async fn handle_authenticated_message<G: Game + 'static>(
     user_session: &Arc<UserSession<G>>,
     rooms: &Arc<MultiplayerRoomStore<G>>,
     user_id: &str,
+    display_name: Option<&str>,
     socket_id: u64,
     outbound_tx: &mpsc::UnboundedSender<String>,
     active_room: &mut Option<ActiveMultiplayerRoom<G>>,
@@ -2355,8 +2529,15 @@ async fn handle_authenticated_message<G: Game + 'static>(
     };
 
     if is_multiplayer_msg(&client_msg) {
-        let responses =
-            handle_multiplayer_message(rooms, user_id, outbound_tx, active_room, client_msg).await;
+        let responses = handle_multiplayer_message_for_user(
+            rooms,
+            user_id,
+            display_name,
+            outbound_tx,
+            active_room,
+            client_msg,
+        )
+        .await;
         for msg in responses {
             send_msg(socket, &msg).await?;
         }
@@ -2502,6 +2683,7 @@ fn is_multiplayer_msg(msg: &ClientMsg) -> bool {
             | ClientMsg::JoinMultiplayerRoom { .. }
             | ClientMsg::LeaveMultiplayerRoom
             | ClientMsg::PlayMultiplayerAction { .. }
+            | ClientMsg::ResignMultiplayerGame
             | ClientMsg::AddMultiplayerOpponentTime
     )
 }
@@ -2537,6 +2719,17 @@ async fn handle_multiplayer_message<G: Game + 'static>(
     active_room: &mut Option<ActiveMultiplayerRoom<G>>,
     msg: ClientMsg,
 ) -> Vec<ServerMsg> {
+    handle_multiplayer_message_for_user(rooms, user_id, None, outbound_tx, active_room, msg).await
+}
+
+async fn handle_multiplayer_message_for_user<G: Game + 'static>(
+    rooms: &Arc<MultiplayerRoomStore<G>>,
+    user_id: &str,
+    display_name: Option<&str>,
+    outbound_tx: &mpsc::UnboundedSender<String>,
+    active_room: &mut Option<ActiveMultiplayerRoom<G>>,
+    msg: ClientMsg,
+) -> Vec<ServerMsg> {
     match msg {
         ClientMsg::ListMultiplayerRooms => vec![rooms.lobby_msg()],
         ClientMsg::CreateMultiplayerRoom {
@@ -2549,8 +2742,9 @@ async fn handle_multiplayer_message<G: Game + 'static>(
             if detach_active_room(rooms, active_room) {
                 rooms.broadcast_lobby();
             }
-            let (room, _) = match rooms.create_room(
+            let (room, _) = match rooms.create_room_with_display_name(
                 user_id,
+                display_name,
                 preferred_player,
                 code,
                 is_public,
@@ -2569,7 +2763,7 @@ async fn handle_multiplayer_message<G: Game + 'static>(
             if detach_active_room(rooms, active_room) {
                 rooms.broadcast_lobby();
             }
-            let (room, _) = match rooms.join_room(user_id, &code) {
+            let (room, _) = match rooms.join_room_with_display_name(user_id, display_name, &code) {
                 Ok(room) => room,
                 Err(message) => return vec![ServerMsg::Error { message }],
             };
@@ -2598,7 +2792,7 @@ async fn handle_multiplayer_message<G: Game + 'static>(
                     message: "Room is waiting for an opponent".into(),
                 }];
             }
-            if room.clock_winner().is_some() {
+            if room.is_finished() {
                 let _ = save_finished_multiplayer_replay(Arc::clone(&room)).await;
                 room.broadcast_room_info_except(Some(socket_id));
                 return vec![room.room_msg_for_player(Some(player))];
@@ -2609,16 +2803,20 @@ async fn handle_multiplayer_message<G: Game + 'static>(
                     return vec![ServerMsg::Error { message }];
                 }
                 let game_over = session.current_game_ended();
+                if game_over {
+                    room.mark_finished(winner_from_reward(session.current_result_reward()), "game");
+                }
                 let next_player = session.current_player_idx();
                 room.finish_clock_turn(player, next_player, game_over);
                 room.touch();
+                let save_errors = room.save_completed_replay_once(&session).await;
                 room.broadcast_state_except(&session, Some(socket_id));
                 room.broadcast_room_info_except(Some(socket_id));
                 let mut responses = vec![
                     room.room_msg_for_player(Some(player)),
                     session.state_msg_for_player(player),
                 ];
-                responses.extend(room.save_completed_replay_once(&session).await);
+                responses.extend(save_errors);
                 (
                     responses,
                     room.next_analysis_generation(),
@@ -2630,6 +2828,28 @@ async fn handle_multiplayer_message<G: Game + 'static>(
             schedule_multiplayer_analysis(room, analysis_generation, analysis_session);
             responses
         }
+        ClientMsg::ResignMultiplayerGame => {
+            let Some(active) = active_room.as_ref() else {
+                return vec![ServerMsg::Error {
+                    message: "Join a multiplayer room before resigning".into(),
+                }];
+            };
+            let room = Arc::clone(&active.room);
+            if !room.is_full() {
+                return vec![ServerMsg::Error {
+                    message: "Room is waiting for an opponent".into(),
+                }];
+            }
+            if !room.is_finished() {
+                room.mark_finished(Some(1 - active.player), "resignation");
+            }
+            let save_errors = save_finished_multiplayer_replay(Arc::clone(&room)).await;
+            room.broadcast_room_info_except(Some(active.socket_id));
+            schedule_lobby_broadcast(Arc::clone(rooms));
+            let mut responses = vec![room.room_msg_for_player(Some(active.player))];
+            responses.extend(save_errors);
+            responses
+        }
         ClientMsg::AddMultiplayerOpponentTime => {
             let Some(active) = active_room.as_ref() else {
                 return vec![ServerMsg::Error {
@@ -2639,7 +2859,7 @@ async fn handle_multiplayer_message<G: Game + 'static>(
             let room = Arc::clone(&active.room);
             let opponent = if active.player == 0 { 1 } else { 0 };
             if !room.add_clock_seconds(opponent, 15) {
-                if room.clock_winner().is_some() {
+                if room.is_finished() {
                     let _ = save_finished_multiplayer_replay(Arc::clone(&room)).await;
                     room.broadcast_room_info_except(Some(active.socket_id));
                     return vec![room.room_msg_for_player(Some(active.player))];
@@ -3106,6 +3326,34 @@ mod tests {
     }
 
     #[test]
+    fn multiplayer_room_exposes_display_names() {
+        let (rooms, _) = test_room_store();
+
+        let (room, _) = rooms
+            .create_room_with_display_name(
+                "user_a",
+                Some("Alice"),
+                Some(0),
+                Some("NAMES1".into()),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        rooms
+            .join_room_with_display_name("user_b", Some("Bob"), "NAMES1")
+            .unwrap();
+
+        match room.room_msg_for_player(Some(0)) {
+            ServerMsg::MultiplayerRoom { players, .. } => {
+                assert_eq!(players[0].name.as_deref(), Some("Alice"));
+                assert_eq!(players[1].name.as_deref(), Some("Bob"));
+            }
+            other => panic!("expected multiplayer room message, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn multiplayer_room_stays_rejoinable_after_all_players_disconnect() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
@@ -3288,6 +3536,70 @@ mod tests {
             assert_eq!(entries_b.len(), 1);
             assert_eq!(entries_a[0].action_count, 1);
             assert_eq!(entries_b[0].action_count, 1);
+        });
+    }
+
+    #[test]
+    fn multiplayer_resign_finishes_room_and_exposes_replay_share_slug() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let (store, _) = test_store();
+            let replay_store = Arc::new(ReplayStore::File(FileReplayStore::new(temp_replay_dir(
+                "multiplayer-resign-replay",
+            ))));
+            let rooms = Arc::new(MultiplayerRoomStore::new(
+                Arc::clone(&store.factory),
+                Some(Arc::clone(&replay_store)),
+            ));
+            let (room, player_a) = rooms
+                .create_room(
+                    "user_a",
+                    Some(0),
+                    Some("QUIT12".into()),
+                    Some(true),
+                    None,
+                    None,
+                )
+                .unwrap();
+            rooms.join_room("user_b", "QUIT12").unwrap();
+
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let (socket_id, socket_player) = room.register_socket("user_a", tx.clone()).unwrap();
+            assert_eq!(socket_player, player_a);
+            let mut active_room = Some(ActiveMultiplayerRoom {
+                room,
+                socket_id,
+                player: player_a,
+            });
+
+            let responses = handle_multiplayer_message(
+                &rooms,
+                "user_a",
+                &tx,
+                &mut active_room,
+                ClientMsg::ResignMultiplayerGame,
+            )
+            .await;
+
+            let share_slug = match responses.as_slice() {
+                [ServerMsg::MultiplayerRoom {
+                    status,
+                    winner,
+                    finish_reason,
+                    replay_share_slug,
+                    ..
+                }] => {
+                    assert_eq!(status, "finished");
+                    assert_eq!(*winner, Some(1));
+                    assert_eq!(finish_reason.as_deref(), Some("resignation"));
+                    replay_share_slug.clone().expect("resign should expose replay slug")
+                }
+                other => panic!("expected resign room response, got {other:?}"),
+            };
+            assert!(safe_share_slug(&share_slug));
+
+            let loaded = replay_store.load_shared(&share_slug).await.unwrap();
+            assert_eq!(loaded.log.actions.len(), 0);
         });
     }
 
