@@ -245,12 +245,16 @@ function guestMultiplayerMode() {
   return window.hexfishGuestMultiplayer === true;
 }
 
+function guestPlayMode() {
+  return window.hexfishGuestPlay === true;
+}
+
 function guestSharedReplayMode() {
   return window.hexfishGuestSharedReplay === true;
 }
 
 function guestMode() {
-  return guestMultiplayerMode() || guestSharedReplayMode();
+  return guestPlayMode() || guestMultiplayerMode() || guestSharedReplayMode();
 }
 
 function guestReplayAnalysisLocked() {
@@ -347,7 +351,7 @@ function signInToAnalyzeGuestReplay() {
 }
 
 function handleTopbarBrandClick() {
-  if (window.hexfishAuthSignedIn) {
+  if (window.hexfishAuthSignedIn || guestMode()) {
     showPlayView();
     return;
   }
@@ -5151,6 +5155,9 @@ function currentSocketAuthKey() {
   if (guestMultiplayerMode()) {
     return `guest:room:${normalizeRoomCode(window.hexfishGuestRoomCode || initialUrlRoomCode)}`;
   }
+  if (guestPlayMode()) {
+    return 'guest:play';
+  }
   return 'signed-out';
 }
 
@@ -5240,6 +5247,7 @@ document.addEventListener('hexfish-auth-signed-in', (event) => {
 document.addEventListener('hexfish-auth-guest', (event) => {
   setProfileUsername('');
   if (guestMultiplayerMode()) enterGuestPlayMode();
+  else if (guestPlayMode()) showPlayView();
   else syncGuestUiState();
   updateProfileUi();
   startOrReconnectForAuthChange({

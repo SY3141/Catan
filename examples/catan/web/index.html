@@ -22,7 +22,7 @@ tailwind.config = {
   }
 }
 </script>
-<link rel="stylesheet" href="style.css?v=discard-log-summary-20260624">
+<link rel="stylesheet" href="style.css?v=landing-analysis-preview-20260624">
 <script>
 (() => {
   const production = {
@@ -59,17 +59,25 @@ tailwind.config = {
 </head>
 <body class="bg-bg text-gray-200 font-sans h-screen flex flex-col">
 
-<main id="login-page" class="login-page" aria-labelledby="login-title">
+<main id="login-page" class="login-page is-hidden" aria-labelledby="login-title" aria-hidden="true">
   <section class="login-shell">
     <div class="login-copy">
       <div class="login-brand">
         <span class="login-mark" aria-hidden="true"></span>
         <span>HexFish</span>
       </div>
-      <h1 id="login-title">The fastest Catan games on the web</h1>
+      <h1 id="login-title">Play lightning fast Catan for free</h1>
       <p class="login-intro">Practice against HexFish from beginner to expert difficulty, review every move, save your games, and share replay links with friends.</p>
+      <ul class="login-features" aria-label="HexFish features">
+        <li>Free guest play</li>
+        <li>Difficulty ladder</li>
+        <li>Instant win-odds analysis</li>
+        <li>Shareable replays</li>
+        <li>Rooms, clocks, spectators</li>
+        <li>Fast turn controls</li>
+      </ul>
       <div class="login-preview" aria-hidden="true">
-        <img src="hexfish.png" alt="">
+        <img src="analysisBar.png" alt="">
       </div>
     </div>
     <div class="login-panel">
@@ -81,26 +89,26 @@ tailwind.config = {
         <button id="login-tab-sign-in" class="login-tab active" type="button" role="tab" aria-selected="true">Sign in</button>
         <button id="login-tab-sign-up" class="login-tab" type="button" role="tab" aria-selected="false">Create account</button>
       </div>
+      <div class="login-guest-panel">
+        <button id="btn-continue-guest" class="login-guest-button" type="button">Continue as guest</button>
+      </div>
       <div id="clerk-auth-mount" class="clerk-auth-mount">
         <div id="clerk-sign-in-mount" class="clerk-auth-panel"></div>
         <div id="clerk-sign-up-mount" class="clerk-auth-panel is-hidden"></div>
-      </div>
-      <div class="login-guest-panel">
-        <button id="btn-continue-guest" class="login-guest-button" type="button">Continue as guest</button>
       </div>
       <p id="clerk-login-status" class="login-status" aria-live="polite">Loading secure sign-in...</p>
     </div>
   </section>
 </main>
 
-<div id="app" class="app-shell is-hidden flex flex-col h-full" aria-hidden="true">
+<div id="app" class="app-shell flex flex-col h-full">
   <!-- Header -->
   <header class="flex items-center gap-4 px-4 py-2 bg-bg-2 border-b border-gray-700">
     <h1 class="m-0">
       <button id="btn-topbar-brand" type="button" class="topbar-brand text-sm font-semibold text-gray-100" aria-label="HexFish home">
         <span class="topbar-mark" aria-hidden="true"></span>
         <span>HexFish</span>
-        <span id="app-version" class="topbar-version" aria-label="Version V1.1.0">V1.1.0</span>
+        <span id="app-version" class="topbar-version" aria-label="Version V1.1.1">V1.1.1</span>
       </button>
     </h1>
     <div class="flex items-center gap-1 text-xs" role="tablist" aria-label="Main views">
@@ -674,7 +682,7 @@ tailwind.config = {
 <script src="board.js?v=robber-legal-pulse-20260624"></script>
 <script src="mcts.js?v=cpu-load-20260622"></script>
 <script src="controls.js?v=replay-return-20260623"></script>
-<script src="auth.js?v=auth-event-dedupe-20260624"></script>
-<script src="app.js?v=discard-roll-sound-20260624"></script>
+<script src="auth.js?v=guest-auth-tabs-20260624"></script>
+<script src="app.js?v=guest-play-default-20260624"></script>
 </body>
 </html>

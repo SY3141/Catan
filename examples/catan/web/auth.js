@@ -207,6 +207,9 @@
     if (window.hexfishGuestMultiplayer) {
       return `guest:room:${normalizeRoomCode(window.hexfishGuestRoomCode || currentRoomCode())}`;
     }
+    if (window.hexfishGuestPlay) {
+      return 'guest:play';
+    }
     return 'guest:unknown';
   };
 
@@ -272,6 +275,7 @@
   const syncAuthViewFromHash = () => {
     const normalizedView = stripClerkRedirectParams();
     if (normalizedView) {
+      suppressInviteGuestMode = true;
       setActiveTab(normalizedView);
       return;
     }
@@ -282,6 +286,7 @@
       || hash.includes('verify-phone-number')
       || hash.includes('continue')
     ) {
+      suppressInviteGuestMode = true;
       setActiveTab('sign-up');
     } else if (
       hash.includes('sign-in')
@@ -289,6 +294,7 @@
       || hash.includes('factor-two')
       || hash.includes('reset-password')
     ) {
+      suppressInviteGuestMode = true;
       setActiveTab('sign-in');
     }
   };
@@ -430,15 +436,32 @@
   };
 
   const clearGuestState = () => {
+    window.hexfishGuestPlay = false;
     window.hexfishGuestMultiplayer = false;
     window.hexfishGuestRoomCode = '';
     window.hexfishGuestSharedReplay = false;
     window.hexfishGuestReplaySlug = '';
   };
 
+  const enterGuestPlayMode = () => {
+    suppressInviteGuestMode = false;
+    window.hexfishAuthSignedIn = false;
+    window.hexfishGuestPlay = true;
+    window.hexfishGuestMultiplayer = false;
+    window.hexfishGuestRoomCode = '';
+    window.hexfishGuestSharedReplay = false;
+    window.hexfishGuestReplaySlug = '';
+    showAppShell({ showUserControl: false });
+    showAccountControls(false);
+    setGuestHeaderSignUpVisible(true);
+    setStatus('Playing as guest');
+    emitAuthEvent('hexfish-auth-guest', guestAuthKey());
+  };
+
   const enterGuestMode = () => {
     suppressInviteGuestMode = false;
     window.hexfishAuthSignedIn = false;
+    window.hexfishGuestPlay = false;
     window.hexfishGuestMultiplayer = true;
     window.hexfishGuestRoomCode = currentRoomCode();
     window.hexfishGuestSharedReplay = false;
@@ -455,6 +478,7 @@
     if (!slug) return false;
     suppressInviteGuestMode = false;
     window.hexfishAuthSignedIn = false;
+    window.hexfishGuestPlay = false;
     window.hexfishGuestMultiplayer = false;
     window.hexfishGuestRoomCode = '';
     window.hexfishGuestSharedReplay = true;
@@ -527,10 +551,14 @@
     window.hexfishAuthSignedIn = false;
     clearGuestState();
     showAccountControls(false);
-    showLoginPage();
-    mountCurrentAuthForm(clerk);
-    emitAuthEvent('hexfish-auth-signed-out', 'signed-out');
-    if (activeAuthView !== 'sign-up' || signUpMounted) setStatus('');
+    if (suppressInviteGuestMode) {
+      showLoginPage();
+      mountCurrentAuthForm(clerk);
+      emitAuthEvent('hexfish-auth-signed-out', 'signed-out');
+      if (activeAuthView !== 'sign-up' || signUpMounted) setStatus('');
+      return;
+    }
+    enterGuestPlayMode();
   };
 
   signInTab.addEventListener('click', () => {
@@ -543,7 +571,7 @@
 
   continueGuestButton?.addEventListener('click', () => {
     clearAuthHash();
-    enterGuestMode();
+    enterGuestPlayMode();
   });
 
   guestSignUpButton?.addEventListener('click', showSignUpPageFromGuest);
@@ -581,7 +609,9 @@
         enterGuestMode();
         return;
       }
-      setStatus(`Clerk failed to initialize: ${clerkErrorMessage(error)}`);
+      console.warn('Clerk failed to initialize; continuing as guest play.', error);
+      enterGuestPlayMode();
+      setStatus(`Playing as guest. Sign-in unavailable: ${clerkErrorMessage(error)}`);
     }
   });
 })();
