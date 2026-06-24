@@ -75,7 +75,6 @@ const EDITOR_NUMBER_BAG = [2, 3, 3, 4, 4, 5, 5, 6, 6, 8, 8, 9, 9, 10, 10, 11, 11
 const EDITOR_PORT_BAG = ['lumber', 'brick', 'wool', 'grain', 'ore', 'generic', 'generic', 'generic', 'generic'];
 const LAST_MULTIPLAYER_ROOM_KEY = 'hexfish-last-multiplayer-room-code';
 const PENDING_SHARED_REPLAY_KEY = 'hexfish-pending-shared-replay-slug';
-const PROFILE_USERNAME_KEY = 'hexfish-profile-username';
 const MOVE_SOUND_ENABLED_KEY = 'hexfish-sound-enabled';
 const MOVE_SOUND_ASSETS = {
   road: 'sounds/road.wav',
@@ -139,12 +138,10 @@ let previousFrameHands = { analysis: null, replay: null };
 let activeView = 'play-setup';
 let selectedSingleplayerHumanPlayer = 0;
 let selectedMultiplayerHumanPlayer = 0;
-let profileUsername = readStoredProfileUsername();
-let profileUsernameSet = false;
-let profileLoaded = false;
+let profileUsername = '';
 let pendingProfileSave = false;
 let profileModalMode = 'profile';
-let profilePromptDismissed = false;
+let profileUsernameSyncTimer = null;
 let moveSoundEnabled = readStoredMoveSoundEnabled();
 let moveSoundUnlocked = false;
 let moveSoundAudios = new Map();
@@ -159,6 +156,7 @@ const initialSharedReplaySlug = normalizeReplaySlug(initialUrlParams.get('replay
 const initialUrlRoomCode = normalizeRoomCode(initialUrlParams.get('room'));
 let pendingSharedReplaySlug = initialSharedReplaySlug || readPendingSharedReplaySlug();
 let loadingSharedReplaySlug = '';
+let activeReplayShareSlug = '';
 let pendingAutoJoinRoomCode = pendingSharedReplaySlug ? '' : initialUrlRoomCode;
 let pendingReconnectRoomCode = '';
 let pendingPlayTabReconnectRoomCode = '';
@@ -194,7 +192,8 @@ let serverSingleplayerHumanPlayer = undefined;
 let multiplayerTurnTitleTimer = null;
 let multiplayerTurnTitleActive = false;
 let nativeAdScriptRequested = false;
-window.hexfishProfileUsername = profileUsername || '';
+window.hexfishProfileUsername = '';
+clearStoredProfileUsername();
 
 function loadNativeAdScript() {
   if (nativeAdScriptRequested) return;
@@ -331,6 +330,35 @@ function localProfileName() {
   return profileUsername || '';
 }
 
+function clerkProfileUsername() {
+  return validProfileUsername(window.Clerk?.user?.username || '');
+}
+
+function setProfileUsername(username) {
+  profileUsername = validProfileUsername(username);
+  window.hexfishProfileUsername = profileUsername;
+  window.hexfishUsername = profileUsername;
+  updateProfileUi();
+}
+
+function syncProfileUsernameFromClerk() {
+  setProfileUsername(clerkProfileUsername());
+  return profileUsername;
+}
+
+function usernameRequiredForSignedInUser() {
+  return window.hexfishAuthSignedIn === true
+    && !guestMode()
+    && !profileUsername;
+}
+
+function showUsernameRequired(feature = 'This feature') {
+  if (!usernameRequiredForSignedInUser()) return false;
+  showProfileModal({ prompt: true });
+  setProfileStatus(`${feature} requires a username.`, true);
+  return true;
+}
+
 function setProfileStatus(message, isError = false) {
   const status = document.getElementById('profile-username-status');
   if (!status) return;
@@ -339,13 +367,101 @@ function setProfileStatus(message, isError = false) {
   status.classList.toggle('text-gray-400', !isError);
 }
 
+function clerkProfileErrorMessage(error) {
+  const clerkError = Array.isArray(error?.errors) && error.errors.length
+    ? error.errors[0]
+    : null;
+  const message = String(clerkError?.longMessage || clerkError?.message || error?.message || error || 'Could not save username.')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 180);
+  if (/username.*not a valid parameter|not a valid parameter.*username/i.test(message)) {
+    return 'Username is not enabled in this Clerk instance. Enable Username in Clerk, then reload.';
+  }
+  return message;
+}
+
+function isClerkReverificationError(error) {
+  const messages = [
+    error?.message,
+    error?.longMessage,
+    ...(Array.isArray(error?.errors)
+      ? error.errors.flatMap((entry) => [entry?.code, entry?.message, entry?.longMessage])
+      : []),
+  ].filter(Boolean).join(' ');
+  return /additional verification|reverification|re-?verification/i.test(messages);
+}
+
+function stopProfileUsernameSyncPolling() {
+  if (!profileUsernameSyncTimer) return;
+  window.clearInterval(profileUsernameSyncTimer);
+  profileUsernameSyncTimer = null;
+}
+
+async function refreshClerkProfileUsername() {
+  const user = window.Clerk?.user;
+  if (!user) return '';
+  if (typeof user.reload === 'function') {
+    try {
+      await user.reload();
+    } catch (_error) {
+      return profileUsername;
+    }
+  }
+  return syncProfileUsernameFromClerk();
+}
+
+function startProfileUsernameSyncPolling() {
+  stopProfileUsernameSyncPolling();
+  const deadline = Date.now() + 120_000;
+  profileUsernameSyncTimer = window.setInterval(async () => {
+    const username = await refreshClerkProfileUsername();
+    if (username) {
+      stopProfileUsernameSyncPolling();
+      setProfileStatus('Saved.');
+      window.setTimeout(hideProfileModal, 250);
+      startOrReconnectForAuthChange();
+      return;
+    }
+    if (Date.now() > deadline) {
+      stopProfileUsernameSyncPolling();
+      setProfileStatus('Complete verification in Clerk, then come back here to continue.', true);
+    }
+  }, 1500);
+}
+
+function showClerkProfileVerificationAction() {
+  const open = document.getElementById('btn-open-clerk-profile');
+  if (open) {
+    open.classList.remove('hidden');
+    open.disabled = false;
+    open.focus();
+  }
+  setProfileStatus('Clerk requires additional verification. Open Clerk, verify, and save your username there.', true);
+}
+
+function openClerkProfileForUsernameSetup() {
+  const clerk = window.Clerk;
+  if (typeof clerk?.openUserProfile !== 'function') {
+    setProfileStatus('Clerk requires verification. Sign out and back in, then save your username within 10 minutes.', true);
+    return;
+  }
+  try {
+    clerk.openUserProfile();
+    setProfileStatus('Complete verification in Clerk and save your username there.');
+    startProfileUsernameSyncPolling();
+  } catch (_error) {
+    setProfileStatus('Could not open Clerk profile. Sign out and back in, then save your username within 10 minutes.', true);
+  }
+}
+
 function updateProfileUi() {
   const btn = document.getElementById('btn-profile');
   if (btn) {
-    btn.textContent = profileUsername || 'Profile';
+    btn.textContent = 'Profile';
     btn.title = guestMode()
-      ? 'Sign in to change your username.'
-      : profileUsername ? `Profile: ${profileUsername}` : 'Profile';
+      ? 'Sign in to view your profile.'
+      : profileUsername ? 'Profile' : 'Choose a username';
   }
   const input = document.getElementById('profile-username-input');
   if (input && document.getElementById('profile-modal')?.classList.contains('hidden')) {
@@ -362,16 +478,14 @@ function playTabActiveForProfilePrompt() {
 }
 
 function needsProfileUsernamePrompt() {
-  return profileLoaded
-    && window.hexfishAuthSignedIn === true
+  return window.hexfishAuthSignedIn === true
     && !guestMode()
-    && !profileUsernameSet
+    && !profileUsername
     && playTabActiveForProfilePrompt();
 }
 
 function maybePromptForProfileUsername() {
-  if (profilePromptDismissed || !needsProfileUsernamePrompt()) return;
-  profilePromptDismissed = true;
+  if (!needsProfileUsernamePrompt()) return;
   window.setTimeout(() => {
     if (!needsProfileUsernamePrompt()) return;
     showProfileModal({ prompt: true });
@@ -383,7 +497,12 @@ function setProfileModalMode(mode) {
   const prompt = profileModalMode === 'username-prompt';
   const title = document.getElementById('profile-modal-title');
   const copy = document.getElementById('profile-modal-copy');
+  const close = document.getElementById('btn-close-profile-modal');
+  const label = document.querySelector('label[for="profile-username-input"]');
+  const input = document.getElementById('profile-username-input');
   const cancel = document.getElementById('btn-cancel-profile');
+  const open = document.getElementById('btn-open-clerk-profile');
+  const save = document.getElementById('btn-save-profile');
   if (title) title.textContent = prompt ? 'Choose Username' : 'Profile';
   if (copy) {
     copy.textContent = prompt
@@ -391,49 +510,69 @@ function setProfileModalMode(mode) {
       : '';
     copy.classList.toggle('hidden', !prompt);
   }
-  if (cancel) cancel.textContent = prompt ? 'Later' : 'Cancel';
-}
-
-function setProfileUsername(username, persist = true, usernameSet = profileUsernameSet) {
-  profileUsername = validProfileUsername(username);
-  profileUsernameSet = !!usernameSet;
-  window.hexfishProfileUsername = profileUsername;
-  window.hexfishUsername = profileUsername;
-  if (persist) writeStoredProfileUsername(profileUsernameSet ? profileUsername : '');
-  updateProfileUi();
+  if (close) close.classList.toggle('hidden', prompt);
+  if (label) label.classList.remove('hidden');
+  if (input) {
+    input.readOnly = !prompt;
+    input.classList.toggle('opacity-70', !prompt);
+  }
+  if (cancel) {
+    cancel.textContent = prompt ? 'Required' : 'Close';
+    cancel.disabled = prompt;
+    cancel.classList.toggle('hidden', prompt);
+  }
+  if (open) {
+    open.classList.add('hidden');
+    open.disabled = false;
+  }
+  if (save) {
+    save.textContent = prompt ? 'Save Username' : 'Save';
+    save.classList.toggle('hidden', !prompt);
+  }
 }
 
 function showProfileModal(options = {}) {
   if (guestMode()) {
-    showGuestSignInRequiredModal('Changing your username');
+    showGuestSignInRequiredModal('Viewing your profile');
     return;
   }
   const modal = document.getElementById('profile-modal');
   const input = document.getElementById('profile-username-input');
   if (!modal || !input) return;
-  setProfileModalMode(options.prompt ? 'username-prompt' : 'profile');
-  input.value = profileUsername;
+  syncProfileUsernameFromClerk();
+  const prompt = options.prompt || !profileUsername;
+  setProfileModalMode(prompt ? 'username-prompt' : 'profile');
+  input.value = prompt ? (profileUsername || '') : profileUsername;
   setProfileStatus('');
   modal.classList.remove('hidden');
   modal.classList.add('flex');
-  input.focus();
-  input.select();
+  if (prompt) {
+    input.focus();
+    input.select();
+  } else {
+    document.getElementById('btn-cancel-profile')?.focus();
+  }
 }
 
 function hideProfileModal() {
+  if (profileModalMode === 'username-prompt' && usernameRequiredForSignedInUser()) {
+    return;
+  }
   const modal = document.getElementById('profile-modal');
   if (!modal) return;
   modal.classList.add('hidden');
   modal.classList.remove('flex');
   pendingProfileSave = false;
+  stopProfileUsernameSyncPolling();
   setProfileModalMode('profile');
   const save = document.getElementById('btn-save-profile');
   if (save) save.disabled = false;
 }
 
-function saveProfileUsername() {
+async function saveProfileUsername() {
+  if (profileModalMode !== 'username-prompt') return;
   if (guestMode()) {
-    showGuestSignInRequiredModal('Changing your username');
+    showGuestSignInRequiredModal('Choosing a username');
     return;
   }
   const input = document.getElementById('profile-username-input');
@@ -446,7 +585,30 @@ function saveProfileUsername() {
   pendingProfileSave = true;
   if (save) save.disabled = true;
   setProfileStatus('Saving...');
-  session.send({ type: 'SetUsername', username });
+  try {
+    const user = window.Clerk?.user;
+    if (!user || typeof user.update !== 'function') {
+      throw new Error('Clerk user profile is not ready.');
+    }
+    await user.update({ username });
+    if (typeof user.reload === 'function') {
+      await user.reload();
+    }
+    pendingProfileSave = false;
+    if (save) save.disabled = false;
+    syncProfileUsernameFromClerk();
+    setProfileStatus('Saved.');
+    window.setTimeout(hideProfileModal, 250);
+    startOrReconnectForAuthChange();
+  } catch (error) {
+    pendingProfileSave = false;
+    if (save) save.disabled = false;
+    if (isClerkReverificationError(error)) {
+      showClerkProfileVerificationAction();
+      return;
+    }
+    setProfileStatus(clerkProfileErrorMessage(error), true);
+  }
 }
 
 controls.isAnalysisBlocked = (target) => (
@@ -612,8 +774,6 @@ function unlockMoveSounds() {
 }
 
 function updateMoveSoundToggle() {
-  const toggle = document.getElementById('sound-toggle');
-  if (toggle) toggle.checked = moveSoundEnabled;
   const button = document.getElementById('btn-board-sound');
   if (button) {
     button.title = moveSoundEnabled ? 'Mute' : 'Unmute';
@@ -909,8 +1069,8 @@ function initPlayDifficultySelect() {
   setPlayDifficulty(selectedPlayDifficulty);
 }
 
-function normalizePlaySide(player, scope = 'singleplayer') {
-  if (scope === 'multiplayer' && player === 'random') return 'random';
+function normalizePlaySide(player, _scope = 'singleplayer') {
+  if (player === 'random') return 'random';
   return Number(player) === 1 ? 1 : 0;
 }
 
@@ -948,6 +1108,12 @@ function setPlaySide(player, scope = 'singleplayer') {
   updatePlaySideButtons();
 }
 
+function resolvedSingleplayerHumanPlayer() {
+  return selectedSingleplayerHumanPlayer === 'random'
+    ? Math.floor(Math.random() * 2)
+    : selectedSingleplayerHumanPlayer;
+}
+
 // ── Message handlers ─────────────────────────────────────────────────
 
 function normalizeRoomCode(code) {
@@ -970,21 +1136,9 @@ function validProfileUsername(username) {
   return normalized.length >= 3 ? normalized : '';
 }
 
-function readStoredProfileUsername() {
+function clearStoredProfileUsername() {
   try {
-    return validProfileUsername(window.localStorage?.getItem(PROFILE_USERNAME_KEY));
-  } catch (_error) {
-    return '';
-  }
-}
-
-function writeStoredProfileUsername(username) {
-  try {
-    if (username) {
-      window.localStorage?.setItem(PROFILE_USERNAME_KEY, username);
-    } else {
-      window.localStorage?.removeItem(PROFILE_USERNAME_KEY);
-    }
+    window.localStorage?.removeItem('hexfish-profile-username');
   } catch (_error) {
     // Storage may be unavailable in private or embedded contexts.
   }
@@ -992,6 +1146,19 @@ function writeStoredProfileUsername(username) {
 
 function currentSharedReplaySlugFromUrl() {
   return normalizeReplaySlug(new URLSearchParams(window.location.search).get('replay'));
+}
+
+function currentReplayShareSlug() {
+  return normalizeReplaySlug(activeReplayShareSlug || currentSharedReplaySlugFromUrl());
+}
+
+function updateReplayShareButton() {
+  const button = document.getElementById('btn-replay-share');
+  if (!button) return;
+  const slug = currentReplayShareSlug();
+  const visible = (activeView === 'replay-board' || !!currentState?.replay) && !!slug;
+  button.classList.toggle('hidden', !visible);
+  button.disabled = !visible;
 }
 
 function readPendingSharedReplaySlug() {
@@ -1369,6 +1536,7 @@ function multiplayerLobbyStatusText(room) {
 }
 
 function requestMultiplayerLobby() {
+  if (showUsernameRequired('Multiplayer')) return;
   session.send({ type: 'ListMultiplayerRooms' });
 }
 
@@ -1519,10 +1687,12 @@ function resetMultiplayerState(statusText = '') {
 }
 
 function openCreateMultiplayerRoom() {
+  if (showUsernameRequired('Multiplayer')) return;
   openCreateMultiplayerRoomModal();
 }
 
 function createMultiplayerRoom() {
+  if (showUsernameRequired('Multiplayer')) return;
   const code = ensureCreateRoomCode();
   setPlayModeChoice('multiplayer');
   hideCreateMultiplayerRoomModal();
@@ -1541,6 +1711,7 @@ function createMultiplayerRoom() {
 }
 
 function joinMultiplayerRoom(code = null, statusText = null) {
+  if (showUsernameRequired('Multiplayer')) return;
   const input = document.getElementById('multiplayer-room-code-input');
   const roomCode = normalizeRoomCode(code ?? input?.value);
   setPlayModeChoice('multiplayer');
@@ -1554,6 +1725,7 @@ function joinMultiplayerRoom(code = null, statusText = null) {
 }
 
 function reconnectMultiplayerRoom() {
+  if (showUsernameRequired('Multiplayer')) return;
   const code = reconnectRoomCode();
   setPlayModeChoice('multiplayer');
   if (!code) {
@@ -1783,6 +1955,7 @@ function maybeLoadSharedReplayFromUrl() {
   );
   if (!slug) return false;
   pendingSharedReplaySlug = slug;
+  activeReplayShareSlug = slug;
   writePendingSharedReplaySlug(slug);
   controls.stopAutoplay();
   controls._disableAutoSearch();
@@ -1809,6 +1982,12 @@ async function copyReplayShareLink(entry) {
   } catch (_error) {
     showReplayShareModal(link, false);
   }
+}
+
+async function copyActiveReplayShareLink() {
+  const slug = currentReplayShareSlug();
+  if (!slug) return;
+  await copyReplayShareLink({ share_slug: slug });
 }
 
 function showReplayShareModal(link, copied) {
@@ -1968,6 +2147,7 @@ session.on('GameState', (msg) => {
       readPendingSharedReplaySlug()
     );
     replayState = msg;
+    activeReplayShareSlug = currentReplayShareSlug();
     setReplayBoardStatus('');
     pendingSharedReplaySlug = '';
     loadingSharedReplaySlug = '';
@@ -1977,6 +2157,7 @@ session.on('GameState', (msg) => {
     } else if (fromSharedReplayLink) {
       showReplayBoardView();
     }
+    updateReplayShareButton();
   } else {
     analysisState = msg;
     maybePlayMoveSoundForGameState(msg);
@@ -2595,17 +2776,10 @@ session.on('ReplaySaved', (msg) => {
 });
 
 session.on('Profile', (msg) => {
-  profileLoaded = true;
-  setProfileUsername(msg.username || '', true, msg.username_set === true);
-  if (pendingProfileSave) {
-    pendingProfileSave = false;
-    const save = document.getElementById('btn-save-profile');
-    if (save) save.disabled = false;
-    setProfileStatus('Saved.');
-    profilePromptDismissed = false;
-    if (profileModalMode === 'username-prompt') {
-      window.setTimeout(hideProfileModal, 250);
-    }
+  if (window.hexfishAuthSignedIn) {
+    syncProfileUsernameFromClerk();
+  } else {
+    setProfileUsername(msg.username || '');
   }
   maybePromptForProfileUsername();
 });
@@ -2649,7 +2823,9 @@ session.on('Error', (msg) => {
     loadingSharedReplaySlug = '';
     if (/shared replay|replay share/i.test(String(msg.message || ''))) {
       pendingSharedReplaySlug = '';
+      activeReplayShareSlug = '';
       writePendingSharedReplaySlug('');
+      updateReplayShareButton();
     }
   }
   if (pendingEditorStart) {
@@ -2793,12 +2969,12 @@ function showPlaySetupView() {
 
 function showAnalysisView() {
   if (showGuestFeatureBlocked('Analysis')) return;
+  if (showUsernameRequired('Analysis')) return;
   if (multiplayerGameOpen()) {
     showMultiplayerAnalysisGuard();
     return;
   }
   hideMultiplayerAnalysisGuard();
-  profilePromptDismissed = false;
   activeView = 'analysis';
   setServerSingleplayerHumanPlayer(null);
   setTabState('analysis');
@@ -2833,13 +3009,14 @@ function showReplayView() {
     return;
   }
   if (showGuestFeatureBlocked('Replays')) return;
+  if (showUsernameRequired('Replays')) return;
   hideMultiplayerAnalysisGuard();
-  profilePromptDismissed = false;
   if (multiplayerGameOpen()) {
     rememberMultiplayerRoomForPlayTabReconnect();
     leaveMultiplayerRoom(false, true);
   }
   activeView = 'replay-list';
+  updateReplayShareButton();
   setServerSingleplayerHumanPlayer(null);
   setTabState('replay');
   controls.pauseBeforeCommand();
@@ -2859,8 +3036,8 @@ function showReplayView() {
 function showReplayBoardView() {
   hideMultiplayerAnalysisGuard();
   hideGameOverModal();
-  profilePromptDismissed = false;
   activeView = 'replay-board';
+  updateReplayShareButton();
   setServerSingleplayerHumanPlayer(null);
   setTabState('replay');
   setEditorChrome(false);
@@ -2880,9 +3057,9 @@ function showReplayBoardView() {
 
 function showEditorView() {
   if (showGuestFeatureBlocked('Editor')) return;
+  if (showUsernameRequired('Editor')) return;
   hideMultiplayerAnalysisGuard();
   hideGameOverModal();
-  profilePromptDismissed = false;
   if (multiplayerGameOpen()) {
     rememberMultiplayerRoomForPlayTabReconnect();
     leaveMultiplayerRoom(false, true);
@@ -3006,17 +3183,19 @@ function updateViewChrome(msg) {
   }
 
   controls.setOptionsAvailable(activeView === 'analysis' && !replay && !guestReplayLocked);
+  updateReplayShareButton();
   if (inPlay || guestReplayLocked) board.clearSearchHighlights();
 }
 
 function startPlayGame() {
   if (showGuestSingleplayerDifficultyBlocked()) return;
+  if (showUsernameRequired('Singleplayer')) return;
   hideGameOverModal();
   clearSavedGameOverReplayLink();
   setPlayModeChoice('bot');
   playMode.active = true;
   playMode.mode = 'bot';
-  playMode.humanPlayer = selectedSingleplayerHumanPlayer;
+  playMode.humanPlayer = resolvedSingleplayerHumanPlayer();
   playMode.botThinking = false;
   playMode.forcedMoveKey = null;
   playMode.autoRollEndKey = null;
@@ -3088,6 +3267,7 @@ function runPlayPonderSearch(msg) {
 
 function requestReplayList() {
   if (showGuestFeatureBlocked('Replays')) return;
+  if (showUsernameRequired('Replays')) return;
   setReplayStatus('Loading...');
   session.send({ type: 'ListReplays' });
 }
@@ -3180,6 +3360,8 @@ function renderReplaySection(list, entries, emptyText) {
       controls._disableAutoSearch();
       controls.pauseBeforeCommand();
       replayState = null;
+      activeReplayShareSlug = normalizeReplaySlug(entry.share_slug);
+      updateReplayShareButton();
       controls.showReplayLoading(entry.id, entry.action_count);
       session.send({ type: 'LoadReplay', id: entry.id });
       showReplayBoardView();
@@ -3503,6 +3685,7 @@ function validateEditorDraft() {
 
 function startEditedGame() {
   if (showGuestFeatureBlocked('Editor')) return;
+  if (showUsernameRequired('Editor')) return;
   const error = validateEditorDraft();
   if (error) {
     setEditorStatus(error);
@@ -3544,10 +3727,12 @@ document.getElementById('btn-add-opponent-time-0')?.addEventListener('click', ad
 document.getElementById('btn-add-opponent-time-1')?.addEventListener('click', addOpponentClockTime);
 document.getElementById('btn-close-replay-share-modal')?.addEventListener('click', hideReplayShareModal);
 document.getElementById('btn-copy-replay-share-link')?.addEventListener('click', copyReplayShareModalLink);
+document.getElementById('btn-replay-share')?.addEventListener('click', copyActiveReplayShareLink);
 document.getElementById('btn-copy-game-over-replay')?.addEventListener('click', copyGameOverReplayLink);
 document.getElementById('btn-game-over-primary')?.addEventListener('click', handleGameOverPrimaryAction);
 document.getElementById('btn-close-profile-modal')?.addEventListener('click', hideProfileModal);
 document.getElementById('btn-cancel-profile')?.addEventListener('click', hideProfileModal);
+document.getElementById('btn-open-clerk-profile')?.addEventListener('click', openClerkProfileForUsernameSetup);
 document.getElementById('btn-save-profile')?.addEventListener('click', saveProfileUsername);
 document.getElementById('btn-close-create-multiplayer-room-modal')?.addEventListener('click', hideCreateMultiplayerRoomModal);
 document.getElementById('btn-cancel-create-multiplayer-room')?.addEventListener('click', hideCreateMultiplayerRoomModal);
@@ -3606,9 +3791,6 @@ document.getElementById('profile-username-input')?.addEventListener('input', (ev
 });
 document.getElementById('profile-username-input')?.addEventListener('keydown', (event) => {
   if (event.key === 'Enter') saveProfileUsername();
-});
-document.getElementById('sound-toggle')?.addEventListener('change', (event) => {
-  setMoveSoundEnabled(event.target.checked);
 });
 document.getElementById('btn-board-sound')?.addEventListener('click', () => {
   setMoveSoundEnabled(!moveSoundEnabled);
@@ -4099,28 +4281,27 @@ function startOrReconnectForAuthChange() {
   }
   session.disconnect();
   session.connect();
+  if (activeView === 'play' || activeView === 'play-setup') requestMultiplayerLobby();
   if (activeView === 'replay-list') requestReplayList();
 }
 
 document.addEventListener('hexfish-auth-signed-in', () => {
-  profileLoaded = false;
-  profilePromptDismissed = false;
+  syncProfileUsernameFromClerk();
   syncGuestUiState();
   updateProfileUi();
+  maybePromptForProfileUsername();
   startOrReconnectForAuthChange();
 });
 document.addEventListener('hexfish-auth-guest', () => {
-  profileLoaded = false;
-  profilePromptDismissed = false;
+  setProfileUsername('');
   if (guestMultiplayerMode()) enterGuestPlayMode();
   else syncGuestUiState();
   updateProfileUi();
   window.hexfishStartApp();
 });
 document.addEventListener('hexfish-auth-signed-out', () => {
-  profileLoaded = false;
-  profileUsernameSet = false;
-  profilePromptDismissed = false;
+  stopProfileUsernameSyncPolling();
+  setProfileUsername('');
   syncGuestUiState();
   updateProfileUi();
   window.hexfishStopApp();

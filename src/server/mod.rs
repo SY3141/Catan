@@ -7,7 +7,7 @@ pub use session::GameSession;
 pub use traits::GamePresenter;
 
 use std::{
-    collections::{HashMap, HashSet, hash_map::DefaultHasher},
+    collections::{HashMap, hash_map::DefaultHasher},
     env,
     hash::{Hash, Hasher},
     path::PathBuf,
@@ -1107,21 +1107,6 @@ impl<G: Game + 'static> MultiplayerRoom<G> {
             .position(|seat| seat.as_ref().map_or(false, |seat| seat.user_id == user_id))
     }
 
-    fn update_seat_display_name(&self, user_id: &str, display_name: Option<String>) -> bool {
-        let mut seats = self.seats.lock().expect("room seats lock poisoned");
-        let Some(player) = seats
-            .iter()
-            .position(|seat| seat.as_ref().map_or(false, |seat| seat.user_id == user_id))
-        else {
-            return false;
-        };
-        if let Some(seat) = seats[player].as_mut() {
-            seat.display_name = display_name;
-        }
-        self.touch();
-        true
-    }
-
     fn is_full(&self) -> bool {
         self.seats
             .lock()
@@ -1883,7 +1868,6 @@ struct UserSessionStore<G: Game + 'static> {
 struct UsernameRegistry {
     by_user: HashMap<String, String>,
     by_name: HashMap<String, String>,
-    explicit_users: HashSet<String>,
 }
 
 impl<G: Game + 'static> UserSessionStore<G> {
@@ -1957,13 +1941,36 @@ impl<G: Game + 'static> UserSessionStore<G> {
             .usernames
             .lock()
             .expect("username registry lock poisoned");
+        let username = registry.by_user.get(user_id).cloned();
         ServerMsg::Profile {
-            username: registry.by_user.get(user_id).cloned(),
-            username_set: registry.explicit_users.contains(user_id),
+            username_set: username.is_some(),
+            username,
         }
     }
 
-    fn ensure_username(&self, user_id: &str, username: Option<&str>) -> String {
+    fn set_display_name(&self, user_id: &str, username: &str) {
+        let mut registry = self
+            .usernames
+            .lock()
+            .expect("username registry lock poisoned");
+        let Some(username) = normalize_display_name(Some(username.to_string())) else {
+            return;
+        };
+        if let Some(old_username) = registry
+            .by_user
+            .insert(user_id.to_string(), username.clone())
+        {
+            let old_key = username_key(&old_username);
+            if old_key != username_key(&username) {
+                registry.by_name.remove(&old_key);
+            }
+        }
+        registry
+            .by_name
+            .insert(username_key(&username), user_id.to_string());
+    }
+
+    fn ensure_guest_username(&self, user_id: &str, username: Option<&str>) -> String {
         let mut registry = self
             .usernames
             .lock()
@@ -1979,14 +1986,10 @@ impl<G: Game + 'static> UserSessionStore<G> {
                 .get(&key)
                 .is_some_and(|owner| owner != user_id)
             {
-                let default_username = default_profile_username(user_id, &registry);
                 registry.by_name.insert(key, user_id.to_string());
                 registry
                     .by_user
                     .insert(user_id.to_string(), username.clone());
-                if username != default_username {
-                    registry.explicit_users.insert(user_id.to_string());
-                }
                 return username;
             }
         }
@@ -1998,36 +2001,6 @@ impl<G: Game + 'static> UserSessionStore<G> {
             .by_user
             .insert(user_id.to_string(), username.clone());
         username
-    }
-
-    fn set_username(&self, user_id: &str, username: &str) -> Result<String, String> {
-        let username = normalize_profile_username(Some(username)).ok_or_else(|| {
-            "Username must be 3-24 letters, numbers, dashes, or underscores".to_string()
-        })?;
-        let key = username_key(&username);
-        let mut registry = self
-            .usernames
-            .lock()
-            .expect("username registry lock poisoned");
-        if registry
-            .by_name
-            .get(&key)
-            .is_some_and(|owner| owner != user_id)
-        {
-            return Err("Username is already taken".into());
-        }
-        if let Some(old_username) = registry
-            .by_user
-            .insert(user_id.to_string(), username.clone())
-        {
-            let old_key = username_key(&old_username);
-            if old_key != key {
-                registry.by_name.remove(&old_key);
-            }
-        }
-        registry.by_name.insert(key, user_id.to_string());
-        registry.explicit_users.insert(user_id.to_string());
-        Ok(username)
     }
 }
 
@@ -2432,7 +2405,13 @@ async fn handle_socket<G: Game + 'static>(
     let session_scope = session_key.scope;
     let account_key = redacted_account_key(&user_id);
     let (user_session, created) = store.get_or_create(&user_id);
-    store.ensure_username(&user_id, display_name.as_deref());
+    if session_scope == "clerk" {
+        if let Some(display_name) = display_name.as_deref() {
+            store.set_display_name(&user_id, display_name);
+        }
+    } else {
+        store.ensure_guest_username(&user_id, display_name.as_deref());
+    }
     let board_code = format_board_fingerprint(user_session.board_fingerprint);
     if created {
         tracing::info!(
@@ -2781,7 +2760,7 @@ async fn handle_authenticated_message<G: Game + 'static>(
         &client_msg,
         ClientMsg::GetProfile | ClientMsg::SetUsername { .. }
     ) {
-        let responses = handle_profile_message(store, user_id, active_room, client_msg);
+        let responses = handle_profile_message(store, user_id, client_msg);
         for msg in responses {
             send_msg(socket, &msg).await?;
         }
@@ -2986,33 +2965,13 @@ fn is_blocked_while_in_multiplayer(msg: &ClientMsg) -> bool {
 fn handle_profile_message<G: Game + 'static>(
     store: &Arc<UserSessionStore<G>>,
     user_id: &str,
-    active_room: &Option<ActiveMultiplayerRoom<G>>,
     msg: ClientMsg,
 ) -> Vec<ServerMsg> {
     match msg {
         ClientMsg::GetProfile => vec![store.profile_msg(user_id)],
-        ClientMsg::SetUsername { username } => {
-            let username = match store.set_username(user_id, &username) {
-                Ok(username) => username,
-                Err(message) => return vec![ServerMsg::Error { message }],
-            };
-            let mut responses = vec![ServerMsg::Profile {
-                username: Some(username.clone()),
-                username_set: true,
-            }];
-            if let Some(active) = active_room.as_ref() {
-                if active
-                    .room
-                    .update_seat_display_name(user_id, Some(username.clone()))
-                {
-                    active
-                        .room
-                        .broadcast_room_info_except(Some(active.socket_id));
-                    responses.push(active.room.room_msg_for_player(Some(active.player)));
-                }
-            }
-            responses
-        }
+        ClientMsg::SetUsername { .. } => vec![ServerMsg::Error {
+            message: "Username is managed by Clerk".into(),
+        }],
         _ => vec![ServerMsg::Error {
             message: "Unsupported profile message".into(),
         }],
@@ -3432,8 +3391,9 @@ mod tests {
         ActiveMultiplayerRoom, ClientMsg, FileReplayStore, GamePresenter, MultiplayerRoomStore,
         ReplayStore, RoomClock, SearchBudget, ServerMsg, SessionFactory, UserSessionStore,
         ViewTarget, anonymous_user_id_from_id, anonymous_user_id_from_token, client_msg_target,
-        current_unix_ms, detach_active_room, handle_multiplayer_message, parse_env_bool,
-        redacted_account_key, safe_replay_id, safe_share_slug, socket_session_key_from_auth,
+        current_unix_ms, detach_active_room, handle_multiplayer_message, handle_profile_message,
+        parse_env_bool, redacted_account_key, safe_replay_id, safe_share_slug,
+        socket_session_key_from_auth,
     };
 
     #[derive(Clone)]
@@ -3681,37 +3641,27 @@ mod tests {
     }
 
     #[test]
-    fn users_receive_unique_default_usernames() {
+    fn clerk_user_without_username_has_unset_profile() {
         let (store, _) = test_store();
 
-        let first = store.ensure_username("user_a", None);
-        let second = store.ensure_username("user_b", None);
-        let first_again = store.ensure_username("user_a", Some("Alice"));
-
-        assert!(first.starts_with("User"));
-        assert!(second.starts_with("User"));
-        assert_ne!(first, second);
-        assert_eq!(first_again, first);
-    }
-
-    #[test]
-    fn profile_reports_whether_username_was_explicitly_set() {
-        let (store, _) = test_store();
-
-        let default_username = store.ensure_username("user_a", None);
-        match store.profile_msg("user_a") {
+        match store.profile_msg("clerk:user_a") {
             ServerMsg::Profile {
                 username,
                 username_set,
             } => {
-                assert_eq!(username.as_deref(), Some(default_username.as_str()));
+                assert_eq!(username, None);
                 assert!(!username_set);
             }
             other => panic!("unexpected profile message: {other:?}"),
         }
+    }
 
-        store.set_username("user_a", "Alice").unwrap();
-        match store.profile_msg("user_a") {
+    #[test]
+    fn clerk_username_is_cached_as_profile_display_name() {
+        let (store, _) = test_store();
+
+        store.set_display_name("clerk:user_a", "Alice");
+        match store.profile_msg("clerk:user_a") {
             ServerMsg::Profile {
                 username,
                 username_set,
@@ -3724,31 +3674,36 @@ mod tests {
     }
 
     #[test]
-    fn restored_default_username_is_not_treated_as_explicit() {
-        let (first_store, _) = test_store();
-        let default_username = first_store.ensure_username("user_a", None);
-        let (restored_store, _) = test_store();
+    fn guest_users_receive_unique_default_usernames() {
+        let (store, _) = test_store();
 
-        assert_eq!(
-            restored_store.ensure_username("user_a", Some(&default_username)),
-            default_username
-        );
-        match restored_store.profile_msg("user_a") {
-            ServerMsg::Profile { username_set, .. } => assert!(!username_set),
-            other => panic!("unexpected profile message: {other:?}"),
-        }
+        let first = store.ensure_guest_username("anonymous:a", None);
+        let second = store.ensure_guest_username("anonymous:b", None);
+        let first_again = store.ensure_guest_username("anonymous:a", Some("Alice"));
+
+        assert!(first.starts_with("User"));
+        assert!(second.starts_with("User"));
+        assert_ne!(first, second);
+        assert_eq!(first_again, first);
     }
 
     #[test]
-    fn username_restore_collision_falls_back_to_default() {
+    fn set_username_is_rejected_because_clerk_manages_usernames() {
         let (store, _) = test_store();
+        let store = Arc::new(store);
 
-        let first = store.ensure_username("user_a", Some("Alice"));
-        let second = store.ensure_username("user_b", Some("Alice"));
+        let responses = handle_profile_message(
+            &store,
+            "clerk:user_a",
+            ClientMsg::SetUsername {
+                username: "Alice".into(),
+            },
+        );
 
-        assert_eq!(first, "Alice");
-        assert!(second.starts_with("User"));
-        assert_ne!(second, first);
+        assert!(matches!(
+            responses.as_slice(),
+            [ServerMsg::Error { message }] if message == "Username is managed by Clerk"
+        ));
     }
 
     #[test]

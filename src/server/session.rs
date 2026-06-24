@@ -605,6 +605,9 @@ impl<G: Game + 'static> GameSession<G> {
                     message: "Already authenticated".into(),
                 }]
             }
+            ClientMsg::SetUsername { .. } => vec![ServerMsg::Error {
+                message: "Username is managed by Clerk".into(),
+            }],
             ClientMsg::ListReplays
             | ClientMsg::LoadReplay { .. }
             | ClientMsg::LoadSharedReplay { .. }
@@ -612,7 +615,6 @@ impl<G: Game + 'static> GameSession<G> {
             | ClientMsg::SetReplayFavorite { .. }
             | ClientMsg::SaveReplay
             | ClientMsg::GetProfile
-            | ClientMsg::SetUsername { .. }
             | ClientMsg::CreateMultiplayerRoom { .. }
             | ClientMsg::ListMultiplayerRooms
             | ClientMsg::JoinMultiplayerRoom { .. }

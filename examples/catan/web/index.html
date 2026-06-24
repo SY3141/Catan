@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>HexFish</title>
+<link rel="icon" type="image/svg+xml" href="favicon.svg?v=green-hex-20260623">
 <script src="https://cdn.tailwindcss.com"></script>
 <script>
 tailwind.config = {
@@ -21,7 +22,7 @@ tailwind.config = {
   }
 }
 </script>
-<link rel="stylesheet" href="style.css?v=board-sound-toggle-20260623">
+<link rel="stylesheet" href="style.css?v=board-sound-button-20260623">
 <script>
 (() => {
   const production = {
@@ -114,7 +115,7 @@ tailwind.config = {
       <a id="ko-fi-link" href="https://ko-fi.com/hexfish" target="_blank" rel="noopener noreferrer" class="px-2 py-0.5 rounded border border-gray-700 bg-bg text-[10px] font-semibold tracking-wide text-gray-300 hover:text-gray-100 hover:bg-bg-3 transition-colors">Donate</a>
       <button id="btn-profile" type="button" class="px-2 py-0.5 rounded border border-gray-700 bg-bg text-[10px] font-semibold tracking-wide text-gray-300 hover:text-gray-100 hover:bg-bg-3 transition-colors">Profile</button>
       <button id="btn-guest-sign-up" type="button" class="hidden px-2 py-0.5 rounded border border-accent bg-accent text-[10px] font-semibold tracking-wide text-white hover:bg-red-600 transition-colors">Sign up</button>
-      <div id="clerk-user-button" class="hidden"></div>
+      <button id="btn-clerk-sign-out" type="button" class="hidden px-2 py-0.5 rounded border border-gray-700 bg-bg text-[10px] font-semibold tracking-wide text-gray-300 hover:text-gray-100 hover:bg-bg-3 transition-colors">Sign out</button>
       <span id="clerk-status" class="sr-only" aria-live="polite"></span>
     </div>
   </header>
@@ -396,6 +397,7 @@ tailwind.config = {
           <div class="flex rounded border border-gray-700 overflow-hidden" role="group" aria-label="Choose your side">
             <button id="play-side-p1" type="button" class="play-side-btn px-3 py-1 text-xs bg-accent text-white" data-play-scope="singleplayer" data-player="0" aria-pressed="true">P1</button>
             <button id="play-side-p2" type="button" class="play-side-btn px-3 py-1 text-xs bg-bg-3 text-gray-300 hover:bg-bg border-l border-gray-700" data-play-scope="singleplayer" data-player="1" aria-pressed="false">P2</button>
+            <button id="play-side-random" type="button" class="play-side-btn px-3 py-1 text-xs bg-bg-3 text-gray-300 hover:bg-bg border-l border-gray-700" data-play-scope="singleplayer" data-player="random" aria-pressed="false">Random</button>
           </div>
           <label id="play-difficulty-label" class="flex items-center gap-1.5 text-xs text-gray-300">
             Difficulty
@@ -481,6 +483,7 @@ tailwind.config = {
       <p id="profile-username-status" class="mt-2 min-h-4 text-xs text-gray-400" aria-live="polite"></p>
       <div class="mt-4 flex justify-end gap-2">
         <button id="btn-cancel-profile" type="button" class="py-1.5 px-3 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-bg transition-colors">Cancel</button>
+        <button id="btn-open-clerk-profile" type="button" class="hidden py-1.5 px-3 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-bg transition-colors">Verify in Clerk</button>
         <button id="btn-save-profile" type="button" class="py-1.5 px-3 text-xs bg-accent border border-accent text-white rounded cursor-pointer hover:bg-red-600 transition-colors disabled:opacity-40 disabled:cursor-default">Save</button>
       </div>
     </div>
@@ -609,6 +612,7 @@ tailwind.config = {
       <span id="replay-counter" class="min-w-16 text-center text-gray-300">0 / 0</span>
       <button id="btn-replay-next" class="py-1.5 px-2 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-default" title="Next position" aria-label="Next replay position">&gt;</button>
       <button id="btn-replay-last" class="py-1.5 px-2 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-default" title="Last position" aria-label="Last replay position">&gt;&#124;</button>
+      <button id="btn-replay-share" class="hidden py-1.5 px-3 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-default" type="button" title="Copy replay link" aria-label="Copy replay link">Share</button>
     </div>
     <button id="btn-bot-move" class="py-1.5 px-3 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-default">Bot Move</button>
     <div id="search-action-control" class="flex rounded border border-gray-700 overflow-hidden" role="group" aria-label="Search controls">
@@ -640,9 +644,6 @@ tailwind.config = {
         <label id="autosearch-control" class="flex items-center gap-2 px-1.5 py-1 text-xs text-gray-300 cursor-pointer rounded hover:bg-bg-3">
           <input type="checkbox" id="autosearch-toggle" class="accent-accent"> Auto-search
         </label>
-        <label id="sound-control" class="flex items-center gap-2 px-1.5 py-1 text-xs text-gray-300 cursor-pointer rounded hover:bg-bg-3">
-          <input type="checkbox" id="sound-toggle" class="accent-accent"> Sound
-        </label>
       </div>
     </div>
     <div id="result-banner" class="hidden px-3 py-1 bg-accent rounded font-semibold text-sm text-white"></div>
@@ -650,11 +651,11 @@ tailwind.config = {
 </div>
 <div id="svg-tooltip"></div>
 
-<script src="session.js?v=clerk-replay-identity-20260623"></script>
+<script src="session.js?v=clerk-managed-username-20260623"></script>
 <script src="board.js?v=tile-textures-20260623"></script>
 <script src="mcts.js?v=cpu-load-20260622"></script>
-<script src="controls.js?v=guest-shared-replay-20260623"></script>
-<script src="auth.js?v=clerk-origin-aware-20260623"></script>
-<script src="app.js?v=clerk-replay-identity-20260623"></script>
+<script src="controls.js?v=tasklist-replay-share-20260623"></script>
+<script src="auth.js?v=signout-only-20260623"></script>
+<script src="app.js?v=clerk-username-reverify-20260623"></script>
 </body>
 </html>

@@ -156,10 +156,9 @@ class Session {
   }
 
   _getAuthUsername() {
-    const value = window.hexfishProfileUsername
-      || (window.hexfishAuthSignedIn && typeof window.hexfishAuthUsername === 'function'
+    const value = window.hexfishAuthSignedIn && typeof window.hexfishAuthUsername === 'function'
         ? window.hexfishAuthUsername()
-        : '');
+        : '';
     const username = String(value || '')
       .replace(/[\u0000-\u001f\u007f]/g, '')
       .replace(/\s+/g, ' ')

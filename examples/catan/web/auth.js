@@ -10,7 +10,7 @@
   const loginPanelCopy = document.getElementById('login-panel-copy');
   const continueGuestButton = document.getElementById('btn-continue-guest');
   const guestSignUpButton = document.getElementById('btn-guest-sign-up');
-  const userButton = document.getElementById('clerk-user-button');
+  const signOutButton = document.getElementById('btn-clerk-sign-out');
   const loginStatus = document.getElementById('clerk-login-status');
   const status = document.getElementById('clerk-status');
   let activeAuthView = 'sign-in';
@@ -19,7 +19,7 @@
   let clerkNavigationGuardInstalled = false;
   let suppressInviteGuestMode = false;
 
-  if (!loginPage || !appShell || !authMount || !signInMount || !signUpMount || !signInTab || !signUpTab || !userButton) {
+  if (!loginPage || !appShell || !authMount || !signInMount || !signUpMount || !signInTab || !signUpTab || !signOutButton) {
     return;
   }
 
@@ -43,7 +43,7 @@
   );
 
   const currentAuthUsername = () => (
-    normalizeUsername(window.hexfishProfileUsername)
+    normalizeUsername(window.Clerk?.user?.username)
   );
 
   window.hexfishUsername = currentAuthUsername();
@@ -348,7 +348,7 @@
     appShell.classList.remove('is-hidden');
     appShell.removeAttribute('aria-hidden');
     document.body.classList.remove('auth-active');
-    userButton.classList.toggle('hidden', !showUserControl);
+    signOutButton.classList.toggle('hidden', !showUserControl);
   };
 
   const setGuestHeaderSignUpVisible = (visible) => {
@@ -389,21 +389,8 @@
     syncAuthMountHeight();
   };
 
-  const mountUserControl = (clerk) => {
-    if (!userButton.dataset.clerkMounted) {
-      clerk.mountUserButton(userButton);
-      userButton.dataset.clerkMounted = 'true';
-    }
-  };
-
-  const unmountUserControl = (clerk) => {
-    if (!userButton.dataset.clerkMounted) return;
-    if (clerk && typeof clerk.unmountUserButton === 'function') {
-      clerk.unmountUserButton(userButton);
-    }
-    userButton.innerHTML = '';
-    userButton.classList.add('hidden');
-    delete userButton.dataset.clerkMounted;
+  const showAccountControls = (visible) => {
+    signOutButton.classList.toggle('hidden', !visible);
   };
 
   const clearGuestState = () => {
@@ -414,22 +401,20 @@
   };
 
   const enterGuestMode = () => {
-    const clerk = window.Clerk;
     suppressInviteGuestMode = false;
     window.hexfishAuthSignedIn = false;
     window.hexfishGuestMultiplayer = true;
     window.hexfishGuestRoomCode = currentRoomCode();
     window.hexfishGuestSharedReplay = false;
     window.hexfishGuestReplaySlug = '';
-    unmountUserControl(clerk);
     showAppShell({ showUserControl: false });
+    showAccountControls(false);
     setGuestHeaderSignUpVisible(true);
     setStatus('Guest multiplayer');
     emitAuthEvent('hexfish-auth-guest');
   };
 
   const enterGuestSharedReplayMode = () => {
-    const clerk = window.Clerk;
     const slug = currentReplaySlug();
     if (!slug) return false;
     suppressInviteGuestMode = false;
@@ -438,8 +423,8 @@
     window.hexfishGuestRoomCode = '';
     window.hexfishGuestSharedReplay = true;
     window.hexfishGuestReplaySlug = slug;
-    unmountUserControl(clerk);
     showAppShell({ showUserControl: false });
+    showAccountControls(false);
     setGuestHeaderSignUpVisible(true);
     setStatus('Viewing shared replay');
     emitAuthEvent('hexfish-auth-guest');
@@ -483,7 +468,6 @@
 
     if (signedIn(clerk)) {
       showAppShell();
-      mountUserControl(clerk);
       suppressInviteGuestMode = false;
       window.hexfishAuthSignedIn = true;
       window.hexfishUsername = currentAuthUsername();
@@ -506,7 +490,7 @@
 
     window.hexfishAuthSignedIn = false;
     clearGuestState();
-    unmountUserControl(clerk);
+    showAccountControls(false);
     showLoginPage();
     mountCurrentAuthForm(clerk);
     emitAuthEvent('hexfish-auth-signed-out');
@@ -527,6 +511,10 @@
   });
 
   guestSignUpButton?.addEventListener('click', showSignUpPageFromGuest);
+  signOutButton?.addEventListener('click', async () => {
+    if (typeof window.Clerk?.signOut !== 'function') return;
+    await window.Clerk.signOut();
+  });
   authMount.addEventListener('click', handleAuthMountClick, true);
 
   window.addEventListener('hashchange', () => {

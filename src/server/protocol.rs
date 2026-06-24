@@ -159,7 +159,7 @@ pub enum ClientMsg {
     SaveReplay,
     /// Read the current profile for this web session.
     GetProfile,
-    /// Set a globally unique username for this web session.
+    /// Legacy username setter. Usernames are managed by Clerk.
     SetUsername { username: String },
     /// Jump to a replay cursor (0..=len).
     SetReplayCursor { cursor: usize },

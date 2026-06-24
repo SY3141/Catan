@@ -14,6 +14,7 @@ const BOTTOM_CONTROL_HOVER_TIPS = [
   ['replay-slider', 'Drag to jump to a specific position in this replay.'],
   ['btn-replay-next', 'Step forward one position in this replay.'],
   ['btn-replay-last', 'Jump to the final position in this replay.'],
+  ['btn-replay-share', 'Copy a share link for this replay.'],
   ['btn-bot-move', 'Ask the bot to choose and play a move using the current search budget.'],
   ['btn-run-sims', 'Run analysis from the current position using the selected budget.'],
   ['btn-pause-search', 'Stop the running search and keep the current analysis results.'],
