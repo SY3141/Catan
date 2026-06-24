@@ -256,6 +256,29 @@ impl<G: Game + 'static> GameSession<G> {
         })
     }
 
+    /// Export the complete live history, including redo entries past the
+    /// visible cursor. Used by distributed multiplayer rooms that must persist
+    /// undo/redo state outside this in-memory session.
+    pub fn export_full_history_log_allow_empty(&self) -> Option<GameLog> {
+        if self.live_log_export_disabled || self.replay.is_some() {
+            return None;
+        }
+        let initial_state = if let Some(first) = self.history.first() {
+            self.presenter.serialize_log_state(&first.state)?
+        } else {
+            self.presenter.serialize_log_state(self.search.state())?
+        };
+        let actions = self
+            .history
+            .iter()
+            .map(|entry| entry.action)
+            .collect::<Vec<_>>();
+        Some(GameLog {
+            initial_state,
+            actions,
+        })
+    }
+
     /// Export the visible live game prefix unless that exact log was already saved.
     pub fn export_unsaved_current_log(&self) -> Option<GameLog> {
         let log = self.export_current_log()?;
@@ -431,6 +454,12 @@ impl<G: Game + 'static> GameSession<G> {
         let _ = self.set_cursor(self.history.len());
     }
 
+    /// Move the visible cursor within the existing history without truncating
+    /// redo entries.
+    pub fn seek_to_cursor(&mut self, cursor: usize) -> Result<(), String> {
+        self.set_cursor(cursor)
+    }
+
     /// Roll back to a previous cursor position, resetting the search state.
     ///
     /// Truncates history beyond `target` and sets the search state to the
@@ -499,18 +528,7 @@ impl<G: Game + 'static> GameSession<G> {
             return None;
         }
 
-        let mut target = self.cursor;
-        while target > 0 {
-            target -= 1;
-            if !self.history[target].is_chance {
-                break;
-            }
-        }
-
-        let entry = self.history.get(target)?;
-        if entry.is_chance {
-            return None;
-        }
+        let (target, entry) = self.previous_decision_entry(self.cursor)?;
 
         if let Some(human_player) = self.singleplayer_human_player {
             if action_player_idx(&entry.state) != Some(human_player) {
@@ -525,6 +543,81 @@ impl<G: Game + 'static> GameSession<G> {
         }
 
         Some(target)
+    }
+
+    fn previous_decision_entry(&self, cursor: usize) -> Option<(usize, &HistoryEntry<G>)> {
+        if cursor == 0 {
+            return None;
+        }
+
+        let mut target = cursor;
+        while target > 0 {
+            target -= 1;
+            if !self.history[target].is_chance {
+                break;
+            }
+        }
+
+        let entry = self.history.get(target)?;
+        (!entry.is_chance).then_some((target, entry))
+    }
+
+    fn multiplayer_undo_target_cursor(&self, player: usize) -> Option<usize> {
+        if self.replay.is_some() || self.is_terminal() || self.current_player_idx() != player {
+            return None;
+        }
+        let (target, entry) = self.previous_decision_entry(self.cursor)?;
+        if action_player_idx(&entry.state) != Some(player) {
+            return None;
+        }
+        if self
+            .presenter
+            .is_singleplayer_undo_barrier(&entry.state, entry.action)
+        {
+            return None;
+        }
+        Some(target)
+    }
+
+    fn multiplayer_redo_available(&self, player: usize) -> bool {
+        if self.replay.is_some()
+            || self.is_terminal()
+            || self.current_player_idx() != player
+            || self.cursor >= self.history.len()
+        {
+            return false;
+        }
+        let entry = &self.history[self.cursor];
+        !entry.is_chance
+            && action_player_idx(&entry.state) == Some(player)
+            && !self
+                .presenter
+                .is_singleplayer_undo_barrier(&entry.state, entry.action)
+    }
+
+    pub fn multiplayer_can_undo(&self, player: usize) -> bool {
+        self.multiplayer_undo_target_cursor(player).is_some()
+    }
+
+    pub fn multiplayer_can_redo(&self, player: usize) -> bool {
+        self.multiplayer_redo_available(player)
+    }
+
+    pub fn undo_multiplayer_action(&mut self, player: usize) -> Result<(), String> {
+        let target = self
+            .multiplayer_undo_target_cursor(player)
+            .ok_or_else(|| "Nothing to undo".to_string())?;
+        self.cursor = target;
+        self.search.reset(self.history[target].state.clone());
+        Ok(())
+    }
+
+    pub fn redo_multiplayer_action(&mut self, player: usize) -> Result<(), String> {
+        if !self.multiplayer_redo_available(player) {
+            return Err("Nothing to redo".into());
+        }
+        self.redo_from_cursor();
+        Ok(())
     }
 
     /// Build a GameState server message for the current state (public for live push).
@@ -621,10 +714,16 @@ impl<G: Game + 'static> GameSession<G> {
             action_log_sound_kinds,
             history_cursor: self.cursor,
             action_log_cursors,
-            can_undo: matches!(perspective, StatePerspective::Full)
-                && self.undo_target_cursor().is_some(),
-            can_redo: matches!(perspective, StatePerspective::Full)
-                && self.cursor < self.history.len(),
+            can_undo: match perspective {
+                StatePerspective::Full => self.undo_target_cursor().is_some(),
+                StatePerspective::Player(player) => self.multiplayer_can_undo(player),
+                StatePerspective::Spectator => false,
+            },
+            can_redo: match perspective {
+                StatePerspective::Full => self.cursor < self.history.len(),
+                StatePerspective::Player(player) => self.multiplayer_can_redo(player),
+                StatePerspective::Spectator => false,
+            },
             replay: self.replay.as_ref().map(|replay| ReplayState {
                 id: replay.id.clone(),
                 cursor: self.cursor,
@@ -927,21 +1026,7 @@ impl<G: Game + 'static> GameSession<G> {
             }
             ClientMsg::Redo => {
                 if self.cursor < self.history.len() {
-                    // Replay the stored decision + any following chance outcomes.
-                    loop {
-                        let entry = &self.history[self.cursor];
-                        if let Some(ref next) = entry.next_state {
-                            self.search.reset(next.clone());
-                        } else {
-                            self.search.apply_action(entry.action);
-                        }
-                        self.cursor += 1;
-                        let at_chance =
-                            self.cursor < self.history.len() && self.history[self.cursor].is_chance;
-                        if !at_chance {
-                            break;
-                        }
-                    }
+                    self.redo_from_cursor();
                     vec![self.state_msg()]
                 } else {
                     vec![ServerMsg::Error {
@@ -980,6 +1065,24 @@ impl<G: Game + 'static> GameSession<G> {
             ClientMsg::SetAutoSearch { .. } => {
                 // Handled by connection-level loop; respond with current state.
                 vec![self.state_msg()]
+            }
+        }
+    }
+
+    fn redo_from_cursor(&mut self) {
+        // Replay the stored decision + any following chance outcomes.
+        loop {
+            let entry = &self.history[self.cursor];
+            if let Some(ref next) = entry.next_state {
+                self.search.reset(next.clone());
+            } else {
+                self.search.apply_action(entry.action);
+            }
+            self.cursor += 1;
+            let at_chance =
+                self.cursor < self.history.len() && self.history[self.cursor].is_chance;
+            if !at_chance {
+                break;
             }
         }
     }
@@ -1973,6 +2076,84 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct TurnUndoGame {
+        rolled: bool,
+        post_roll_actions: u8,
+    }
+
+    impl Game for TurnUndoGame {
+        const NUM_ACTIONS: usize = 2;
+
+        fn status(&self) -> Status {
+            Status::Decision(1.0)
+        }
+
+        fn legal_actions(&self, buf: &mut Vec<usize>) {
+            if self.rolled {
+                buf.push(0);
+            } else {
+                buf.push(1);
+            }
+        }
+
+        fn apply_action(&mut self, action: usize) {
+            match action {
+                1 => {
+                    assert!(!self.rolled);
+                    self.rolled = true;
+                }
+                0 => {
+                    assert!(self.rolled);
+                    self.post_roll_actions += 1;
+                }
+                _ => panic!("unexpected action {action}"),
+            }
+        }
+    }
+
+    struct TurnUndoEvaluator;
+
+    impl Evaluator<TurnUndoGame> for TurnUndoEvaluator {
+        fn evaluate(&self, _state: &TurnUndoGame, _rng: &mut fastrand::Rng) -> Evaluation {
+            Evaluation::uniform(TurnUndoGame::NUM_ACTIONS, 0.0)
+        }
+    }
+
+    struct TurnUndoPresenter;
+
+    impl GamePresenter<TurnUndoGame> for TurnUndoPresenter {
+        fn serialize_state(&self, state: &TurnUndoGame) -> serde_json::Value {
+            serde_json::json!({
+                "rolled": state.rolled,
+                "post_roll_actions": state.post_roll_actions,
+            })
+        }
+
+        fn action_label(&self, _state: &TurnUndoGame, action: usize) -> String {
+            format!("Action {action}")
+        }
+
+        fn is_singleplayer_undo_barrier(&self, _state: &TurnUndoGame, action: usize) -> bool {
+            action == 1
+        }
+
+        fn phase_label(&self, _state: &TurnUndoGame) -> String {
+            "turn-undo".into()
+        }
+
+        fn static_dir(&self) -> &Path {
+            Path::new(".")
+        }
+
+        fn new_game(&self, _seed: u64) -> TurnUndoGame {
+            TurnUndoGame {
+                rolled: false,
+                post_roll_actions: 0,
+            }
+        }
+    }
+
     fn test_session() -> GameSession<TestGame> {
         GameSession::with_state(
             TestGame { id: 7, moves: 0 },
@@ -1990,6 +2171,20 @@ mod tests {
             Arc::new(ChanceOnPollEvaluator),
             "chance-on-poll",
             Arc::new(ChanceOnPollPresenter),
+            [true, true],
+            crate::mcts::Config::default(),
+        )
+    }
+
+    fn turn_undo_session() -> GameSession<TurnUndoGame> {
+        GameSession::with_state(
+            TurnUndoGame {
+                rolled: false,
+                post_roll_actions: 0,
+            },
+            Arc::new(TurnUndoEvaluator),
+            "turn-undo",
+            Arc::new(TurnUndoPresenter),
             [true, true],
             crate::mcts::Config::default(),
         )
@@ -2358,6 +2553,90 @@ mod tests {
         }
         assert_eq!(session.cursor(), 1);
         assert_eq!(session.search.state().moves, 1);
+    }
+
+    #[test]
+    fn multiplayer_undo_redo_stays_after_roll_barrier() {
+        let mut session = turn_undo_session();
+        session
+            .play_human_action(0, 1)
+            .expect("roll-like barrier action is legal");
+
+        match session.state_msg_for_player(0) {
+            ServerMsg::GameState {
+                can_undo,
+                can_redo,
+                history_cursor,
+                ..
+            } => {
+                assert_eq!(history_cursor, 1);
+                assert!(!can_undo);
+                assert!(!can_redo);
+            }
+            other => panic!("expected player GameState after barrier action, got {other:?}"),
+        }
+        assert_eq!(
+            session.undo_multiplayer_action(0).unwrap_err(),
+            "Nothing to undo"
+        );
+
+        session
+            .play_human_action(0, 0)
+            .expect("post-roll action is legal");
+        match session.state_msg_for_player(0) {
+            ServerMsg::GameState {
+                state,
+                can_undo,
+                can_redo,
+                history_cursor,
+                ..
+            } => {
+                assert_eq!(history_cursor, 2);
+                assert_eq!(state["post_roll_actions"], serde_json::json!(1));
+                assert!(can_undo);
+                assert!(!can_redo);
+            }
+            other => panic!("expected player GameState after post-roll action, got {other:?}"),
+        }
+
+        session
+            .undo_multiplayer_action(0)
+            .expect("post-roll action can be undone");
+        match session.state_msg_for_player(0) {
+            ServerMsg::GameState {
+                state,
+                can_undo,
+                can_redo,
+                history_cursor,
+                ..
+            } => {
+                assert_eq!(history_cursor, 1);
+                assert_eq!(state["rolled"], serde_json::json!(true));
+                assert_eq!(state["post_roll_actions"], serde_json::json!(0));
+                assert!(!can_undo);
+                assert!(can_redo);
+            }
+            other => panic!("expected player GameState after multiplayer undo, got {other:?}"),
+        }
+
+        session
+            .redo_multiplayer_action(0)
+            .expect("post-roll action can be redone");
+        match session.state_msg_for_player(0) {
+            ServerMsg::GameState {
+                state,
+                can_undo,
+                can_redo,
+                history_cursor,
+                ..
+            } => {
+                assert_eq!(history_cursor, 2);
+                assert_eq!(state["post_roll_actions"], serde_json::json!(1));
+                assert!(can_undo);
+                assert!(!can_redo);
+            }
+            other => panic!("expected player GameState after multiplayer redo, got {other:?}"),
+        }
     }
 
     #[test]

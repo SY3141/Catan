@@ -10,6 +10,16 @@ const WEBSOCKET_HEARTBEAT_TIMEOUT_CLOSE_CODE = 4000;
 const WEBSOCKET_HEARTBEAT_SEND_FAILED_CLOSE_CODE = 4001;
 const WEBSOCKET_AUTH_CHANGED_CLOSE_CODE = 4002;
 const WEBSOCKET_APP_STOPPED_CLOSE_CODE = 4003;
+const WEBSOCKET_BAD_MESSAGE_CLOSE_CODE = 4004;
+const WEBSOCKET_MAX_QUEUE_MESSAGES = 100;
+const WEBSOCKET_RECONNECT_BASE_MS = 1000;
+const WEBSOCKET_RECONNECT_MAX_MS = 30000;
+const WEBSOCKET_RECONNECT_JITTER = 0.35;
+const WEBSOCKET_LOW_PRIORITY_QUEUE_TYPES = new Set([
+  'GetMultiplayerRoom',
+  'ListMultiplayerRooms',
+  'GetProfile',
+]);
 
 class Session {
   constructor(options = {}) {
@@ -23,6 +33,8 @@ class Session {
     this.getAuthToken = options.getAuthToken || null;
     this.anonymousSessionId = options.anonymousSessionId || this._loadAnonymousSessionId();
     this.heartbeatTimer = null;
+    this.reconnectTimer = null;
+    this.reconnectAttempts = 0;
     this.lastMessageAt = 0;
   }
 
@@ -34,6 +46,7 @@ class Session {
     if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
       return;
     }
+    this._clearReconnectTimer();
     this.shouldReconnect = true;
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const url = `${proto}//${location.host}/ws`;
@@ -64,7 +77,14 @@ class Session {
     ws.onmessage = (event) => {
       if (this.ws !== ws) return;
       this.lastMessageAt = Date.now();
-      const msg = JSON.parse(event.data);
+      let msg;
+      try {
+        msg = JSON.parse(event.data);
+      } catch (error) {
+        console.warn('HexFish WebSocket received malformed JSON', error);
+        ws.close(WEBSOCKET_BAD_MESSAGE_CLOSE_CODE, 'bad message');
+        return;
+      }
       if (msg.type === 'Pong') return;
       const handler = this.handlers[msg.type];
 
@@ -76,6 +96,7 @@ class Session {
         }
         this.authenticated = true;
         this.connected = true;
+        this.reconnectAttempts = 0;
         this._startHeartbeat(ws);
         if (handler) handler(msg);
         this._flushQueue();
@@ -113,7 +134,7 @@ class Session {
       const handler = this.handlers.Disconnected;
       if (handler) handler(details);
       if (shouldReconnect) {
-        setTimeout(() => this.connect(), 2000);
+        this._scheduleReconnect();
       }
     };
 
@@ -126,7 +147,7 @@ class Session {
   send(msg) {
     const json = JSON.stringify(msg);
     if (this.deferDuringSearch && msg.type !== 'PauseSearch') {
-      this.queue.push(json);
+      this._queueJson(json);
       return;
     }
     this._sendOrQueue(json);
@@ -145,7 +166,30 @@ class Session {
     if (this.connected && this.authenticated && this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(json);
     } else {
-      this.queue.push(json);
+      this._queueJson(json);
+    }
+  }
+
+  _queueJson(json) {
+    if (this.queue.length >= WEBSOCKET_MAX_QUEUE_MESSAGES) {
+      const dropIndex = this.queue.findIndex((queued) => (
+        WEBSOCKET_LOW_PRIORITY_QUEUE_TYPES.has(this._queuedMessageType(queued))
+      ));
+      const removed = this.queue.splice(dropIndex >= 0 ? dropIndex : 0, 1)[0];
+      console.warn('HexFish WebSocket send queue full; dropped queued message', {
+        dropped_type: this._queuedMessageType(removed),
+        queued_type: this._queuedMessageType(json),
+        queue_limit: WEBSOCKET_MAX_QUEUE_MESSAGES,
+      });
+    }
+    this.queue.push(json);
+  }
+
+  _queuedMessageType(json) {
+    try {
+      return JSON.parse(json)?.type || '';
+    } catch (_error) {
+      return '';
     }
   }
 
@@ -163,6 +207,8 @@ class Session {
 
   disconnect(options = {}) {
     this.shouldReconnect = false;
+    this._clearReconnectTimer();
+    this.reconnectAttempts = 0;
     this.connected = false;
     this.authenticated = false;
     this.deferDuringSearch = false;
@@ -208,6 +254,31 @@ class Session {
     if (!this.heartbeatTimer) return;
     window.clearInterval(this.heartbeatTimer);
     this.heartbeatTimer = null;
+  }
+
+  _scheduleReconnect() {
+    this._clearReconnectTimer();
+    const delay = this._nextReconnectDelayMs();
+    this.reconnectTimer = window.setTimeout(() => {
+      this.reconnectTimer = null;
+      this.connect();
+    }, delay);
+  }
+
+  _nextReconnectDelayMs() {
+    const attempt = this.reconnectAttempts++;
+    const exponential = Math.min(
+      WEBSOCKET_RECONNECT_MAX_MS,
+      WEBSOCKET_RECONNECT_BASE_MS * (2 ** Math.min(attempt, 8))
+    );
+    const jitter = 1 + ((Math.random() * 2 - 1) * WEBSOCKET_RECONNECT_JITTER);
+    return Math.max(250, Math.min(WEBSOCKET_RECONNECT_MAX_MS, Math.round(exponential * jitter)));
+  }
+
+  _clearReconnectTimer() {
+    if (!this.reconnectTimer) return;
+    window.clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
   }
 
   async _getAuthToken() {

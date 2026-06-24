@@ -47,6 +47,7 @@ const SEARCH_PROGRESS_KEEPALIVE_MS: u64 = 5_000;
 const SEARCH_INTERRUPT_INTERVAL: u32 = 8;
 const MULTIPLAYER_ANALYSIS_SIMS: u32 = 200;
 const MULTIPLAYER_EMPTY_ROOM_GRACE_MS: u64 = 5 * 60_000;
+const MAX_WEBSOCKET_MESSAGE_BYTES: usize = 64 * 1024;
 const BOARD_FINGERPRINT_RETRIES: usize = 64;
 const DATABASE_URL_ENV: &str = "DATABASE_URL";
 const REPLAY_STORE_REQUIRED_ENV: &str = "HEXFISH_REPLAY_STORE_REQUIRED";
@@ -3205,6 +3206,17 @@ async fn handle_authenticated_message<G: Game + 'static>(
         _ => return Ok(()),
     };
 
+    if text.len() > MAX_WEBSOCKET_MESSAGE_BYTES {
+        send_msg(
+            socket,
+            &ServerMsg::Error {
+                message: "WebSocket message is too large".into(),
+            },
+        )
+        .await?;
+        return Ok(());
+    }
+
     let client_msg: ClientMsg = match serde_json::from_str(&text) {
         Ok(m) => m,
         Err(e) => {
@@ -3236,7 +3248,9 @@ async fn handle_authenticated_message<G: Game + 'static>(
         return Ok(());
     }
 
-    if is_multiplayer_msg(&client_msg) {
+    if is_multiplayer_msg(&client_msg)
+        || (active_room.is_some() && matches!(&client_msg, ClientMsg::Undo | ClientMsg::Redo))
+    {
         let profile_display_name = store
             .current_username(user_id)
             .or_else(|| display_name.map(str::to_string));
@@ -3637,6 +3651,53 @@ async fn handle_multiplayer_message_for_user<G: Game + 'static>(
             };
             schedule_lobby_broadcast(Arc::clone(rooms));
             schedule_multiplayer_clock_timeout(Arc::clone(&room));
+            schedule_multiplayer_analysis(room, analysis_generation, analysis_session);
+            responses
+        }
+        history_msg @ (ClientMsg::Undo | ClientMsg::Redo) => {
+            let Some(active) = active_room.as_ref() else {
+                return vec![ServerMsg::Error {
+                    message: "Join a multiplayer room before using history controls".into(),
+                }];
+            };
+            let Some(player) = active.viewer.player() else {
+                return vec![ServerMsg::Error {
+                    message: "Spectators cannot use multiplayer history controls".into(),
+                }];
+            };
+            let room = Arc::clone(&active.room);
+            let socket_id = active.socket_id;
+            if !room.is_full() {
+                return vec![ServerMsg::Error {
+                    message: "Room is waiting for an opponent".into(),
+                }];
+            }
+            if room.is_finished() {
+                let _ = save_finished_multiplayer_replay(Arc::clone(&room)).await;
+                room.broadcast_room_info_except(Some(socket_id));
+                return vec![room.room_msg_for_active(active)];
+            }
+            let (responses, analysis_generation, analysis_session) = {
+                let mut session = room.session.lock().await;
+                let result = match history_msg {
+                    ClientMsg::Undo => session.undo_multiplayer_action(player),
+                    ClientMsg::Redo => session.redo_multiplayer_action(player),
+                    _ => unreachable!(),
+                };
+                if let Err(message) = result {
+                    return vec![ServerMsg::Error { message }];
+                }
+                room.touch();
+                room.broadcast_state_except(&session, Some(socket_id));
+                (
+                    vec![
+                        room.room_msg_for_active(active),
+                        session.state_msg_for_player(player),
+                    ],
+                    room.next_analysis_generation(),
+                    session.fork_analysis_session(),
+                )
+            };
             schedule_multiplayer_analysis(room, analysis_generation, analysis_session);
             responses
         }
@@ -5083,6 +5144,90 @@ mod tests {
     }
 
     #[test]
+    fn multiplayer_room_routes_undo_and_redo_to_room_session() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let (rooms, _) = test_room_store();
+            let rooms = Arc::new(rooms);
+            let (room, player_a) = rooms
+                .create_room("user_a", Some(0), None, None, None, None)
+                .unwrap();
+            rooms.join_room("user_b", &room.code).unwrap();
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let socket_id = room
+                .register_socket(
+                    "user_a",
+                    None,
+                    MultiplayerViewer::Player(player_a),
+                    tx.clone(),
+                )
+                .unwrap();
+            let mut active_room = Some(ActiveMultiplayerRoom {
+                room,
+                socket_id,
+                viewer: MultiplayerViewer::Player(player_a),
+            });
+
+            let played = handle_multiplayer_message(
+                &rooms,
+                "user_a",
+                &tx,
+                &mut active_room,
+                ClientMsg::PlayMultiplayerAction { action: 0 },
+            )
+            .await;
+            assert!(played.iter().any(|msg| match msg {
+                ServerMsg::GameState { can_undo, .. } => *can_undo,
+                _ => false,
+            }));
+
+            let undone =
+                handle_multiplayer_message(&rooms, "user_a", &tx, &mut active_room, ClientMsg::Undo)
+                    .await;
+            match undone.as_slice() {
+                [
+                    ServerMsg::MultiplayerRoom { .. },
+                    ServerMsg::GameState {
+                        state,
+                        history_cursor,
+                        can_undo,
+                        can_redo,
+                        ..
+                    },
+                ] => {
+                    assert_eq!(state["moves"], serde_json::json!(0));
+                    assert_eq!(*history_cursor, 0);
+                    assert!(!*can_undo);
+                    assert!(*can_redo);
+                }
+                other => panic!("expected multiplayer undo state, got {other:?}"),
+            }
+
+            let redone =
+                handle_multiplayer_message(&rooms, "user_a", &tx, &mut active_room, ClientMsg::Redo)
+                    .await;
+            match redone.as_slice() {
+                [
+                    ServerMsg::MultiplayerRoom { .. },
+                    ServerMsg::GameState {
+                        state,
+                        history_cursor,
+                        can_undo,
+                        can_redo,
+                        ..
+                    },
+                ] => {
+                    assert_eq!(state["moves"], serde_json::json!(1));
+                    assert_eq!(*history_cursor, 1);
+                    assert!(*can_undo);
+                    assert!(!*can_redo);
+                }
+                other => panic!("expected multiplayer redo state, got {other:?}"),
+            }
+        });
+    }
+
+    #[test]
     fn anonymous_multiplayer_can_create_room() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
@@ -5162,6 +5307,88 @@ mod tests {
                     assert!(message.contains("waiting"));
                 }
                 other => panic!("expected waiting error, got {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn multiplayer_player_move_catches_up_disconnected_opponent_on_rejoin() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let (rooms, _) = test_room_store();
+            let rooms = Arc::new(rooms);
+            let (room, player_a) = rooms
+                .create_room("user_a", Some(0), Some("CATCH1".into()), None, None, None)
+                .unwrap();
+            let (_, player_b) = rooms.join_room("user_b", "CATCH1").unwrap();
+            let (tx_a, _rx_a) = mpsc::unbounded_channel();
+            let (tx_b, _rx_b) = mpsc::unbounded_channel();
+            let socket_a = room
+                .register_socket(
+                    "user_a",
+                    None,
+                    MultiplayerViewer::Player(player_a),
+                    tx_a.clone(),
+                )
+                .unwrap();
+            let socket_b = room
+                .register_socket("user_b", None, MultiplayerViewer::Player(player_b), tx_b)
+                .unwrap();
+            room.unregister_socket(socket_b);
+
+            let mut active_a = Some(ActiveMultiplayerRoom {
+                room: Arc::clone(&room),
+                socket_id: socket_a,
+                viewer: MultiplayerViewer::Player(player_a),
+            });
+            let responses = handle_multiplayer_message(
+                &rooms,
+                "user_a",
+                &tx_a,
+                &mut active_a,
+                ClientMsg::PlayMultiplayerAction { action: 0 },
+            )
+            .await;
+
+            assert!(responses.iter().any(|msg| {
+                matches!(
+                    msg,
+                    ServerMsg::GameState { state, .. }
+                        if state["moves"] == serde_json::json!(1)
+                )
+            }));
+
+            let (tx_b_rejoin, _rx_b_rejoin) = mpsc::unbounded_channel();
+            let mut active_b = None;
+            let rejoin = handle_multiplayer_message(
+                &rooms,
+                "user_b",
+                &tx_b_rejoin,
+                &mut active_b,
+                ClientMsg::JoinMultiplayerRoom {
+                    code: "CATCH1".into(),
+                },
+            )
+            .await;
+
+            match rejoin.as_slice() {
+                [
+                    ServerMsg::MultiplayerRoom {
+                        viewer_role,
+                        local_player,
+                        players,
+                        ..
+                    },
+                    ServerMsg::GameState { state, .. },
+                ] => {
+                    assert_eq!(viewer_role, "player");
+                    assert_eq!(*local_player, Some(player_b as u8));
+                    assert!(players[player_a].connected);
+                    assert!(players[player_b].connected);
+                    assert_eq!(state["moves"], serde_json::json!(1));
+                    assert_eq!(state["viewer"], serde_json::json!(player_b));
+                }
+                other => panic!("expected caught-up player rejoin response, got {other:?}"),
             }
         });
     }

@@ -95,6 +95,8 @@ const CATAN_CITY_START = 126;
 const CATAN_CITY_END = 180;
 const CATAN_ROBBER_START = 205;
 const CATAN_ROBBER_END = 224;
+const CATAN_MARITIME_START = 229;
+const CATAN_MARITIME_END = 249;
 const CATAN_NODE_COUNT = CATAN_SETTLEMENT_END - CATAN_SETTLEMENT_START;
 const CATAN_EDGE_COUNT = CATAN_ROAD_END - CATAN_ROAD_START;
 const CATAN_TILE_COUNT = CATAN_ROBBER_END - CATAN_ROBBER_START;
@@ -167,6 +169,8 @@ let lastLiveMoveSoundSignature = null;
 let lastLiveMoveSoundLength = 0;
 let suppressNextLiveMoveSound = true;
 let autoRollEndEnabled = false;
+let openTradeGiveResource = null;
+let lastCanUseLegalActions = false;
 let selectedPlayMode = 'bot';
 let selectedPlayDifficulty = 5;
 const initialUrlParams = new URLSearchParams(window.location.search);
@@ -183,6 +187,8 @@ let multiplayerDisconnectModalPending = null;
 if (pendingAutoJoinRoomCode) selectedPlayMode = 'multiplayer';
 let autoJoinRoomAttempted = false;
 let multiplayerLobbyRooms = [];
+let multiplayerLobbyRenderFrame = null;
+let multiplayerRoomUiFrame = null;
 let lastMultiplayerRoomCode = normalizeRoomCode(initialUrlRoomCode || readLastMultiplayerRoomCode());
 let multiplayerInviteCopiedCode = '';
 let shownMultiplayerReplayShareSlug = '';
@@ -1002,26 +1008,15 @@ function boardHighlightKey(item) {
 
 function deriveLastBoardMoveHighlights(msg) {
   const entries = actionLogEntriesThroughCursor(msg);
-  let lastSpatialIndex = -1;
-  let actor = null;
-
-  for (let i = entries.length - 1; i >= 0; i--) {
-    const spatial = parseSpatialActionLogEntry(entries[i]);
-    if (!spatial) continue;
-    lastSpatialIndex = i;
-    actor = spatial.player;
-    break;
-  }
-
-  if (lastSpatialIndex < 0 || actor == null) return null;
+  const lastSpatial = parseSpatialActionLogEntry(entries[entries.length - 1]);
+  if (!lastSpatial) return null;
+  const actor = lastSpatial.player;
 
   const pieces = [];
   const seen = new Set();
-  for (let i = lastSpatialIndex; i >= 0; i--) {
-    const entryPlayer = parseActionLogPlayer(entries[i]);
-    if (entryPlayer != null && entryPlayer !== actor) break;
+  for (let i = entries.length - 1; i >= 0; i--) {
     const spatial = parseSpatialActionLogEntry(entries[i]);
-    if (!spatial || spatial.player !== actor) continue;
+    if (!spatial || spatial.player !== actor) break;
     const key = boardHighlightKey(spatial);
     if (seen.has(key)) continue;
     seen.add(key);
@@ -1308,7 +1303,6 @@ function isLocalMultiplayerTurn(msg = currentState) {
     !msg.is_chance &&
     !multiplayerSpectatorActive() &&
     multiplayerRoomFull() &&
-    multiplayerOpponentConnected() &&
     msg.current_player === playMode.humanPlayer &&
     !playMode.pendingHumanMove &&
     Array.isArray(msg.legal_actions) &&
@@ -1479,8 +1473,7 @@ function autoRollEndForcedAction(msg) {
   if (!Array.isArray(msg.legal_actions) || msg.legal_actions.length !== 1) return null;
   if (playMultiplayerActive() && (
     multiplayerTimeoutWinner() != null ||
-    !multiplayerRoomFull() ||
-    !multiplayerOpponentConnected()
+    !multiplayerRoomFull()
   )) return null;
 
   const action = Number(msg.legal_actions[0]?.action);
@@ -2120,6 +2113,29 @@ function renderMultiplayerLobby(rooms = multiplayerLobbyRooms) {
     list.appendChild(row);
   }
   updateMultiplayerLobbyCountdownTimer();
+}
+
+function requestMultiplayerUiFrame(callback) {
+  if (typeof window.requestAnimationFrame === 'function') {
+    return window.requestAnimationFrame(callback);
+  }
+  return window.setTimeout(callback, 16);
+}
+
+function scheduleMultiplayerLobbyRender() {
+  if (multiplayerLobbyRenderFrame != null) return;
+  multiplayerLobbyRenderFrame = requestMultiplayerUiFrame(() => {
+    multiplayerLobbyRenderFrame = null;
+    renderMultiplayerLobby();
+  });
+}
+
+function scheduleMultiplayerRoomUiUpdate() {
+  if (multiplayerRoomUiFrame != null) return;
+  multiplayerRoomUiFrame = requestMultiplayerUiFrame(() => {
+    multiplayerRoomUiFrame = null;
+    updateMultiplayerRoomUi();
+  });
 }
 
 function updateMultiplayerReconnectUi() {
@@ -2787,7 +2803,7 @@ function handleMultiplayerRoomMessage(msg) {
   writeLastMultiplayerRoomCode(playMode.multiplayerRoom.code);
   setRoomCodeInUrl(playMode.multiplayerRoom.code);
   if (viewerRole === 'player') setPlaySide(localPlayer, 'multiplayer');
-  updateMultiplayerRoomUi();
+  scheduleMultiplayerRoomUiUpdate();
   updateMultiplayerResignButton();
 
   if (activeView === 'play-setup' || activeView === 'play') {
@@ -2913,7 +2929,6 @@ function renderGameState(msg, options = {}) {
   updatePlayerPanel(0, state);
   updatePlayerPanel(1, state);
   updateMultiplayerTimeoutWinnerBadge();
-  updateBoardResourceLegend(msg, state);
   updateBank(state);
   updateDice(state);
 
@@ -2934,11 +2949,11 @@ function renderGameState(msg, options = {}) {
     multiplayerSpectatorActive() ||
     multiplayerTimeoutWinner() != null ||
     !multiplayerRoomFull() ||
-    !multiplayerOpponentConnected() ||
     msg.current_player !== playMode.humanPlayer
   );
   updateActionPanelStatus(msg, showPlayBotThinking);
   const canUseLegalActions = !msg.replay && !msg.is_terminal && !msg.is_chance && !playBotTurn && !playMultiplayerBlocked;
+  updateBoardResourceLegend(msg, state, canUseLegalActions);
   updateBoardPieceCounts(msg, state, canUseLegalActions);
 
   if (canUseLegalActions) {
@@ -2989,10 +3004,11 @@ function renderGameState(msg, options = {}) {
 
   updateRollBadge(msg, state, viewKey);
   syncRollBadgeActionState(msg);
+  syncEndTurnBadgeActionState(msg);
 
   // Undo/Redo button states
-  document.getElementById('btn-undo').disabled = playBotTurn || playMultiplayerActive() || !msg.can_undo;
-  document.getElementById('btn-redo').disabled = playBotTurn || playMultiplayerActive() || !msg.can_redo;
+  document.getElementById('btn-undo').disabled = playBotTurn || !msg.can_undo;
+  document.getElementById('btn-redo').disabled = playBotTurn || !msg.can_redo;
 
   // Game over modal
   hideBottomResultBanner();
@@ -3055,6 +3071,8 @@ function updateActionPanelStatus(msg, playBotTurn) {
       status.textContent = 'Spectating';
     } else if (!multiplayerRoomFull()) {
       status.textContent = 'Waiting for opponent';
+    } else if (!multiplayerOpponentConnected() && msg?.current_player === playMode.humanPlayer) {
+      status.textContent = 'Your turn - opponent disconnected';
     } else if (!multiplayerOpponentConnected()) {
       status.textContent = 'Opponent disconnected';
     } else if (msg?.current_player === playMode.humanPlayer) {
@@ -3094,7 +3112,6 @@ function showLegalActionPreview(action) {
     multiplayerSpectatorActive() ||
     multiplayerTimeoutWinner() != null ||
     !multiplayerRoomFull() ||
-    !multiplayerOpponentConnected() ||
     currentState.current_player !== playMode.humanPlayer
   )) return;
   board.showActionPreview(action, currentBoard, currentState.current_player);
@@ -3104,6 +3121,74 @@ function hasLegalAction(msg, action) {
   return Array.isArray(msg?.legal_actions) && msg.legal_actions.some(a => Number(a?.action) === action);
 }
 
+function legalActionCount(msg) {
+  return Array.isArray(msg?.legal_actions) ? msg.legal_actions.length : 0;
+}
+
+function decodeCatanMaritimeAction(action) {
+  const value = Number(action);
+  if (!Number.isInteger(value) || value < CATAN_MARITIME_START || value >= CATAN_MARITIME_END) {
+    return null;
+  }
+  const index = value - CATAN_MARITIME_START;
+  const give = Math.floor(index / 4);
+  const adjustedReceive = index % 4;
+  const receive = adjustedReceive < give ? adjustedReceive : adjustedReceive + 1;
+  if (give < 0 || give >= RESOURCE_NAMES.length || receive < 0 || receive >= RESOURCE_NAMES.length) {
+    return null;
+  }
+  return { give, receive, action: value };
+}
+
+function legalMaritimeTradesByGive(msg, canUseLegalActions) {
+  const trades = new Map();
+  if (!canUseLegalActions || !Array.isArray(msg?.legal_actions)) return trades;
+  for (const entry of msg.legal_actions) {
+    const trade = decodeCatanMaritimeAction(entry?.action);
+    if (!trade) continue;
+    const options = trades.get(trade.give) || [];
+    options.push({
+      action: trade.action,
+      receive: trade.receive,
+      label: entry?.label || '',
+    });
+    trades.set(trade.give, options);
+  }
+  for (const options of trades.values()) {
+    options.sort((a, b) => a.receive - b.receive);
+  }
+  return trades;
+}
+
+function endTurnBadgeCanEnd(msg = currentState) {
+  if (!msg || msg.replay || msg.is_terminal || msg.is_chance) return false;
+  if (!hasLegalAction(msg, CATAN_END_TURN_ACTION)) return false;
+  if (isPlayBotTurn(msg)) return false;
+  if (playMultiplayerActive()) {
+    if (multiplayerSpectatorActive()) return false;
+    if (multiplayerTimeoutWinner() != null) return false;
+    if (!multiplayerRoomFull()) return false;
+    if (msg.current_player !== playMode.humanPlayer) return false;
+  }
+  return true;
+}
+
+function syncEndTurnBadgeActionState(msg = currentState) {
+  const badge = document.getElementById('end-turn-badge');
+  if (!badge) return;
+  const canEnd = endTurnBadgeCanEnd(msg);
+  badge.classList.toggle('hidden', !canEnd);
+  badge.classList.toggle('end-turn-forced', canEnd && legalActionCount(msg) === 1);
+  badge.disabled = !canEnd;
+  badge.title = canEnd ? 'End turn' : '';
+  badge.setAttribute('aria-label', canEnd ? 'End turn' : 'End turn unavailable');
+}
+
+function handleEndTurnBadgeClick() {
+  if (!endTurnBadgeCanEnd(currentState)) return;
+  sendPlayAction(CATAN_END_TURN_ACTION);
+}
+
 function rollBadgeCanRoll(msg = currentState) {
   if (!msg || msg.replay || msg.is_terminal || msg.is_chance) return false;
   if (!hasLegalAction(msg, CATAN_ROLL_ACTION)) return false;
@@ -3111,7 +3196,7 @@ function rollBadgeCanRoll(msg = currentState) {
   if (playMultiplayerActive()) {
     if (multiplayerSpectatorActive()) return false;
     if (multiplayerTimeoutWinner() != null) return false;
-    if (!multiplayerRoomFull() || !multiplayerOpponentConnected()) return false;
+    if (!multiplayerRoomFull()) return false;
     if (msg.current_player !== playMode.humanPlayer) return false;
   }
   return true;
@@ -3288,6 +3373,14 @@ function hideRollBadge() {
   }
   badge.disabled = true;
   badge.classList.remove('roll-badge-action');
+  badge.classList.add('hidden');
+}
+
+function hideEndTurnBadge() {
+  const badge = document.getElementById('end-turn-badge');
+  if (!badge) return;
+  badge.disabled = true;
+  badge.classList.remove('end-turn-forced');
   badge.classList.add('hidden');
 }
 
@@ -3521,7 +3614,7 @@ session.on('MultiplayerAnalysis', (msg) => {
 
 session.on('MultiplayerLobby', (msg) => {
   multiplayerLobbyRooms = Array.isArray(msg.rooms) ? msg.rooms : [];
-  renderMultiplayerLobby();
+  scheduleMultiplayerLobbyRender();
 });
 
 session.on('BotAction', (msg) => {
@@ -3907,6 +4000,7 @@ function setEditorChrome(enabled) {
   updateNewGameButtonLabel();
   if (enabled) resetBoardPieceCounts();
   if (enabled) hideRollBadge();
+  if (enabled) hideEndTurnBadge();
   if (enabled) clearResourceProductionAnimations();
   document.getElementById('left-ad-panel')?.classList.toggle('hidden', enabled);
   document.getElementById('players-panel').classList.toggle('hidden', enabled);
@@ -3957,7 +4051,7 @@ function updateViewChrome(msg) {
     activeView === 'editor' || multiplayerSpectatorActive()
   );
   document.getElementById('board-piece-counts')?.classList.toggle('hidden', activeView === 'editor');
-  document.getElementById('board-history-controls')?.classList.toggle('hidden', activeView === 'editor' || playMultiplayerActive());
+  document.getElementById('board-history-controls')?.classList.toggle('hidden', activeView === 'editor');
   document.getElementById('resource-animation-layer')?.classList.toggle('hidden', activeView === 'editor');
 
   document.getElementById('search-action-control')?.classList.toggle('hidden', inPlay || guestReplayLocked);
@@ -4582,6 +4676,7 @@ document.getElementById('btn-refresh-multiplayer-lobby')?.addEventListener('clic
 document.getElementById('btn-resign-multiplayer')?.addEventListener('click', resignMultiplayerGame);
 document.getElementById('btn-resign-singleplayer')?.addEventListener('click', resignSingleplayerGame);
 document.getElementById('roll-badge')?.addEventListener('click', handleRollBadgeClick);
+document.getElementById('end-turn-badge')?.addEventListener('click', handleEndTurnBadgeClick);
 document.getElementById('btn-add-opponent-time-0')?.addEventListener('click', addOpponentClockTime);
 document.getElementById('btn-add-opponent-time-1')?.addEventListener('click', addOpponentClockTime);
 document.getElementById('btn-close-replay-share-modal')?.addEventListener('click', hideReplayShareModal);
@@ -4694,7 +4789,6 @@ board.onActionClick = (action) => {
   if (playMultiplayerActive() && (
     multiplayerTimeoutWinner() != null ||
     !multiplayerRoomFull() ||
-    !multiplayerOpponentConnected() ||
     currentState?.current_player !== playMode.humanPlayer
   )) return;
   sendPlayAction(action);
@@ -4868,26 +4962,139 @@ function formatVictoryPoints(playerIndex, publicVp, totalVp) {
   return totalVp > publicVp ? `${publicVp}(${totalVp})` : String(totalVp);
 }
 
-function updateBoardResourceLegend(msg, state) {
+function closeResourceTradeMenu() {
+  if (openTradeGiveResource == null) return;
+  openTradeGiveResource = null;
+  updateBoardResourceLegend(currentState, currentState?.state, lastCanUseLegalActions);
+}
+
+function playerIndexForResourceLegend(msg) {
+  return playViewActive()
+    ? playMode.humanPlayer
+    : (msg?.current_player === 0 || msg?.current_player === 1 ? msg.current_player : 0);
+}
+
+function buildResourceTradeMenu(giveResource, options, ratios) {
+  const menu = document.createElement('div');
+  menu.className = 'resource-trade-menu';
+  menu.setAttribute('role', 'menu');
+  menu.addEventListener('click', (event) => event.stopPropagation());
+
+  const ratio = ratios?.[giveResource];
+  for (const option of options) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'resource-trade-option';
+    button.setAttribute('role', 'menuitem');
+    const receiveName = capitalizeResourceName(RESOURCE_NAMES[option.receive]);
+    button.textContent = Number.isFinite(Number(ratio))
+      ? `${ratio}:1 ${receiveName}`
+      : receiveName;
+    button.title = option.label || `Trade for ${receiveName}`;
+    button.addEventListener('click', (event) => {
+      event.stopPropagation();
+      openTradeGiveResource = null;
+      updateBoardResourceLegend(currentState, currentState?.state, lastCanUseLegalActions);
+      sendPlayAction(option.action);
+    });
+    menu.appendChild(button);
+  }
+  return menu;
+}
+
+function resourceTradeMenuSignature(giveResource, options, ratios) {
+  const ratio = Number.isFinite(Number(ratios?.[giveResource])) ? Number(ratios[giveResource]) : '';
+  return `${ratio}|${options.map(option => `${option.action}:${option.receive}:${option.label}`).join('|')}`;
+}
+
+function updateResourceCardLabel(card, label) {
+  if (card.firstChild?.nodeType === Node.TEXT_NODE) {
+    card.firstChild.nodeValue = label;
+  } else {
+    card.insertBefore(document.createTextNode(label), card.firstChild || null);
+  }
+}
+
+function resourceTradeMenuElement(card) {
+  return Array.from(card.children).find(child => child.classList?.contains('resource-trade-menu')) || null;
+}
+
+function removeResourceTradeMenu(card) {
+  resourceTradeMenuElement(card)?.remove();
+}
+
+function syncResourceTradeMenu(card, resourceIndex, options, tradeRatios) {
+  const signature = resourceTradeMenuSignature(resourceIndex, options, tradeRatios);
+  const existing = resourceTradeMenuElement(card);
+  if (existing?.dataset.signature === signature) return;
+  existing?.remove();
+  const menu = buildResourceTradeMenu(resourceIndex, options, tradeRatios);
+  menu.dataset.signature = signature;
+  card.appendChild(menu);
+}
+
+function updateBoardResourceLegend(msg, state, canUseLegalActions = false) {
+  lastCanUseLegalActions = !!canUseLegalActions;
   const legend = document.getElementById('board-resource-legend');
   if (!legend || !state?.frame?.players) return;
   if (multiplayerSpectatorActive()) {
     legend.classList.add('hidden');
+    legend.classList.remove('has-trades');
+    openTradeGiveResource = null;
     return;
   }
   legend.classList.remove('hidden');
 
-  const playerIndex = playViewActive()
-    ? playMode.humanPlayer
-    : (msg.current_player === 0 || msg.current_player === 1 ? msg.current_player : 0);
+  const playerIndex = playerIndexForResourceLegend(msg);
   const hand = state.frame.players[playerIndex]?.hand || [0, 0, 0, 0, 0];
+  const tradeRatios = state.frame.players[playerIndex]?.trade_ratios || [];
+  const trades = legalMaritimeTradesByGive(msg, canUseLegalActions);
+  if (openTradeGiveResource != null && !trades.has(openTradeGiveResource)) {
+    openTradeGiveResource = null;
+  }
+  legend.classList.toggle('has-trades', trades.size > 0);
 
   for (const card of legend.querySelectorAll('[data-resource-index]')) {
     const resourceIndex = Number(card.dataset.resourceIndex);
     if (!Number.isInteger(resourceIndex)) continue;
     const count = hand[resourceIndex] ?? 0;
     const name = RESOURCE_NAMES[resourceIndex] || '';
-    card.textContent = `${count} ${capitalizeResourceName(name)}`;
+    const displayName = capitalizeResourceName(name);
+    const options = trades.get(resourceIndex) || [];
+    const canTrade = options.length > 0;
+    updateResourceCardLabel(card, `${count} ${displayName}`);
+    card.classList.toggle('can-trade', canTrade);
+    card.classList.toggle('trade-menu-open', canTrade && openTradeGiveResource === resourceIndex);
+    card.setAttribute('aria-expanded', canTrade && openTradeGiveResource === resourceIndex ? 'true' : 'false');
+    if (canTrade) {
+      card.setAttribute('role', 'button');
+      card.tabIndex = 0;
+      card.title = `Trade ${displayName}`;
+      card.setAttribute('aria-label', `Trade ${displayName}`);
+      card.onclick = (event) => {
+        event.stopPropagation();
+        openTradeGiveResource = openTradeGiveResource === resourceIndex ? null : resourceIndex;
+        updateBoardResourceLegend(currentState, currentState?.state, canUseLegalActions);
+      };
+      card.onkeydown = (event) => {
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        event.preventDefault();
+        card.click();
+      };
+      if (openTradeGiveResource === resourceIndex) {
+        syncResourceTradeMenu(card, resourceIndex, options, tradeRatios);
+      } else {
+        removeResourceTradeMenu(card);
+      }
+    } else {
+      removeResourceTradeMenu(card);
+      card.removeAttribute('role');
+      card.removeAttribute('aria-label');
+      card.removeAttribute('title');
+      card.removeAttribute('tabindex');
+      card.onclick = null;
+      card.onkeydown = null;
+    }
   }
 }
 
@@ -5101,6 +5308,7 @@ function updateDice(state) {
 
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
+    closeResourceTradeMenu();
     hideReplayShareModal();
     hideProfileModal();
     hideGuestSignInRequiredModal();
@@ -5128,6 +5336,8 @@ document.addEventListener('keydown', (e) => {
     session.send({ type: 'Redo' });
   }
 });
+
+document.addEventListener('click', closeResourceTradeMenu);
 
 // ── Start ────────────────────────────────────────────────────────────
 

@@ -430,6 +430,8 @@ struct RedisRoomSnapshot {
     spectators: Vec<RedisSpectator>,
     initial_state: String,
     actions: Vec<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    history_cursor: Option<usize>,
     clock: RedisRoomClock,
     outcome: Option<RedisRoomOutcome>,
     replay_saved: bool,
@@ -462,6 +464,7 @@ impl RedisRoomSnapshot {
             spectators: Vec::new(),
             initial_state,
             actions: Vec::new(),
+            history_cursor: Some(0),
             clock: RedisRoomClock::new(time_minutes),
             outcome: None,
             replay_saved: false,
@@ -758,6 +761,8 @@ impl<G: Game + 'static> RedisMultiplayerRoomStore<G> {
             super::ClientMsg::PlayMultiplayerAction { action } => {
                 self.play_action(active_room.as_ref(), action).await
             }
+            super::ClientMsg::Undo => self.history_action(active_room.as_ref(), true).await,
+            super::ClientMsg::Redo => self.history_action(active_room.as_ref(), false).await,
             super::ClientMsg::ResignMultiplayerGame => self.resign_game(active_room.as_ref()).await,
             super::ClientMsg::AddMultiplayerOpponentTime => {
                 self.add_opponent_time(active_room.as_ref()).await
@@ -996,9 +1001,10 @@ impl<G: Game + 'static> RedisMultiplayerRoomStore<G> {
                     });
                 }
                 let log = session
-                    .export_current_log_allow_empty()
+                    .export_full_history_log_allow_empty()
                     .ok_or_else(|| "Could not export multiplayer game log".to_string())?;
                 room.actions = log.actions;
+                room.history_cursor = Some(session.cursor());
                 room.clock.finish_turn(
                     player,
                     session.current_player_idx(),
@@ -1038,6 +1044,79 @@ impl<G: Game + 'static> RedisMultiplayerRoomStore<G> {
         }
         if finished {
             responses.extend(self.save_finished_room_replay_once(&room.code, false).await);
+        }
+        responses
+    }
+
+    async fn history_action(
+        &self,
+        active: Option<&ActiveRedisMultiplayerRoom>,
+        undo: bool,
+    ) -> Vec<ServerMsg> {
+        let Some(active) = active else {
+            return vec![ServerMsg::Error {
+                message: "Join a multiplayer room before using history controls".into(),
+            }];
+        };
+        if let Err(message) = self.refresh_current_connection(active).await {
+            return vec![ServerMsg::Error { message }];
+        }
+        let Some(player) = active.player else {
+            return vec![ServerMsg::Error {
+                message: "Spectators cannot use multiplayer history controls".into(),
+            }];
+        };
+        let connection_id = active.connection_id.clone();
+        let mut direct_state = None;
+        let mut analysis_session = None;
+        let updated = self
+            .update_room(&active.code, |room| {
+                self.ensure_active_connection(room, player, &connection_id)?;
+                if !room.is_full() {
+                    return Err("Room is waiting for an opponent".into());
+                }
+                if room.is_finished() {
+                    return Err("Game is over".into());
+                }
+                let mut session = self.session_from_snapshot(room)?;
+                if undo {
+                    session.undo_multiplayer_action(player)?;
+                } else {
+                    session.redo_multiplayer_action(player)?;
+                }
+                let log = session
+                    .export_full_history_log_allow_empty()
+                    .ok_or_else(|| "Could not export multiplayer game log".to_string())?;
+                room.actions = log.actions;
+                room.history_cursor = Some(session.cursor());
+                room.touch();
+                direct_state = Some(session.state_msg_for_player(player));
+                analysis_session = Some(session.fork_analysis_session());
+                Ok(())
+            })
+            .await;
+        let (_, room) = match updated {
+            Ok(updated) => updated,
+            Err(message) => return vec![ServerMsg::Error { message }],
+        };
+        if let Some(session) = analysis_session {
+            self.schedule_analysis(room.code.clone(), room.version, session);
+        }
+        let _ = self
+            .publish_event(RedisMultiplayerEvent::GameChanged {
+                code: room.code.clone(),
+                excluded_connection_id: Some(connection_id.clone()),
+            })
+            .await;
+        let _ = self
+            .publish_event(RedisMultiplayerEvent::LobbyChanged)
+            .await;
+        let mut responses = vec![
+            self.room_msg_for_viewer(&room, Some(player), Some(&connection_id))
+                .await,
+        ];
+        if let Some(state) = direct_state {
+            responses.push(state);
         }
         responses
     }
@@ -1452,7 +1531,8 @@ impl<G: Game + 'static> RedisMultiplayerRoomStore<G> {
         };
         let mut session = self.factory.create_multiplayer_session();
         session.load_replay(initial_state, &log);
-        session.seek_to_end();
+        let cursor = room.history_cursor.unwrap_or(room.actions.len());
+        session.seek_to_cursor(cursor.min(room.actions.len()))?;
         Ok(session)
     }
 
@@ -2040,6 +2120,22 @@ mod tests {
             }
             _ => panic!("expected game state"),
         }
+
+        room.history_cursor = Some(0);
+        let session = store.session_from_snapshot(&room).unwrap();
+        match session.state_msg_for_player(0) {
+            ServerMsg::GameState {
+                state,
+                history_cursor,
+                can_redo,
+                ..
+            } => {
+                assert_eq!(state["moves"], json!(0));
+                assert_eq!(history_cursor, 0);
+                assert!(can_redo);
+            }
+            _ => panic!("expected rewound game state"),
+        }
     }
 
     #[test]
@@ -2114,6 +2210,50 @@ mod tests {
             let room = store_a.load_room(&code).await.unwrap().unwrap();
             assert_eq!(room.seat_for_user("user_a"), Some(0));
             assert_eq!(room.seat_for_user("user_b"), Some(1));
+
+            assert!(store_b.detach_active_room(&mut active_b).await);
+            let played = store_a
+                .handle_message_for_user(
+                    "user_a",
+                    Some("Alice"),
+                    &tx_a,
+                    &mut active_a,
+                    super::super::ClientMsg::PlayMultiplayerAction { action: 0 },
+                )
+                .await;
+            assert!(played.iter().any(|msg| {
+                matches!(
+                    msg,
+                    ServerMsg::GameState { state, .. } if state["moves"] == json!(1)
+                )
+            }));
+
+            let (tx_b_rejoin, _rx_b_rejoin) = mpsc::unbounded_channel();
+            let rejoined = store_b
+                .handle_message_for_user(
+                    "user_b",
+                    Some("Bob"),
+                    &tx_b_rejoin,
+                    &mut active_b,
+                    super::super::ClientMsg::JoinMultiplayerRoom { code: code.clone() },
+                )
+                .await;
+            match rejoined.as_slice() {
+                [
+                    ServerMsg::MultiplayerRoom {
+                        players,
+                        local_player,
+                        ..
+                    },
+                    ServerMsg::GameState { state, .. },
+                    ..,
+                ] => {
+                    assert_eq!(*local_player, Some(1));
+                    assert_eq!(players.iter().filter(|player| player.occupied).count(), 2);
+                    assert_eq!(state["moves"], json!(1));
+                }
+                other => panic!("expected caught-up Redis rejoin response, got {other:?}"),
+            }
 
             let _ = store_a
                 .client
