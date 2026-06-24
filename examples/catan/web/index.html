@@ -22,7 +22,7 @@ tailwind.config = {
   }
 }
 </script>
-<link rel="stylesheet" href="style.css?v=board-sound-button-20260623">
+<link rel="stylesheet" href="style.css?v=tasklist-20260623">
 <script>
 (() => {
   const production = {
@@ -100,7 +100,7 @@ tailwind.config = {
       <button id="btn-topbar-brand" type="button" class="topbar-brand text-sm font-semibold text-gray-100" aria-label="HexFish home">
         <span class="topbar-mark" aria-hidden="true"></span>
         <span>HexFish</span>
-        <span id="app-version" class="topbar-version" aria-label="Version V1.0.10">V1.0.10</span>
+        <span id="app-version" class="topbar-version" aria-label="Version V1.0.11">V1.0.11</span>
       </button>
     </h1>
     <div class="flex items-center gap-1 text-xs" role="tablist" aria-label="Main views">
@@ -231,7 +231,7 @@ tailwind.config = {
             <span class="resource-card board-resource-card ore" data-resource-index="4">0 Ore</span>
           </div>
           <div id="resource-animation-layer" class="resource-animation-layer" aria-hidden="true"></div>
-          <div id="roll-badge" class="roll-badge hidden absolute right-0 bottom-0 z-10 flex w-[42px] h-[42px] items-center justify-center rounded-lg border border-white/50 bg-bg-3/90 text-white text-xl font-extrabold shadow-lg pointer-events-none" aria-live="polite" aria-label="Roll"></div>
+          <div id="roll-badge" class="roll-badge hidden absolute right-0 bottom-0 z-10 flex w-[84px] h-[84px] items-center justify-center rounded-2xl border border-white/50 bg-bg-3/90 text-white text-[2.7rem] font-extrabold shadow-lg pointer-events-none" aria-live="polite" aria-label="Roll"></div>
           <svg id="board-svg" class="w-full h-full min-h-0" viewBox="-50 -50 500 500"></svg>
           <div id="multiplayer-invite-modal" class="hidden absolute inset-0 z-30 items-center justify-center bg-black/55 px-4">
             <div class="w-full max-w-sm rounded border border-gray-700 bg-bg-2 p-3 shadow-xl">
@@ -603,6 +603,7 @@ tailwind.config = {
 
   <!-- Bottom: Controls -->
   <div id="controls" class="hidden flex items-center gap-2 px-4 py-2 bg-bg-2 border-t border-gray-700 flex-wrap">
+    <button id="btn-replay-return" class="hidden py-1.5 px-3 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors">Return</button>
     <button id="btn-new-game" class="py-1.5 px-3 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors">New Game</button>
     <button id="btn-start-edited-game" class="hidden py-1.5 px-3 text-xs bg-accent border border-accent text-white rounded cursor-pointer hover:bg-red-600 transition-colors">Start Game</button>
     <div id="replay-controls" class="hidden flex items-center gap-1.5 text-xs text-gray-300">
@@ -654,8 +655,8 @@ tailwind.config = {
 <script src="session.js?v=clerk-managed-username-20260623"></script>
 <script src="board.js?v=tile-textures-20260623"></script>
 <script src="mcts.js?v=cpu-load-20260622"></script>
-<script src="controls.js?v=tasklist-replay-share-20260623"></script>
+<script src="controls.js?v=replay-return-20260623"></script>
 <script src="auth.js?v=signout-only-20260623"></script>
-<script src="app.js?v=clerk-username-reverify-20260623"></script>
+<script src="app.js?v=tasklist-20260623"></script>
 </body>
 </html>

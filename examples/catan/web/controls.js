@@ -5,6 +5,7 @@
 // change. The client just sends commands and renders server updates.
 
 const BOTTOM_CONTROL_HOVER_TIPS = [
+  ['btn-replay-return', 'Return to your replay list.'],
   ['btn-new-game', 'Start a fresh game from the standard board setup.'],
   ['btn-start-edited-game', 'Start a game from the board currently configured in the editor.'],
   ['btn-undo', 'Undo the previous move, or step backward while viewing a replay.'],
@@ -555,6 +556,7 @@ class Controls {
     const replay = msg.replay;
     const replayControls = document.getElementById('replay-controls');
     replayControls.classList.toggle('hidden', !replay);
+    document.getElementById('btn-replay-return')?.classList.toggle('hidden', !replay);
 
     document.getElementById('btn-new-game').classList.toggle('hidden', !!replay);
 

@@ -242,7 +242,11 @@ impl<G: Game + 'static> GameSession<G> {
             Some(saved) => saved.initial_state == log.initial_state && saved.actions == log.actions,
             None => false,
         };
-        if already_saved { None } else { Some(log) }
+        if already_saved {
+            None
+        } else {
+            Some(log)
+        }
     }
 
     /// Remember that the given live log has been persisted.
@@ -1584,8 +1588,8 @@ mod tests {
     };
 
     use super::{
-        ClientMsg, GameLog, GamePresenter, GameSession, MAX_PV_DEPTH_BUDGET,
-        PV_DEPTH_SIM_SAFETY_CAP, SearchBudget, ServerMsg,
+        ClientMsg, GameLog, GamePresenter, GameSession, SearchBudget, ServerMsg,
+        MAX_PV_DEPTH_BUDGET, PV_DEPTH_SIM_SAFETY_CAP,
     };
 
     #[derive(Clone)]
@@ -1783,13 +1787,11 @@ mod tests {
             .handle(ClientMsg::PlayAction { action: 0 })
             .as_slice()
         {
-            [
-                ServerMsg::GameState {
-                    can_undo,
-                    history_cursor,
-                    ..
-                },
-            ] => {
+            [ServerMsg::GameState {
+                can_undo,
+                history_cursor,
+                ..
+            }] => {
                 assert!(*can_undo);
                 assert_eq!(*history_cursor, 1);
             }
@@ -1797,14 +1799,12 @@ mod tests {
         }
 
         match session.handle(ClientMsg::Undo).as_slice() {
-            [
-                ServerMsg::GameState {
-                    state,
-                    history_cursor,
-                    can_undo,
-                    ..
-                },
-            ] => {
+            [ServerMsg::GameState {
+                state,
+                history_cursor,
+                can_undo,
+                ..
+            }] => {
                 assert_eq!(state["moves"], serde_json::json!(0));
                 assert_eq!(*history_cursor, 0);
                 assert!(!*can_undo);
@@ -1840,15 +1840,12 @@ mod tests {
         );
 
         match msgs.as_slice() {
-            [
-                ServerMsg::BotAction { .. },
-                ServerMsg::GameState {
-                    state,
-                    history_cursor,
-                    can_undo,
-                    ..
-                },
-            ] => {
+            [ServerMsg::BotAction { .. }, ServerMsg::GameState {
+                state,
+                history_cursor,
+                can_undo,
+                ..
+            }] => {
                 assert_eq!(state["moves"], serde_json::json!(2));
                 assert_eq!(*history_cursor, 2);
                 assert!(!*can_undo);
@@ -1875,13 +1872,11 @@ mod tests {
             .handle(ClientMsg::PlayAction { action: 1 })
             .as_slice()
         {
-            [
-                ServerMsg::GameState {
-                    history_cursor,
-                    can_undo,
-                    ..
-                },
-            ] => {
+            [ServerMsg::GameState {
+                history_cursor,
+                can_undo,
+                ..
+            }] => {
                 assert_eq!(*history_cursor, 1);
                 assert!(!*can_undo);
             }
@@ -2028,17 +2023,15 @@ mod tests {
             .handle(ClientMsg::SetLogCursor { cursor: 1 })
             .as_slice()
         {
-            [
-                ServerMsg::GameState {
-                    state,
-                    action_log,
-                    action_log_sound_kinds,
-                    history_cursor,
-                    action_log_cursors,
-                    can_redo,
-                    ..
-                },
-            ] => {
+            [ServerMsg::GameState {
+                state,
+                action_log,
+                action_log_sound_kinds,
+                history_cursor,
+                action_log_cursors,
+                can_redo,
+                ..
+            }] => {
                 assert_eq!(state["moves"], serde_json::json!(1));
                 assert_eq!(*history_cursor, 1);
                 assert_eq!(action_log.len(), 2);
@@ -2064,16 +2057,14 @@ mod tests {
             .handle(ClientMsg::PlayAction { action: 1 })
             .as_slice()
         {
-            [
-                ServerMsg::GameState {
-                    state,
-                    action_log,
-                    history_cursor,
-                    action_log_cursors,
-                    can_redo,
-                    ..
-                },
-            ] => {
+            [ServerMsg::GameState {
+                state,
+                action_log,
+                history_cursor,
+                action_log_cursors,
+                can_redo,
+                ..
+            }] => {
                 assert_eq!(state["moves"], serde_json::json!(2));
                 assert_eq!(*history_cursor, 2);
                 assert_eq!(action_log.len(), 2);
@@ -2215,14 +2206,12 @@ mod tests {
             _ => panic!("expected GameState"),
         }
 
-        assert!(
-            session
-                .begin_search(&ClientMsg::RunSims {
-                    count: 1,
-                    target: None,
-                })
-                .is_ok()
-        );
+        assert!(session
+            .begin_search(&ClientMsg::RunSims {
+                count: 1,
+                target: None,
+            })
+            .is_ok());
 
         match session
             .handle(ClientMsg::PlayAction { action: 0 })
@@ -2272,14 +2261,12 @@ mod tests {
             ports: Some(vec!["ore".into()]),
         });
         match msgs.as_slice() {
-            [
-                ServerMsg::GameState {
-                    replay,
-                    state,
-                    action_log,
-                    ..
-                },
-            ] => {
+            [ServerMsg::GameState {
+                replay,
+                state,
+                action_log,
+                ..
+            }] => {
                 assert!(replay.is_none());
                 assert_eq!(state["id"], serde_json::json!(98));
                 assert_eq!(state["moves"], serde_json::json!(0));

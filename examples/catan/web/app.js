@@ -77,16 +77,11 @@ const LAST_MULTIPLAYER_ROOM_KEY = 'hexfish-last-multiplayer-room-code';
 const PENDING_SHARED_REPLAY_KEY = 'hexfish-pending-shared-replay-slug';
 const MOVE_SOUND_ENABLED_KEY = 'hexfish-sound-enabled';
 const MOVE_SOUND_ASSETS = {
-  road: 'sounds/road.wav',
-  settlement: 'sounds/settlement.wav',
-  city: 'sounds/city.wav',
+  road: 'sounds/build.mp3',
+  settlement: 'sounds/build.mp3',
+  city: 'sounds/build.mp3',
   roll: 'sounds/dice.mp3',
-  robber: 'sounds/robber.wav',
-  card: 'sounds/card.wav',
-  trade: 'sounds/trade.wav',
-  discard: 'sounds/discard.wav',
-  end: 'sounds/end.wav',
-  generic: 'sounds/generic.wav',
+  card: 'sounds/card.mp3',
 };
 const MOVE_SOUND_KINDS = Object.keys(MOVE_SOUND_ASSETS);
 const CATAN_ROLL_ACTION = 180;
@@ -458,10 +453,11 @@ function openClerkProfileForUsernameSetup() {
 function updateProfileUi() {
   const btn = document.getElementById('btn-profile');
   if (btn) {
-    btn.textContent = 'Profile';
+    const label = profileUsername || (guestMode() ? 'Profile' : 'Username');
+    btn.textContent = label;
     btn.title = guestMode()
       ? 'Sign in to view your profile.'
-      : profileUsername ? 'Profile' : 'Choose a username';
+      : profileUsername ? `Signed in as ${profileUsername}` : 'Choose a username';
   }
   const input = document.getElementById('profile-username-input');
   if (input && document.getElementById('profile-modal')?.classList.contains('hidden')) {
@@ -746,11 +742,12 @@ function writeStoredMoveSoundEnabled(enabled) {
 }
 
 function normalizeMoveSoundKind(kind) {
-  return Object.prototype.hasOwnProperty.call(MOVE_SOUND_ASSETS, kind) ? kind : 'generic';
+  return Object.prototype.hasOwnProperty.call(MOVE_SOUND_ASSETS, kind) ? kind : null;
 }
 
 function moveSoundAudio(kind) {
   const normalized = normalizeMoveSoundKind(kind);
+  if (!normalized) return null;
   let audio = moveSoundAudios.get(normalized);
   if (!audio) {
     audio = new Audio(MOVE_SOUND_ASSETS[normalized]);
@@ -763,7 +760,7 @@ function moveSoundAudio(kind) {
 
 function preloadMoveSounds() {
   for (const kind of MOVE_SOUND_KINDS) {
-    moveSoundAudio(kind).load();
+    moveSoundAudio(kind)?.load();
   }
 }
 
@@ -793,6 +790,7 @@ function setMoveSoundEnabled(enabled) {
 function playMoveSound(kind) {
   if (!moveSoundEnabled || !moveSoundUnlocked) return;
   const audio = moveSoundAudio(kind);
+  if (!audio) return;
   try {
     audio.currentTime = 0;
   } catch (_error) {
@@ -807,7 +805,7 @@ function liveMoveSoundSignature(msg) {
   const cursors = actionLogCursors(msg);
   const soundKinds = Array.isArray(msg?.action_log_sound_kinds) ? msg.action_log_sound_kinds : [];
   return actionLog
-    .map((label, index) => `${cursors[index] ?? index + 1}:${soundKinds[index] || 'generic'}:${label}`)
+    .map((label, index) => `${cursors[index] ?? index + 1}:${soundKinds[index] || ''}:${label}`)
     .join('|');
 }
 
@@ -827,7 +825,7 @@ function maybePlayMoveSoundForGameState(msg) {
     return;
   }
   if (!actionLog.length || signature === previousSignature || actionLog.length < previousLength) return;
-  playMoveSound(soundKinds[actionLog.length - 1] || 'generic');
+  playMoveSound(soundKinds[actionLog.length - 1]);
 }
 
 function playViewActive() {
@@ -3152,6 +3150,10 @@ function updateViewChrome(msg) {
   const inPlay = playViewActive();
   const replay = !!msg?.replay || activeView === 'replay-board';
   const guestReplayLocked = guestSharedReplayMode() && replay;
+  document.getElementById('btn-replay-return')?.classList.toggle(
+    'hidden',
+    activeView !== 'replay-board' || guestSharedReplayMode()
+  );
   document.getElementById('btn-new-game')?.classList.toggle('hidden', replay);
   setMctsMoveDetailsVisible(!inPlay && !guestReplayLocked);
   document.getElementById('guest-replay-analysis-control')?.classList.toggle('hidden', !guestReplayLocked);
@@ -3281,14 +3283,21 @@ function setReplayStatus(text) {
 
 function replayOutcome(entry) {
   const result = String(entry?.result || 'incomplete').toLowerCase();
-  return ['won', 'lost', 'draw', 'incomplete'].includes(result) ? result : 'incomplete';
+  if (result.startsWith('won')) return 'won';
+  if (result.startsWith('lost')) return 'lost';
+  if (result === 'draw') return 'draw';
+  return 'incomplete';
 }
 
 function replayOutcomeLabel(entry) {
-  const outcome = replayOutcome(entry);
-  if (outcome === 'won') return 'Won';
-  if (outcome === 'lost') return 'Lost';
-  if (outcome === 'draw') return 'Draw';
+  const result = String(entry?.result || 'incomplete').toLowerCase();
+  if (result === 'won_by_resignation') return 'Won by Resignation';
+  if (result === 'lost_by_resignation') return 'Lost by Resignation';
+  if (result === 'won_on_time') return 'Won on Time';
+  if (result === 'lost_on_time') return 'Lost on Time';
+  if (result === 'won') return 'Won';
+  if (result === 'lost') return 'Lost';
+  if (result === 'draw') return 'Draw';
   return 'Incomplete';
 }
 
@@ -3715,6 +3724,7 @@ document.getElementById('tab-replay').addEventListener('click', showReplayView);
 document.getElementById('tab-editor').addEventListener('click', showEditorView);
 document.getElementById('btn-topbar-brand')?.addEventListener('click', handleTopbarBrandClick);
 document.getElementById('btn-refresh-replays').addEventListener('click', requestReplayList);
+document.getElementById('btn-replay-return')?.addEventListener('click', showReplayView);
 document.getElementById('btn-start-play-game').addEventListener('click', startPlayGame);
 document.getElementById('btn-profile')?.addEventListener('click', showProfileModal);
 document.getElementById('btn-create-multiplayer-room')?.addEventListener('click', openCreateMultiplayerRoom);
