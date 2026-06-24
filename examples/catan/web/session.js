@@ -4,6 +4,8 @@
 
 const ANONYMOUS_SESSION_KEY_V1 = 'hexfish-anonymous-session-id';
 const ANONYMOUS_SESSION_KEY_V2 = 'hexfish-anonymous-session-id-v2';
+const WEBSOCKET_HEARTBEAT_INTERVAL_MS = 10000;
+const WEBSOCKET_HEARTBEAT_TIMEOUT_MS = 30000;
 
 class Session {
   constructor(options = {}) {
@@ -16,6 +18,8 @@ class Session {
     this.deferDuringSearch = false;
     this.getAuthToken = options.getAuthToken || null;
     this.anonymousSessionId = options.anonymousSessionId || this._loadAnonymousSessionId();
+    this.heartbeatTimer = null;
+    this.lastMessageAt = 0;
   }
 
   setAuthTokenProvider(provider) {
@@ -31,6 +35,7 @@ class Session {
     const url = `${proto}//${location.host}/ws`;
     const ws = new WebSocket(url);
     this.ws = ws;
+    this.lastMessageAt = Date.now();
 
     ws.onopen = async () => {
       if (this.ws !== ws) {
@@ -54,7 +59,9 @@ class Session {
 
     ws.onmessage = (event) => {
       if (this.ws !== ws) return;
+      this.lastMessageAt = Date.now();
       const msg = JSON.parse(event.data);
+      if (msg.type === 'Pong') return;
       const handler = this.handlers[msg.type];
 
       if (!this.authenticated) {
@@ -65,6 +72,7 @@ class Session {
         }
         this.authenticated = true;
         this.connected = true;
+        this._startHeartbeat(ws);
         if (handler) handler(msg);
         for (const queued of this.queue) {
           ws.send(queued);
@@ -79,14 +87,14 @@ class Session {
     };
 
     ws.onclose = () => {
-      const shouldReconnect = this.shouldReconnect && this.ws === ws;
-      if (this.ws === ws) {
-        this.connected = false;
-        this.authenticated = false;
-        this.ws = null;
-      }
+      if (this.ws !== ws) return;
+      const shouldReconnect = this.shouldReconnect;
+      this.connected = false;
+      this.authenticated = false;
+      this.ws = null;
+      this._stopHeartbeat();
       const handler = this.handlers.Disconnected;
-      if (handler) handler({ type: 'Disconnected' });
+      if (handler) handler({ type: 'Disconnected', will_reconnect: shouldReconnect });
       if (shouldReconnect) {
         setTimeout(() => this.connect(), 2000);
       }
@@ -140,6 +148,7 @@ class Session {
     this.authenticated = false;
     this.deferDuringSearch = false;
     this.queue = [];
+    this._stopHeartbeat();
     if (this.ws) {
       this.ws.close();
       this.ws = null;
@@ -148,6 +157,32 @@ class Session {
 
   on(type, handler) {
     this.handlers[type] = handler;
+  }
+
+  _startHeartbeat(ws) {
+    this._stopHeartbeat();
+    this.lastMessageAt = Date.now();
+    this.heartbeatTimer = window.setInterval(() => {
+      if (this.ws !== ws || !this.connected || !this.authenticated) {
+        this._stopHeartbeat();
+        return;
+      }
+      if (Date.now() - this.lastMessageAt > WEBSOCKET_HEARTBEAT_TIMEOUT_MS) {
+        ws.close();
+        return;
+      }
+      try {
+        ws.send(JSON.stringify({ type: 'Ping' }));
+      } catch (_error) {
+        ws.close();
+      }
+    }, WEBSOCKET_HEARTBEAT_INTERVAL_MS);
+  }
+
+  _stopHeartbeat() {
+    if (!this.heartbeatTimer) return;
+    window.clearInterval(this.heartbeatTimer);
+    this.heartbeatTimer = null;
   }
 
   async _getAuthToken() {

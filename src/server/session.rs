@@ -609,6 +609,7 @@ impl<G: Game + 'static> GameSession<G> {
                     message: "Already authenticated".into(),
                 }]
             }
+            ClientMsg::Ping => vec![ServerMsg::Pong],
             ClientMsg::SetUsername { .. } => vec![ServerMsg::Error {
                 message: "Username is managed by Clerk".into(),
             }],
@@ -621,6 +622,7 @@ impl<G: Game + 'static> GameSession<G> {
             | ClientMsg::GetProfile
             | ClientMsg::CreateMultiplayerRoom { .. }
             | ClientMsg::ListMultiplayerRooms
+            | ClientMsg::GetMultiplayerRoom
             | ClientMsg::JoinMultiplayerRoom { .. }
             | ClientMsg::LeaveMultiplayerRoom
             | ClientMsg::PlayMultiplayerAction { .. }

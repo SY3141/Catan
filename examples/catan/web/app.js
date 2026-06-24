@@ -89,6 +89,8 @@ const CATAN_END_TURN_ACTION = 181;
 const BASE_DOCUMENT_TITLE = document.title || 'HexFish';
 const MULTIPLAYER_TURN_DOCUMENT_TITLE = 'Your turn - HexFish';
 const MULTIPLAYER_TURN_TITLE_FLASH_MS = 900;
+const MULTIPLAYER_ROOM_SYNC_MS = 5000;
+const MULTIPLAYER_DISCONNECT_MODAL_GRACE_MS = 5000;
 const MULTIPLAYER_ROOM_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const DEFAULT_MULTIPLAYER_TIME_MINUTES = 15;
 const DEFAULT_MULTIPLAYER_INCREMENT_SECONDS = 0;
@@ -155,6 +157,8 @@ let activeReplayShareSlug = '';
 let pendingAutoJoinRoomCode = pendingSharedReplaySlug ? '' : initialUrlRoomCode;
 let pendingReconnectRoomCode = '';
 let pendingPlayTabReconnectRoomCode = '';
+let multiplayerDisconnectModalTimer = null;
+let multiplayerDisconnectModalPending = null;
 if (pendingAutoJoinRoomCode) selectedPlayMode = 'multiplayer';
 let autoJoinRoomAttempted = false;
 let multiplayerLobbyRooms = [];
@@ -1635,6 +1639,12 @@ function updateMultiplayerRoomUi() {
   }
 }
 
+function requestActiveMultiplayerRoomSync() {
+  if (!session.connected || !playMode.active || playMode.mode !== 'multiplayer') return;
+  if (!playMode.multiplayerRoom?.code || pendingReconnectRoomCode || playMode.rejoiningRoom) return;
+  session.send({ type: 'GetMultiplayerRoom' });
+}
+
 function updateMultiplayerInviteModal() {
   const modal = document.getElementById('multiplayer-invite-modal');
   const linkInput = document.getElementById('multiplayer-invite-link');
@@ -1667,6 +1677,7 @@ function updateMultiplayerResignButton() {
 
 function resetMultiplayerState(statusText = '') {
   clearSavedGameOverReplayLink();
+  hideMultiplayerDisconnectModal();
   playMode.active = false;
   playMode.mode = 'multiplayer';
   playMode.botThinking = false;
@@ -1682,6 +1693,17 @@ function resetMultiplayerState(statusText = '') {
   updateMultiplayerResignButton();
   if (statusText) setMultiplayerSetupStatus(statusText);
   updateMultiplayerTurnAttention();
+}
+
+function returnToMultiplayerLobbyAfterDisconnect() {
+  const code = normalizeRoomCode(pendingReconnectRoomCode || playMode.multiplayerRoom?.code);
+  if (code) writeLastMultiplayerRoomCode(code);
+  pendingReconnectRoomCode = '';
+  playMode.rejoiningRoom = false;
+  hideMultiplayerDisconnectModal();
+  resetMultiplayerState('');
+  showPlaySetupView();
+  if (session.connected) requestMultiplayerLobby();
 }
 
 function openCreateMultiplayerRoom() {
@@ -2029,6 +2051,60 @@ function hideMultiplayerAnalysisGuard() {
   modal.classList.remove('flex');
 }
 
+function showMultiplayerDisconnectModal(code, statusText = 'Reconnecting...') {
+  clearScheduledMultiplayerDisconnectModal();
+  const modal = document.getElementById('multiplayer-disconnect-modal');
+  const copy = document.getElementById('multiplayer-disconnect-copy');
+  const status = document.getElementById('multiplayer-disconnect-status');
+  if (!modal) return;
+  const roomCode = normalizeRoomCode(code);
+  if (copy) {
+    copy.textContent = roomCode
+      ? `Your connection to room ${roomCode} was interrupted.`
+      : 'Your multiplayer connection was interrupted.';
+  }
+  if (status) status.textContent = statusText || 'Reconnecting...';
+  modal.classList.remove('hidden');
+  modal.classList.add('flex');
+  document.getElementById('btn-multiplayer-disconnect-lobby')?.focus();
+}
+
+function clearScheduledMultiplayerDisconnectModal() {
+  if (multiplayerDisconnectModalTimer) {
+    window.clearTimeout(multiplayerDisconnectModalTimer);
+    multiplayerDisconnectModalTimer = null;
+  }
+  multiplayerDisconnectModalPending = null;
+}
+
+function isMultiplayerDisconnectModalVisible() {
+  const modal = document.getElementById('multiplayer-disconnect-modal');
+  return !!modal && !modal.classList.contains('hidden');
+}
+
+function scheduleMultiplayerDisconnectModal(code, statusText = 'Reconnecting...') {
+  clearScheduledMultiplayerDisconnectModal();
+  multiplayerDisconnectModalPending = {
+    code: normalizeRoomCode(code),
+    statusText: statusText || 'Reconnecting...',
+  };
+  multiplayerDisconnectModalTimer = window.setTimeout(() => {
+    const pending = multiplayerDisconnectModalPending;
+    multiplayerDisconnectModalTimer = null;
+    multiplayerDisconnectModalPending = null;
+    if (!pending) return;
+    showMultiplayerDisconnectModal(pending.code, pending.statusText);
+  }, MULTIPLAYER_DISCONNECT_MODAL_GRACE_MS);
+}
+
+function hideMultiplayerDisconnectModal() {
+  clearScheduledMultiplayerDisconnectModal();
+  const modal = document.getElementById('multiplayer-disconnect-modal');
+  if (!modal) return;
+  modal.classList.add('hidden');
+  modal.classList.remove('flex');
+}
+
 function showMultiplayerAnalysisGuard() {
   hideGameOverModal();
   activeView = 'analysis-guard';
@@ -2092,6 +2168,7 @@ function handleMultiplayerRoomMessage(msg) {
   playMode.pendingHumanMove = false;
   playMode.rejoiningRoom = false;
   pendingReconnectRoomCode = '';
+  hideMultiplayerDisconnectModal();
   const previousRoomCode = normalizeRoomCode(playMode.multiplayerRoom?.code);
   const nextRoomCode = normalizeRoomCode(msg.code);
   if (previousRoomCode && previousRoomCode !== nextRoomCode) {
@@ -2831,8 +2908,29 @@ session.on('Error', (msg) => {
     setEditorStatus(msg.message);
   }
   if (pendingReconnectRoomCode) {
+    const code = pendingReconnectRoomCode;
     pendingReconnectRoomCode = '';
     playMode.rejoiningRoom = false;
+    showMultiplayerDisconnectModal(
+      code,
+      msg.message || 'Could not reconnect. Return to the lobby and try again.'
+    );
+  }
+  if (
+    playMode.mode === 'multiplayer' &&
+    playMode.multiplayerRoom?.code &&
+    /join a multiplayer room before refreshing it/i.test(String(msg.message || ''))
+  ) {
+    const code = normalizeRoomCode(playMode.multiplayerRoom.code || lastMultiplayerRoomCode || readLastMultiplayerRoomCode());
+    if (code && session.connected) {
+      pendingReconnectRoomCode = code;
+      playMode.rejoiningRoom = true;
+      writeLastMultiplayerRoomCode(code);
+      setMultiplayerSetupStatus(`Rejoining ${code}...`);
+      scheduleMultiplayerDisconnectModal(code, 'Room connection lost. Rejoining...');
+      session.send({ type: 'JoinMultiplayerRoom', code });
+      return;
+    }
   }
   if (pendingProfileSave) {
     pendingProfileSave = false;
@@ -2855,7 +2953,7 @@ session.on('Error', (msg) => {
   console.error('Server error:', msg.message);
 });
 
-session.on('Disconnected', () => {
+session.on('Disconnected', (msg) => {
   suppressNextLiveMoveSound = true;
   loadingSharedReplaySlug = '';
   controls.onSearchError();
@@ -2870,6 +2968,11 @@ session.on('Disconnected', () => {
     writeLastMultiplayerRoomCode(code);
     playMode.rejoiningRoom = true;
     setMultiplayerSetupStatus(`Reconnecting ${code}...`);
+    if (msg?.will_reconnect) {
+      scheduleMultiplayerDisconnectModal(code, 'Reconnecting...');
+    } else {
+      clearScheduledMultiplayerDisconnectModal();
+    }
     updateActionPanelStatus(currentState, false);
   }
 });
@@ -2877,8 +2980,16 @@ session.on('Disconnected', () => {
 session.on('Connected', () => {
   session.send({ type: 'GetProfile' });
   if (pendingReconnectRoomCode) {
+    clearScheduledMultiplayerDisconnectModal();
+    if (isMultiplayerDisconnectModalVisible()) {
+      showMultiplayerDisconnectModal(pendingReconnectRoomCode, 'Connection restored. Rejoining room...');
+    }
     session.send({ type: 'JoinMultiplayerRoom', code: pendingReconnectRoomCode });
     return;
+  }
+  requestActiveMultiplayerRoomSync();
+  if (selectedPlayMode === 'multiplayer' && activeView === 'play-setup') {
+    requestMultiplayerLobby();
   }
   if (!guestMultiplayerMode() && (pendingSharedReplaySlug || currentSharedReplaySlugFromUrl() || readPendingSharedReplaySlug())) {
     maybeLoadSharedReplayFromUrl();
@@ -3748,6 +3859,7 @@ document.getElementById('btn-close-create-multiplayer-room-modal')?.addEventList
 document.getElementById('btn-cancel-create-multiplayer-room')?.addEventListener('click', hideCreateMultiplayerRoomModal);
 document.getElementById('btn-confirm-create-multiplayer-room')?.addEventListener('click', createMultiplayerRoom);
 document.getElementById('btn-return-to-multiplayer-game')?.addEventListener('click', showPlayView);
+document.getElementById('btn-multiplayer-disconnect-lobby')?.addEventListener('click', returnToMultiplayerLobbyAfterDisconnect);
 document.getElementById('btn-close-guest-signin-required')?.addEventListener('click', hideGuestSignInRequiredModal);
 document.getElementById('btn-cancel-guest-signin-required')?.addEventListener('click', hideGuestSignInRequiredModal);
 document.getElementById('btn-guest-signin-required-signin')?.addEventListener('click', signInFromGuestRequiredModal);
@@ -4316,6 +4428,8 @@ document.addEventListener('hexfish-auth-signed-out', () => {
   updateProfileUi();
   window.hexfishStopApp();
 });
+
+window.setInterval(requestActiveMultiplayerRoomSync, MULTIPLAYER_ROOM_SYNC_MS);
 
 if (window.hexfishAuthSignedIn || guestMode()) {
   window.hexfishStartApp();

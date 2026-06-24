@@ -85,6 +85,14 @@ included `docker-compose.yml` starts a local Postgres service and wires
 `DATABASE_URL` automatically; without `DATABASE_URL`, the server falls
 back to local replay log files.
 
+Live multiplayer rooms use in-memory state by default. For shared
+multiplayer state across multiple server instances, set
+`HEXFISH_MULTIPLAYER_BACKEND=redis` and `REDIS_URL=redis://HOST:6379`.
+The included `docker-compose.yml` starts Redis and enables that backend
+for local container testing. In production, set
+`HEXFISH_MULTIPLAYER_REQUIRED=true` so startup fails clearly if Redis is
+not reachable.
+
 For production, set `HEXFISH_REPLAY_STORE_REQUIRED=true` so the server
 fails startup if Postgres replay storage cannot connect. Leave it unset
 or `false` for local development so filesystem replay logs remain a
@@ -163,6 +171,20 @@ gcloud run services update "$SERVICE_NAME" \
 After the new revision starts, save a replay, list replays, favorite it,
 open the share link, and confirm rows exist in `replay_logs`. Keep the
 previous Cloud Run revision available until those checks pass.
+
+For multi-instance multiplayer on Cloud Run, also provision Memorystore
+Redis in `us-central1`, connect the Cloud Run service to the same VPC,
+and deploy with:
+
+```bash
+gcloud run services update "$SERVICE_NAME" \
+  --region="$REGION" \
+  --set-env-vars="HEXFISH_MULTIPLAYER_BACKEND=redis,HEXFISH_MULTIPLAYER_REQUIRED=true,REDIS_URL=redis://REDIS_HOST:6379"
+```
+
+Keep Cloud Run max instances at `1` until a Redis-backed multiplayer
+smoke test passes, then raise it gradually and test reconnects between
+two browsers.
 
 ## What you get
 

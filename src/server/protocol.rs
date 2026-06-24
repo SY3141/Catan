@@ -136,6 +136,8 @@ pub enum ClientMsg {
         #[serde(default)]
         username: Option<String>,
     },
+    /// Lightweight keepalive used by the browser to detect stale sockets.
+    Ping,
     /// Start a new game (optionally with a seed).
     NewGame { seed: Option<u64> },
     /// Start a game from a browser-edited board layout.
@@ -175,6 +177,8 @@ pub enum ClientMsg {
     },
     /// List visible invite-code multiplayer rooms.
     ListMultiplayerRooms,
+    /// Refresh this socket's current multiplayer room state.
+    GetMultiplayerRoom,
     /// Join an existing invite-code multiplayer room.
     JoinMultiplayerRoom { code: String },
     /// Leave the current multiplayer room on this socket.
@@ -310,6 +314,8 @@ pub enum ServerMsg {
         budget: SearchBudget,
         cpu_load: Option<u8>,
     },
+    /// Lightweight keepalive response.
+    Pong,
     /// Error message.
     Error { message: String },
 }
