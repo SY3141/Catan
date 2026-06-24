@@ -18,6 +18,7 @@
   let signUpMounted = false;
   let clerkNavigationGuardInstalled = false;
   let suppressInviteGuestMode = false;
+  let lastEmittedAuthKey = '';
 
   if (!loginPage || !appShell || !authMount || !signInMount || !signUpMount || !signInTab || !signUpTab || !signOutButton) {
     return;
@@ -150,8 +151,22 @@
     await waitForClerkGlobal(() => !!window.__internal_ClerkUICtor, 'Clerk UI');
   };
 
-  const emitAuthEvent = (name) => {
-    document.dispatchEvent(new Event(name));
+  const emitAuthEvent = (name, authKey) => {
+    const key = String(authKey || name);
+    window.hexfishAuthKey = key;
+    if (lastEmittedAuthKey === key) {
+      console.debug('HexFish auth event skipped duplicate', { event: name, auth_key: key });
+      return false;
+    }
+    const previousKey = lastEmittedAuthKey;
+    lastEmittedAuthKey = key;
+    document.dispatchEvent(new CustomEvent(name, {
+      detail: {
+        auth_key: key,
+        previous_auth_key: previousKey,
+      },
+    }));
+    return true;
   };
 
   const currentPageUrl = () => (
@@ -173,6 +188,27 @@
   const currentReplaySlug = () => (
     normalizeReplaySlug(new URLSearchParams(window.location.search).get('replay'))
   );
+
+  const currentAuthUserId = () => (
+    String(window.Clerk?.user?.id || window.Clerk?.session?.user?.id || '')
+      .replace(/[\u0000-\u001f\u007f]/g, '')
+      .trim()
+      .slice(0, 128)
+  );
+
+  const signedInAuthKey = () => (
+    `signed-in:${currentAuthUserId() || 'unknown'}:${currentAuthUsername()}`
+  );
+
+  const guestAuthKey = () => {
+    if (window.hexfishGuestSharedReplay) {
+      return `guest:replay:${normalizeReplaySlug(window.hexfishGuestReplaySlug || currentReplaySlug())}`;
+    }
+    if (window.hexfishGuestMultiplayer) {
+      return `guest:room:${normalizeRoomCode(window.hexfishGuestRoomCode || currentRoomCode())}`;
+    }
+    return 'guest:unknown';
+  };
 
   const stripClerkRedirectParams = () => {
     const hash = window.location.hash;
@@ -411,7 +447,7 @@
     showAccountControls(false);
     setGuestHeaderSignUpVisible(true);
     setStatus('Guest multiplayer');
-    emitAuthEvent('hexfish-auth-guest');
+    emitAuthEvent('hexfish-auth-guest', guestAuthKey());
   };
 
   const enterGuestSharedReplayMode = () => {
@@ -427,7 +463,7 @@
     showAccountControls(false);
     setGuestHeaderSignUpVisible(true);
     setStatus('Viewing shared replay');
-    emitAuthEvent('hexfish-auth-guest');
+    emitAuthEvent('hexfish-auth-guest', guestAuthKey());
     return true;
   };
 
@@ -438,7 +474,7 @@
     window.hexfishAuthSignedIn = false;
     clearGuestState();
     setGuestHeaderSignUpVisible(false);
-    emitAuthEvent('hexfish-auth-signed-out');
+    emitAuthEvent('hexfish-auth-signed-out', 'signed-out');
     setActiveTab(nextView);
     showLoginPage();
     if (!clerk) {
@@ -473,7 +509,7 @@
       window.hexfishUsername = currentAuthUsername();
       clearGuestState();
       setGuestHeaderSignUpVisible(false);
-      emitAuthEvent('hexfish-auth-signed-in');
+      emitAuthEvent('hexfish-auth-signed-in', signedInAuthKey());
       setStatus('Signed in');
       return;
     }
@@ -493,7 +529,7 @@
     showAccountControls(false);
     showLoginPage();
     mountCurrentAuthForm(clerk);
-    emitAuthEvent('hexfish-auth-signed-out');
+    emitAuthEvent('hexfish-auth-signed-out', 'signed-out');
     if (activeAuthView !== 'sign-up' || signUpMounted) setStatus('');
   };
 

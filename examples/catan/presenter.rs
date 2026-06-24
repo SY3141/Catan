@@ -392,7 +392,7 @@ fn decode_editor_tiles(
 
 impl GamePresenter<GameState> for CatanPresenter {
     fn serialize_state(&self, state: &GameState) -> serde_json::Value {
-        self.serialize_state_with_perspective(state, None)
+        self.serialize_state_with_perspective(state, None, false)
     }
 
     fn serialize_state_for_player(&self, state: &GameState, player: usize) -> serde_json::Value {
@@ -401,7 +401,11 @@ impl GamePresenter<GameState> for CatanPresenter {
             1 => Some(Player::Two),
             _ => None,
         };
-        self.serialize_state_with_perspective(state, perspective)
+        self.serialize_state_with_perspective(state, perspective, false)
+    }
+
+    fn serialize_state_for_spectator(&self, state: &GameState) -> serde_json::Value {
+        self.serialize_state_with_perspective(state, None, true)
     }
 
     fn action_label(&self, state: &GameState, action: usize) -> String {
@@ -415,8 +419,35 @@ impl GamePresenter<GameState> for CatanPresenter {
         actions.extend(catan_actions.iter().map(|a| a.0 as usize));
     }
 
+    fn is_replay_action_legal(&self, state: &GameState, action: usize) -> bool {
+        if matches!(state.phase, Phase::MoveRobber) {
+            if let Ok(action) = u8::try_from(action) {
+                if (ROBBER_START..ROBBER_END).contains(&action) {
+                    let tile = usize::from(action - ROBBER_START);
+                    return tile < state.topology.tiles.len();
+                }
+            }
+        }
+
+        let mut actions = Vec::new();
+        self.human_legal_actions(state, &mut actions);
+        actions.contains(&action)
+    }
+
     fn is_singleplayer_undo_barrier(&self, _state: &GameState, action: usize) -> bool {
         action == ROLL as usize
+    }
+
+    fn resign(&self, state: &mut GameState, player: usize) -> Result<(), String> {
+        let resigned = match player {
+            0 => Player::One,
+            1 => Player::Two,
+            _ => return Err(format!("Invalid player: {player}")),
+        };
+        let winner = resigned.opponent();
+        state.current_player = winner;
+        state.phase = Phase::GameOver(winner);
+        Ok(())
     }
 
     fn action_description(&self, state: &GameState, action: usize) -> String {
@@ -475,7 +506,7 @@ impl GamePresenter<GameState> for CatanPresenter {
     fn action_log_label_for_player(
         &self,
         state: &GameState,
-        action: usize,
+        _action: usize,
         _is_chance: bool,
         label: &str,
         player: usize,
@@ -490,13 +521,22 @@ impl GamePresenter<GameState> for CatanPresenter {
             return "Drew dev".into();
         }
 
-        if (DISCARD_START..DISCARD_END).contains(&(action as u8)) {
-            if let Phase::Discard { player, .. } = state.phase {
-                if player != perspective {
-                    let player_num = if player == Player::One { 1 } else { 2 };
-                    return format!("P{player_num}: Discard");
-                }
-            }
+        label.to_string()
+    }
+
+    fn action_log_label_for_spectator(
+        &self,
+        state: &GameState,
+        _action: usize,
+        is_chance: bool,
+        label: &str,
+    ) -> String {
+        if is_chance && matches!(state.phase, Phase::DevCardDraw) {
+            return "Drew dev".into();
+        }
+
+        if is_chance && matches!(state.phase, Phase::StealResolve) {
+            return "Stole resource".into();
         }
 
         label.to_string()
@@ -570,15 +610,20 @@ impl CatanPresenter {
         &self,
         state: &GameState,
         perspective: Option<Player>,
+        spectator: bool,
     ) -> serde_json::Value {
         let board = visualize::build_board(state);
-        let frame = visualize::capture_frame_with_perspective(
-            state,
-            "",
-            state.current_player as u8,
-            None,
-            perspective,
-        );
+        let frame = if spectator {
+            visualize::capture_frame_for_spectator(state, "", state.current_player as u8, None)
+        } else {
+            visualize::capture_frame_with_perspective(
+                state,
+                "",
+                state.current_player as u8,
+                None,
+                perspective,
+            )
+        };
 
         let (expected_dev, expected_bank_dev) = expected_hidden_dev_cards(state);
 
@@ -614,6 +659,7 @@ impl CatanPresenter {
             "current_player": state.current_player as u8,
             "p1_vp": state.total_vps(Player::One),
             "p2_vp": state.total_vps(Player::Two),
+            "discard_threshold": state.discard_threshold,
             "expected_dev": expected_dev,
         });
         if let Some(bank_dev) = expected_bank_dev {
@@ -628,6 +674,9 @@ impl CatanPresenter {
         if let Some(player) = perspective {
             v["private_view"] = serde_json::json!(true);
             v["local_player"] = serde_json::json!(player as u8);
+        } else if spectator {
+            v["private_view"] = serde_json::json!(true);
+            v["spectator_view"] = serde_json::json!(true);
         }
         v
     }
@@ -636,6 +685,9 @@ impl CatanPresenter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::dev_card::DevCardArray;
+    use crate::game::resource::ResourceArray;
+    use hexfish::game::{Game, Status};
 
     fn presenter() -> CatanPresenter {
         CatanPresenter::new(PathBuf::new(), Dice::default())
@@ -854,6 +906,53 @@ mod tests {
     }
 
     #[test]
+    fn spectator_state_hides_both_players_private_cards() {
+        let presenter = presenter();
+        let mut state = presenter.new_game(42);
+
+        state.players[Player::One].hand = ResourceArray::new(3, 2, 1, 4, 5);
+        state.players[Player::Two].hand = ResourceArray::new(1, 0, 6, 2, 3);
+        state.players[Player::One].dev_cards = DevCardArray([2, 1, 0, 1, 0]);
+        state.players[Player::One].dev_cards_bought_this_turn = DevCardArray([1, 0, 0, 1, 0]);
+        state.players[Player::One].hidden_dev_cards = 2;
+        state.players[Player::Two].dev_cards = DevCardArray([0, 2, 1, 0, 1]);
+        state.players[Player::Two].dev_cards_bought_this_turn = DevCardArray([0, 1, 0, 0, 1]);
+        state.players[Player::Two].hidden_dev_cards = 1;
+
+        let serialized = presenter.serialize_state_for_spectator(&state);
+        assert_eq!(serialized["private_view"], serde_json::json!(true));
+        assert_eq!(serialized["spectator_view"], serde_json::json!(true));
+        assert!(serialized.get("local_player").is_none());
+        assert_eq!(
+            serialized["frame"]["dev_pool"],
+            serde_json::json!([0, 0, 0, 0, 0])
+        );
+
+        let players = serialized["frame"]["players"]
+            .as_array()
+            .expect("spectator players");
+        assert_eq!(players[0]["hand"], serde_json::json!([0, 0, 0, 0, 0]));
+        assert_eq!(players[0]["hand_total"], serde_json::json!(15));
+        assert_eq!(players[0]["dev_cards"], serde_json::json!([0, 0, 0, 0, 0]));
+        assert_eq!(
+            players[0]["dev_cards_bought_this_turn"],
+            serde_json::json!([0, 0, 0, 0, 0])
+        );
+        assert_eq!(players[0]["hidden_dev_cards"], serde_json::json!(6));
+        assert_eq!(players[0]["vp"], serde_json::json!(0));
+
+        assert_eq!(players[1]["hand"], serde_json::json!([0, 0, 0, 0, 0]));
+        assert_eq!(players[1]["hand_total"], serde_json::json!(12));
+        assert_eq!(players[1]["dev_cards"], serde_json::json!([0, 0, 0, 0, 0]));
+        assert_eq!(
+            players[1]["dev_cards_bought_this_turn"],
+            serde_json::json!([0, 0, 0, 0, 0])
+        );
+        assert_eq!(players[1]["hidden_dev_cards"], serde_json::json!(5));
+        assert_eq!(players[1]["vp"], serde_json::json!(0));
+    }
+
+    #[test]
     fn multiplayer_log_redacts_opponent_private_card_labels() {
         let presenter = presenter();
         let mut state = presenter.new_game(42);
@@ -883,7 +982,28 @@ mod tests {
                 "P1: Drop ore",
                 1,
             ),
-            "P1: Discard"
+            "P1: Drop ore"
+        );
+        assert_eq!(
+            presenter.action_log_label_for_spectator(
+                &state,
+                DISCARD_START as usize,
+                false,
+                "P1: Drop ore",
+            ),
+            "P1: Drop ore"
+        );
+
+        state.phase = Phase::DevCardDraw;
+        assert_eq!(
+            presenter.action_log_label_for_spectator(&state, 0, true, "Drew Knight"),
+            "Drew dev"
+        );
+
+        state.phase = Phase::StealResolve;
+        assert_eq!(
+            presenter.action_log_label_for_spectator(&state, 0, true, "Stole ore"),
+            "Stole resource"
         );
     }
 
@@ -905,5 +1025,46 @@ mod tests {
             54,
             "singleplayer setup should expose every distance-legal settlement"
         );
+    }
+
+    #[test]
+    fn presenter_replay_legality_accepts_historical_robber_move() {
+        let presenter = presenter();
+        let mut state = presenter.new_game(42);
+        state.phase = Phase::MoveRobber;
+        state.robber = crate::game::board::TileId(1);
+
+        let action = ROBBER_START as usize + 1;
+        let mut human_actions = Vec::new();
+        presenter.human_legal_actions(&state, &mut human_actions);
+
+        assert!(
+            !human_actions.contains(&action),
+            "live play should still reject moving the robber to its current tile"
+        );
+        assert!(presenter.is_replay_action_legal(&state, action));
+        assert!(!presenter.is_replay_action_legal(&state, ROBBER_END as usize));
+
+        state.phase = Phase::Main;
+        assert!(!presenter.is_replay_action_legal(&state, action));
+    }
+
+    #[test]
+    fn presenter_resign_ends_game_for_opponent() {
+        let presenter = presenter();
+
+        let mut state = presenter.new_game(42);
+        presenter.resign(&mut state, 0).unwrap();
+        assert_eq!(state.current_player, Player::Two);
+        assert!(matches!(state.phase, Phase::GameOver(Player::Two)));
+        assert!(matches!(state.status(), Status::Terminal(reward) if reward < 0.0));
+
+        let mut state = presenter.new_game(42);
+        presenter.resign(&mut state, 1).unwrap();
+        assert_eq!(state.current_player, Player::One);
+        assert!(matches!(state.phase, Phase::GameOver(Player::One)));
+        assert!(matches!(state.status(), Status::Terminal(reward) if reward > 0.0));
+
+        assert!(presenter.resign(&mut state, 2).is_err());
     }
 }

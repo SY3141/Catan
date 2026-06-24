@@ -59,7 +59,16 @@ pub struct GameSession<G: Game> {
     last_explore: Option<(Vec<usize>, usize)>,
     replay: Option<ReplayMode>,
     saved_live_log: Option<GameLog>,
+    live_log_export_disabled: bool,
+    live_replay_result: Option<String>,
     singleplayer_human_player: Option<usize>,
+}
+
+#[derive(Clone, Copy)]
+enum StatePerspective {
+    Full,
+    Player(usize),
+    Spectator,
 }
 
 impl<G: Game + 'static> GameSession<G> {
@@ -111,6 +120,8 @@ impl<G: Game + 'static> GameSession<G> {
             last_explore: None,
             replay: None,
             saved_live_log: None,
+            live_log_export_disabled: false,
+            live_replay_result: None,
             singleplayer_human_player: None,
         }
     }
@@ -148,6 +159,8 @@ impl<G: Game + 'static> GameSession<G> {
             last_explore: None,
             replay: None,
             saved_live_log: None,
+            live_log_export_disabled: false,
+            live_replay_result: None,
             singleplayer_human_player: None,
         }
     }
@@ -163,6 +176,8 @@ impl<G: Game + 'static> GameSession<G> {
         self.cursor = 0;
         self.replay = None;
         self.saved_live_log = None;
+        self.live_log_export_disabled = false;
+        self.live_replay_result = None;
 
         // Replay all actions into history.
         for &action in &log.actions {
@@ -193,13 +208,16 @@ impl<G: Game + 'static> GameSession<G> {
                 .presenter
                 .normalize_replay_actions(&initial_state, &log.actions),
         };
-        validate_replay_log(initial_state.clone(), &log)?;
+        validate_replay_log(initial_state.clone(), &log, self.presenter.as_ref())?;
         self.load_saved_replay(id, initial_state, &log);
         Ok(())
     }
 
     /// Export the currently visible live game prefix as a persistent game log.
     pub fn export_current_log(&self) -> Option<GameLog> {
+        if self.live_log_export_disabled {
+            return None;
+        }
         if self.replay.is_some() || self.cursor == 0 {
             return None;
         }
@@ -220,6 +238,9 @@ impl<G: Game + 'static> GameSession<G> {
 
     /// Export the current live game as a replay, allowing a zero-action log.
     pub fn export_current_log_allow_empty(&self) -> Option<GameLog> {
+        if self.live_log_export_disabled {
+            return None;
+        }
         if self.replay.is_some() {
             return None;
         }
@@ -238,20 +259,31 @@ impl<G: Game + 'static> GameSession<G> {
     /// Export the visible live game prefix unless that exact log was already saved.
     pub fn export_unsaved_current_log(&self) -> Option<GameLog> {
         let log = self.export_current_log()?;
+        self.unsaved_log(log)
+    }
+
+    /// Export the current live game, allowing a zero-action log, unless already saved.
+    pub fn export_unsaved_current_log_allow_empty(&self) -> Option<GameLog> {
+        let log = self.export_current_log_allow_empty()?;
+        self.unsaved_log(log)
+    }
+
+    fn unsaved_log(&self, log: GameLog) -> Option<GameLog> {
         let already_saved = match &self.saved_live_log {
             Some(saved) => saved.initial_state == log.initial_state && saved.actions == log.actions,
             None => false,
         };
-        if already_saved {
-            None
-        } else {
-            Some(log)
-        }
+        if already_saved { None } else { Some(log) }
     }
 
     /// Remember that the given live log has been persisted.
     pub fn mark_current_log_saved(&mut self, log: &GameLog) {
         self.saved_live_log = Some(log.clone());
+    }
+
+    /// Result metadata to store with the current live replay, if any.
+    pub fn live_replay_result(&self) -> Option<&str> {
+        self.live_replay_result.as_deref()
     }
 
     /// Load an externally-built timeline (e.g. from colonist.io replay).
@@ -266,6 +298,10 @@ impl<G: Game + 'static> GameSession<G> {
         self.search.reset(timeline[0].1.clone());
         self.history.clear();
         self.cursor = 0;
+        self.replay = None;
+        self.saved_live_log = None;
+        self.live_log_export_disabled = true;
+        self.live_replay_result = None;
 
         for i in 0..timeline.len() - 1 {
             self.history.push(HistoryEntry {
@@ -423,21 +459,27 @@ impl<G: Game + 'static> GameSession<G> {
 
     fn action_log_entries(
         &self,
-        perspective: Option<usize>,
+        perspective: StatePerspective,
     ) -> (Vec<String>, Vec<String>, Vec<usize>) {
         let mut action_log = Vec::new();
         let mut action_log_sound_kinds = Vec::new();
         let mut action_log_cursors = Vec::new();
         for (i, entry) in self.history.iter().enumerate() {
             let label = match perspective {
-                Some(player) => self.presenter.action_log_label_for_player(
+                StatePerspective::Player(player) => self.presenter.action_log_label_for_player(
                     &entry.state,
                     entry.action,
                     entry.is_chance,
                     &entry.label,
                     player,
                 ),
-                None => entry.label.clone(),
+                StatePerspective::Spectator => self.presenter.action_log_label_for_spectator(
+                    &entry.state,
+                    entry.action,
+                    entry.is_chance,
+                    &entry.label,
+                ),
+                StatePerspective::Full => entry.label.clone(),
             };
             if label.is_empty() {
                 continue;
@@ -487,12 +529,17 @@ impl<G: Game + 'static> GameSession<G> {
 
     /// Build a GameState server message for the current state (public for live push).
     pub fn state_msg(&self) -> ServerMsg {
-        self.state_msg_with_perspective(None)
+        self.state_msg_with_perspective(StatePerspective::Full)
     }
 
     /// Build a GameState server message for one multiplayer player.
     pub fn state_msg_for_player(&self, player: usize) -> ServerMsg {
-        self.state_msg_with_perspective(Some(player))
+        self.state_msg_with_perspective(StatePerspective::Player(player))
+    }
+
+    /// Build a GameState server message for a read-only multiplayer spectator.
+    pub fn state_msg_for_spectator(&self) -> ServerMsg {
+        self.state_msg_with_perspective(StatePerspective::Spectator)
     }
 
     /// Create a lightweight analysis-only session from the current state.
@@ -507,14 +554,14 @@ impl<G: Game + 'static> GameSession<G> {
         )
     }
 
-    fn state_msg_with_perspective(&self, perspective: Option<usize>) -> ServerMsg {
+    fn state_msg_with_perspective(&self, perspective: StatePerspective) -> ServerMsg {
         let state = self.search.state();
         let is_terminal = matches!(state.status(), Status::Terminal(_));
         let is_chance = self.is_chance();
 
         let legal = if is_terminal || is_chance {
             Vec::new()
-        } else if let Some(player) = perspective {
+        } else if let StatePerspective::Player(player) = perspective {
             if self.current_player_idx() == player {
                 let mut actions = Vec::new();
                 self.presenter.human_legal_actions(state, &mut actions);
@@ -528,7 +575,7 @@ impl<G: Game + 'static> GameSession<G> {
             } else {
                 Vec::new()
             }
-        } else {
+        } else if matches!(perspective, StatePerspective::Full) {
             let actions = self.legal_actions();
             actions
                 .iter()
@@ -537,6 +584,8 @@ impl<G: Game + 'static> GameSession<G> {
                     label: self.presenter.action_label(state, a),
                 })
                 .collect()
+        } else {
+            Vec::new()
         };
 
         let result = if let Status::Terminal(reward) = state.status() {
@@ -556,8 +605,11 @@ impl<G: Game + 'static> GameSession<G> {
 
         ServerMsg::GameState {
             state: match perspective {
-                Some(player) => self.presenter.serialize_state_for_player(state, player),
-                None => self.presenter.serialize_state(state),
+                StatePerspective::Player(player) => {
+                    self.presenter.serialize_state_for_player(state, player)
+                }
+                StatePerspective::Spectator => self.presenter.serialize_state_for_spectator(state),
+                StatePerspective::Full => self.presenter.serialize_state(state),
             },
             legal_actions: legal,
             current_player: self.current_player_idx() as u8,
@@ -569,8 +621,10 @@ impl<G: Game + 'static> GameSession<G> {
             action_log_sound_kinds,
             history_cursor: self.cursor,
             action_log_cursors,
-            can_undo: perspective.is_none() && self.undo_target_cursor().is_some(),
-            can_redo: perspective.is_none() && self.cursor < self.history.len(),
+            can_undo: matches!(perspective, StatePerspective::Full)
+                && self.undo_target_cursor().is_some(),
+            can_redo: matches!(perspective, StatePerspective::Full)
+                && self.cursor < self.history.len(),
             replay: self.replay.as_ref().map(|replay| ReplayState {
                 id: replay.id.clone(),
                 cursor: self.cursor,
@@ -638,6 +692,8 @@ impl<G: Game + 'static> GameSession<G> {
                 self.cursor = 0;
                 self.replay = None;
                 self.saved_live_log = None;
+                self.live_log_export_disabled = false;
+                self.live_replay_result = None;
                 self.auto_resolve_chance();
                 vec![self.state_msg()]
             }
@@ -662,10 +718,15 @@ impl<G: Game + 'static> GameSession<G> {
                 self.cursor = 0;
                 self.replay = None;
                 self.saved_live_log = None;
+                self.live_log_export_disabled = false;
+                self.live_replay_result = None;
                 self.auto_resolve_chance();
                 vec![self.state_msg()]
             }
             ClientMsg::PollState | ClientMsg::GetState => {
+                if self.replay.is_none() && self.cursor == self.history.len() {
+                    self.auto_resolve_chance();
+                }
                 vec![self.state_msg()]
             }
             ClientMsg::PlayAction { action } => {
@@ -687,6 +748,33 @@ impl<G: Game + 'static> GameSession<G> {
                 }
                 self.apply_action(action);
                 self.auto_resolve_chance();
+                vec![self.state_msg()]
+            }
+            ClientMsg::ResignGame => {
+                if self.replay.is_some() {
+                    return vec![ServerMsg::Error {
+                        message: "Cannot resign while viewing a replay".into(),
+                    }];
+                }
+                if self.is_terminal() {
+                    return vec![ServerMsg::Error {
+                        message: "Game is over".into(),
+                    }];
+                }
+                let Some(player) = self.singleplayer_human_player else {
+                    return vec![ServerMsg::Error {
+                        message: "Resignation is only available in singleplayer".into(),
+                    }];
+                };
+                let mut state = self.search.state().clone();
+                if let Err(message) = self.presenter.resign(&mut state, player) {
+                    return vec![ServerMsg::Error { message }];
+                }
+                self.history.truncate(self.cursor);
+                self.search.reset(state);
+                self.saved_live_log = None;
+                self.live_log_export_disabled = false;
+                self.live_replay_result = Some("lost_by_resignation".into());
                 vec![self.state_msg()]
             }
             ClientMsg::BotMove {
@@ -898,13 +986,27 @@ impl<G: Game + 'static> GameSession<G> {
 
     fn legal_actions(&self) -> Vec<usize> {
         let mut buf = Vec::new();
-        if self.singleplayer_human_player == Some(self.current_player_idx()) {
+        if self.current_player_uses_human_actions() {
             self.presenter
                 .human_legal_actions(self.search.state(), &mut buf);
         } else {
             self.search.state().legal_actions(&mut buf);
         }
         buf
+    }
+
+    fn engine_legal_actions(&self) -> Vec<usize> {
+        let mut buf = Vec::new();
+        self.search.state().legal_actions(&mut buf);
+        buf
+    }
+
+    fn current_player_uses_human_actions(&self) -> bool {
+        if let Some(human_player) = self.singleplayer_human_player {
+            human_player == self.current_player_idx()
+        } else {
+            self.current_is_human()
+        }
     }
 
     fn is_terminal(&self) -> bool {
@@ -937,7 +1039,10 @@ impl<G: Game + 'static> GameSession<G> {
     /// action, so auto-search should let autoplay advance them instead of
     /// spending the whole simulation budget on a non-choice.
     pub fn should_auto_search(&self) -> bool {
-        self.can_search() && self.legal_actions().len() > 1
+        if self.singleplayer_human_player.is_some() {
+            return false;
+        }
+        self.can_search() && self.engine_legal_actions().len() > 1
     }
 
     pub fn current_player_idx(&self) -> usize {
@@ -979,6 +1084,8 @@ impl<G: Game + 'static> GameSession<G> {
         // If the next history entry matches this action, preserve redo history.
         if self.cursor < self.history.len() && self.history[self.cursor].action == action {
             self.cursor += 1;
+            self.live_log_export_disabled = false;
+            self.live_replay_result = None;
             self.search.apply_action(action);
             return;
         }
@@ -992,6 +1099,8 @@ impl<G: Game + 'static> GameSession<G> {
             next_state: None,
         });
         self.cursor += 1;
+        self.live_log_export_disabled = false;
+        self.live_replay_result = None;
         self.search.apply_action(action);
     }
 
@@ -1175,7 +1284,7 @@ impl<G: Game + 'static> GameSession<G> {
         } else {
             format!("Action {action}")
         };
-        let legal = self.legal_actions();
+        let legal = self.engine_legal_actions();
         if !legal.contains(&action) {
             let state = self.search.state().clone();
             self.search.reset(state);
@@ -1418,8 +1527,11 @@ fn sanitize_search_budget(budget: SearchBudget) -> SearchBudget {
     }
 }
 
-fn validate_replay_log<G: Game>(mut state: G, log: &GameLog) -> Result<(), String> {
-    let mut legal = Vec::new();
+fn validate_replay_log<G: Game>(
+    mut state: G,
+    log: &GameLog,
+    presenter: &dyn GamePresenter<G>,
+) -> Result<(), String> {
     let mut chance = Vec::new();
     for (i, &action) in log.actions.iter().enumerate() {
         match state.status() {
@@ -1430,9 +1542,7 @@ fn validate_replay_log<G: Game>(mut state: G, log: &GameLog) -> Result<(), Strin
                 ));
             }
             Status::Decision(_) => {
-                legal.clear();
-                state.legal_actions(&mut legal);
-                if !legal.contains(&action) {
+                if !presenter.is_replay_action_legal(&state, action) {
                     return Err(format!("illegal replay action {action} at line {}", i + 2));
                 }
             }
@@ -1590,8 +1700,8 @@ mod tests {
     };
 
     use super::{
-        ClientMsg, GameLog, GamePresenter, GameSession, SearchBudget, ServerMsg,
-        MAX_PV_DEPTH_BUDGET, PV_DEPTH_SIM_SAFETY_CAP,
+        ClientMsg, GameLog, GamePresenter, GameSession, MAX_PV_DEPTH_BUDGET,
+        PV_DEPTH_SIM_SAFETY_CAP, SearchBudget, ServerMsg,
     };
 
     #[derive(Clone)]
@@ -1652,6 +1762,11 @@ mod tests {
             action == 1
         }
 
+        fn resign(&self, state: &mut TestGame, _player: usize) -> Result<(), String> {
+            state.moves = 2;
+            Ok(())
+        }
+
         fn phase_label(&self, _state: &TestGame) -> String {
             "test".into()
         }
@@ -1694,6 +1809,170 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct HumanOnlyActionGame {
+        moves: u8,
+        last_action: Option<usize>,
+    }
+
+    impl Game for HumanOnlyActionGame {
+        const NUM_ACTIONS: usize = 2;
+
+        fn status(&self) -> Status {
+            if self.moves >= 1 {
+                Status::Terminal(0.0)
+            } else {
+                Status::Decision(1.0)
+            }
+        }
+
+        fn legal_actions(&self, buf: &mut Vec<usize>) {
+            if !matches!(self.status(), Status::Terminal(_)) {
+                buf.push(0);
+            }
+        }
+
+        fn apply_action(&mut self, action: usize) {
+            assert!(action < Self::NUM_ACTIONS);
+            self.last_action = Some(action);
+            self.moves += 1;
+        }
+    }
+
+    struct HumanOnlyActionEvaluator;
+
+    impl Evaluator<HumanOnlyActionGame> for HumanOnlyActionEvaluator {
+        fn evaluate(&self, _state: &HumanOnlyActionGame, _rng: &mut fastrand::Rng) -> Evaluation {
+            Evaluation::uniform(HumanOnlyActionGame::NUM_ACTIONS, 0.0)
+        }
+    }
+
+    struct HumanOnlyActionPresenter;
+
+    impl GamePresenter<HumanOnlyActionGame> for HumanOnlyActionPresenter {
+        fn serialize_state(&self, state: &HumanOnlyActionGame) -> serde_json::Value {
+            serde_json::json!({
+                "moves": state.moves,
+                "last_action": state.last_action,
+            })
+        }
+
+        fn action_label(&self, _state: &HumanOnlyActionGame, action: usize) -> String {
+            format!("Action {action}")
+        }
+
+        fn human_legal_actions(&self, state: &HumanOnlyActionGame, actions: &mut Vec<usize>) {
+            state.legal_actions(actions);
+            if !matches!(state.status(), Status::Terminal(_)) {
+                actions.push(1);
+            }
+        }
+
+        fn phase_label(&self, _state: &HumanOnlyActionGame) -> String {
+            "human-only-action".into()
+        }
+
+        fn serialize_log_state(&self, _state: &HumanOnlyActionGame) -> Option<String> {
+            Some("human-only-action".into())
+        }
+
+        fn deserialize_log_state(&self, text: &str) -> Result<HumanOnlyActionGame, String> {
+            if text != "human-only-action" {
+                return Err(format!("bad human-only-action state: {text}"));
+            }
+            Ok(HumanOnlyActionGame {
+                moves: 0,
+                last_action: None,
+            })
+        }
+
+        fn static_dir(&self) -> &Path {
+            Path::new(".")
+        }
+
+        fn new_game(&self, _seed: u64) -> HumanOnlyActionGame {
+            HumanOnlyActionGame {
+                moves: 0,
+                last_action: None,
+            }
+        }
+    }
+
+    #[derive(Clone)]
+    struct ChanceOnPollGame {
+        phase: u8,
+    }
+
+    impl Game for ChanceOnPollGame {
+        const NUM_ACTIONS: usize = 2;
+
+        fn status(&self) -> Status {
+            match self.phase {
+                0 => Status::Chance,
+                1 => Status::Decision(1.0),
+                _ => Status::Terminal(1.0),
+            }
+        }
+
+        fn legal_actions(&self, buf: &mut Vec<usize>) {
+            if matches!(self.status(), Status::Decision(_)) {
+                buf.push(1);
+            }
+        }
+
+        fn apply_action(&mut self, action: usize) {
+            match self.phase {
+                0 => {
+                    assert_eq!(action, 0);
+                    self.phase = 1;
+                }
+                1 => {
+                    assert_eq!(action, 1);
+                    self.phase = 2;
+                }
+                _ => panic!("cannot apply action to terminal ChanceOnPollGame"),
+            }
+        }
+
+        fn chance_outcomes(&self, buf: &mut Vec<(usize, u32)>) {
+            if matches!(self.status(), Status::Chance) {
+                buf.push((0, 1));
+            }
+        }
+    }
+
+    struct ChanceOnPollEvaluator;
+
+    impl Evaluator<ChanceOnPollGame> for ChanceOnPollEvaluator {
+        fn evaluate(&self, _state: &ChanceOnPollGame, _rng: &mut fastrand::Rng) -> Evaluation {
+            Evaluation::uniform(ChanceOnPollGame::NUM_ACTIONS, 0.0)
+        }
+    }
+
+    struct ChanceOnPollPresenter;
+
+    impl GamePresenter<ChanceOnPollGame> for ChanceOnPollPresenter {
+        fn serialize_state(&self, state: &ChanceOnPollGame) -> serde_json::Value {
+            serde_json::json!({ "phase": state.phase })
+        }
+
+        fn action_label(&self, _state: &ChanceOnPollGame, action: usize) -> String {
+            format!("Action {action}")
+        }
+
+        fn phase_label(&self, state: &ChanceOnPollGame) -> String {
+            format!("phase-{}", state.phase)
+        }
+
+        fn static_dir(&self) -> &Path {
+            Path::new(".")
+        }
+
+        fn new_game(&self, _seed: u64) -> ChanceOnPollGame {
+            ChanceOnPollGame { phase: 0 }
+        }
+    }
+
     fn test_session() -> GameSession<TestGame> {
         GameSession::with_state(
             TestGame { id: 7, moves: 0 },
@@ -1705,8 +1984,187 @@ mod tests {
         )
     }
 
+    fn chance_on_poll_session() -> GameSession<ChanceOnPollGame> {
+        GameSession::with_state(
+            ChanceOnPollGame { phase: 0 },
+            Arc::new(ChanceOnPollEvaluator),
+            "chance-on-poll",
+            Arc::new(ChanceOnPollPresenter),
+            [true, true],
+            crate::mcts::Config::default(),
+        )
+    }
+
+    fn human_only_action_session(human_players: [bool; 2]) -> GameSession<HumanOnlyActionGame> {
+        GameSession::with_state(
+            HumanOnlyActionGame {
+                moves: 0,
+                last_action: None,
+            },
+            Arc::new(HumanOnlyActionEvaluator),
+            "human-only-action",
+            Arc::new(HumanOnlyActionPresenter),
+            human_players,
+            crate::mcts::Config::default(),
+        )
+    }
+
     fn finish_search(session: &mut GameSession<TestGame>) {
         while session.search_tick().is_none() {}
+    }
+
+    #[test]
+    fn human_controlled_session_exposes_relaxed_presenter_actions() {
+        let mut session = human_only_action_session([true, false]);
+
+        match session.state_msg() {
+            ServerMsg::GameState { legal_actions, .. } => {
+                let actions = legal_actions
+                    .iter()
+                    .map(|info| info.action)
+                    .collect::<Vec<_>>();
+                assert_eq!(actions, vec![0, 1]);
+            }
+            other => panic!("expected GameState, got {other:?}"),
+        }
+        assert_eq!(session.engine_legal_actions(), vec![0]);
+        assert!(
+            !session.should_auto_search(),
+            "auto-search should key off engine actions, not relaxed human UI actions"
+        );
+
+        match session
+            .handle(ClientMsg::PlayAction { action: 1 })
+            .as_slice()
+        {
+            [ServerMsg::GameState { state, .. }] => {
+                assert_eq!(state["last_action"], serde_json::json!(1));
+            }
+            other => panic!("expected GameState after relaxed human action, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bot_move_result_must_be_engine_legal_not_just_human_legal() {
+        let mut session = human_only_action_session([true, false]);
+        let result = SearchResult {
+            policy: vec![0.0; HumanOnlyActionGame::NUM_ACTIONS],
+            wdl: Wdl::DRAW,
+            selected_action: 1,
+            network_value: 0.0,
+            children_q: Vec::new(),
+            prior_top1_action: 1,
+            pv_depth: 0,
+            max_depth: 0,
+        };
+
+        let msgs = session.finish_search(
+            &ClientMsg::BotMove {
+                simulations: Some(0),
+                budget: None,
+            },
+            result,
+        );
+
+        match msgs.as_slice() {
+            [ServerMsg::Error { message }] => {
+                assert!(message.contains("Bot selected illegal action"));
+            }
+            other => panic!("expected illegal bot action error, got {other:?}"),
+        }
+        assert_eq!(session.search.state().moves, 0);
+        assert_eq!(session.search.state().last_action, None);
+    }
+
+    #[test]
+    fn singleplayer_disables_auto_search_on_human_and_bot_turns() {
+        let mut session = test_session();
+        assert_eq!(session.legal_actions().len(), 2);
+        assert!(session.should_auto_search());
+
+        session.handle(ClientMsg::SetSingleplayer {
+            human_player: Some(0),
+        });
+        assert_eq!(session.current_player_idx(), 0);
+        assert_eq!(session.legal_actions().len(), 2);
+        assert!(!session.should_auto_search());
+
+        session.handle(ClientMsg::PlayAction { action: 0 });
+        assert_eq!(session.current_player_idx(), 1);
+        assert_eq!(session.legal_actions().len(), 2);
+        assert!(!session.should_auto_search());
+    }
+
+    #[test]
+    fn singleplayer_resign_exports_live_prefix_with_resignation_result() {
+        let mut session = test_session();
+        session.handle(ClientMsg::SetSingleplayer {
+            human_player: Some(0),
+        });
+        session.handle(ClientMsg::PlayAction { action: 0 });
+        assert!(
+            session.export_unsaved_current_log().is_some(),
+            "ordinary live action log should be exportable before resignation"
+        );
+
+        match session.handle(ClientMsg::ResignGame).as_slice() {
+            [ServerMsg::GameState { is_terminal, .. }] => assert!(*is_terminal),
+            other => panic!("expected terminal GameState after resign, got {other:?}"),
+        }
+        assert_eq!(session.live_replay_result(), Some("lost_by_resignation"));
+        let log = session
+            .export_unsaved_current_log()
+            .expect("resignation should preserve the playable live prefix");
+        assert_eq!(log.actions, vec![0]);
+
+        session.mark_current_log_saved(&log);
+        assert!(session.export_unsaved_current_log().is_none());
+    }
+
+    #[test]
+    fn singleplayer_resign_can_export_empty_live_replay() {
+        let mut session = test_session();
+        session.handle(ClientMsg::SetSingleplayer {
+            human_player: Some(0),
+        });
+
+        match session.handle(ClientMsg::ResignGame).as_slice() {
+            [ServerMsg::GameState { is_terminal, .. }] => assert!(*is_terminal),
+            other => panic!("expected terminal GameState after resign, got {other:?}"),
+        }
+        assert_eq!(session.live_replay_result(), Some("lost_by_resignation"));
+        let log = session
+            .export_unsaved_current_log_allow_empty()
+            .expect("resignation before the first move should still be savable");
+        assert!(log.actions.is_empty());
+    }
+
+    #[test]
+    fn live_get_state_auto_resolves_chance_nodes() {
+        let mut session = chance_on_poll_session();
+        assert!(matches!(session.search.state().status(), Status::Chance));
+
+        match session.handle(ClientMsg::GetState).as_slice() {
+            [
+                ServerMsg::GameState {
+                    state,
+                    is_chance,
+                    legal_actions,
+                    history_cursor,
+                    ..
+                },
+            ] => {
+                assert!(!*is_chance);
+                assert_eq!(state["phase"], serde_json::json!(1));
+                assert_eq!(*history_cursor, 1);
+                let actions = legal_actions
+                    .iter()
+                    .map(|info| info.action)
+                    .collect::<Vec<_>>();
+                assert_eq!(actions, vec![1]);
+            }
+            other => panic!("expected GameState after live chance poll, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1789,11 +2247,13 @@ mod tests {
             .handle(ClientMsg::PlayAction { action: 0 })
             .as_slice()
         {
-            [ServerMsg::GameState {
-                can_undo,
-                history_cursor,
-                ..
-            }] => {
+            [
+                ServerMsg::GameState {
+                    can_undo,
+                    history_cursor,
+                    ..
+                },
+            ] => {
                 assert!(*can_undo);
                 assert_eq!(*history_cursor, 1);
             }
@@ -1801,12 +2261,14 @@ mod tests {
         }
 
         match session.handle(ClientMsg::Undo).as_slice() {
-            [ServerMsg::GameState {
-                state,
-                history_cursor,
-                can_undo,
-                ..
-            }] => {
+            [
+                ServerMsg::GameState {
+                    state,
+                    history_cursor,
+                    can_undo,
+                    ..
+                },
+            ] => {
                 assert_eq!(state["moves"], serde_json::json!(0));
                 assert_eq!(*history_cursor, 0);
                 assert!(!*can_undo);
@@ -1842,12 +2304,15 @@ mod tests {
         );
 
         match msgs.as_slice() {
-            [ServerMsg::BotAction { .. }, ServerMsg::GameState {
-                state,
-                history_cursor,
-                can_undo,
-                ..
-            }] => {
+            [
+                ServerMsg::BotAction { .. },
+                ServerMsg::GameState {
+                    state,
+                    history_cursor,
+                    can_undo,
+                    ..
+                },
+            ] => {
                 assert_eq!(state["moves"], serde_json::json!(2));
                 assert_eq!(*history_cursor, 2);
                 assert!(!*can_undo);
@@ -1874,11 +2339,13 @@ mod tests {
             .handle(ClientMsg::PlayAction { action: 1 })
             .as_slice()
         {
-            [ServerMsg::GameState {
-                history_cursor,
-                can_undo,
-                ..
-            }] => {
+            [
+                ServerMsg::GameState {
+                    history_cursor,
+                    can_undo,
+                    ..
+                },
+            ] => {
                 assert_eq!(*history_cursor, 1);
                 assert!(!*can_undo);
             }
@@ -2025,15 +2492,17 @@ mod tests {
             .handle(ClientMsg::SetLogCursor { cursor: 1 })
             .as_slice()
         {
-            [ServerMsg::GameState {
-                state,
-                action_log,
-                action_log_sound_kinds,
-                history_cursor,
-                action_log_cursors,
-                can_redo,
-                ..
-            }] => {
+            [
+                ServerMsg::GameState {
+                    state,
+                    action_log,
+                    action_log_sound_kinds,
+                    history_cursor,
+                    action_log_cursors,
+                    can_redo,
+                    ..
+                },
+            ] => {
                 assert_eq!(state["moves"], serde_json::json!(1));
                 assert_eq!(*history_cursor, 1);
                 assert_eq!(action_log.len(), 2);
@@ -2059,14 +2528,16 @@ mod tests {
             .handle(ClientMsg::PlayAction { action: 1 })
             .as_slice()
         {
-            [ServerMsg::GameState {
-                state,
-                action_log,
-                history_cursor,
-                action_log_cursors,
-                can_redo,
-                ..
-            }] => {
+            [
+                ServerMsg::GameState {
+                    state,
+                    action_log,
+                    history_cursor,
+                    action_log_cursors,
+                    can_redo,
+                    ..
+                },
+            ] => {
                 assert_eq!(state["moves"], serde_json::json!(2));
                 assert_eq!(*history_cursor, 2);
                 assert_eq!(action_log.len(), 2);
@@ -2208,12 +2679,14 @@ mod tests {
             _ => panic!("expected GameState"),
         }
 
-        assert!(session
-            .begin_search(&ClientMsg::RunSims {
-                count: 1,
-                target: None,
-            })
-            .is_ok());
+        assert!(
+            session
+                .begin_search(&ClientMsg::RunSims {
+                    count: 1,
+                    target: None,
+                })
+                .is_ok()
+        );
 
         match session
             .handle(ClientMsg::PlayAction { action: 0 })
@@ -2228,6 +2701,28 @@ mod tests {
             ServerMsg::GameState { replay, state, .. } => {
                 assert_eq!(replay.expect("replay metadata").cursor, 2);
                 assert_eq!(state["moves"], serde_json::json!(2));
+            }
+            _ => panic!("expected GameState"),
+        }
+    }
+
+    #[test]
+    fn loaded_replay_accepts_presenter_human_legal_actions() {
+        let mut session = human_only_action_session([true, false]);
+        let log = GameLog {
+            initial_state: "human-only-action".into(),
+            actions: vec![1],
+        };
+
+        session
+            .load_saved_replay_log("human-only.log", &log)
+            .expect("human-facing replay action should validate");
+        session.handle(ClientMsg::SetReplayCursor { cursor: 1 });
+
+        match session.state_msg() {
+            ServerMsg::GameState { replay, state, .. } => {
+                assert_eq!(replay.expect("replay metadata").cursor, 1);
+                assert_eq!(state["last_action"], serde_json::json!(1));
             }
             _ => panic!("expected GameState"),
         }
@@ -2263,12 +2758,14 @@ mod tests {
             ports: Some(vec!["ore".into()]),
         });
         match msgs.as_slice() {
-            [ServerMsg::GameState {
-                replay,
-                state,
-                action_log,
-                ..
-            }] => {
+            [
+                ServerMsg::GameState {
+                    replay,
+                    state,
+                    action_log,
+                    ..
+                },
+            ] => {
                 assert!(replay.is_none());
                 assert_eq!(state["id"], serde_json::json!(98));
                 assert_eq!(state["moves"], serde_json::json!(0));

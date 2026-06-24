@@ -82,19 +82,39 @@ const MOVE_SOUND_ASSETS = {
   city: 'sounds/build.mp3',
   roll: 'sounds/dice.mp3',
   card: 'sounds/card.mp3',
+  discard: 'sounds/discard.mp3',
 };
 const MOVE_SOUND_KINDS = Object.keys(MOVE_SOUND_ASSETS);
 const CATAN_ROLL_ACTION = 180;
 const CATAN_END_TURN_ACTION = 181;
+const CATAN_SETTLEMENT_START = 0;
+const CATAN_SETTLEMENT_END = 54;
+const CATAN_ROAD_START = 54;
+const CATAN_ROAD_END = 126;
+const CATAN_CITY_START = 126;
+const CATAN_CITY_END = 180;
+const CATAN_ROBBER_START = 205;
+const CATAN_ROBBER_END = 224;
+const CATAN_NODE_COUNT = CATAN_SETTLEMENT_END - CATAN_SETTLEMENT_START;
+const CATAN_EDGE_COUNT = CATAN_ROAD_END - CATAN_ROAD_START;
+const CATAN_TILE_COUNT = CATAN_ROBBER_END - CATAN_ROBBER_START;
+const DEFAULT_DISCARD_THRESHOLD = 9;
 const BASE_DOCUMENT_TITLE = document.title || 'HexFish';
 const MULTIPLAYER_TURN_DOCUMENT_TITLE = 'Your turn - HexFish';
 const MULTIPLAYER_TURN_TITLE_FLASH_MS = 900;
 const MULTIPLAYER_ROOM_SYNC_MS = 5000;
 const MULTIPLAYER_DISCONNECT_MODAL_GRACE_MS = 5000;
+const MULTIPLAYER_LOBBY_COUNTDOWN_MS = 1000;
 const MULTIPLAYER_ROOM_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const DEFAULT_MULTIPLAYER_TIME_MINUTES = 15;
 const DEFAULT_MULTIPLAYER_INCREMENT_SECONDS = 0;
 const NATIVE_AD_SCRIPT_SRC = 'https://pl29822875.effectivecpmnetwork.com/22b9435bf5d21daf1267cb569cf13015/invoke.js';
+const SINGLEPLAYER_RECOVERY_REARM_MS = 250;
+const SINGLEPLAYER_RECOVERY_RETRY_MS = 1000;
+const SINGLEPLAYER_RECOVERY_MAX_ATTEMPTS = 3;
+const PLAY_BOT_WATCHDOG_INTERVAL_MS = 5000;
+const APP_WEBSOCKET_AUTH_CHANGED_CLOSE_CODE = 4002;
+const APP_WEBSOCKET_APP_STOPPED_CLOSE_CODE = 4003;
 
 function playerColor(playerIndex) {
   return playerIndex === 0 || playerIndex === 1 ? PLAYER_COLORS[playerIndex] : '';
@@ -131,6 +151,7 @@ let selectedEditorPort = null;
 let pendingEditorStart = false;
 let pendingNewGameSearch = false;
 let lastActionLogLength = { analysis: null, replay: null };
+const expandedDiscardLogGroups = new Set();
 let previousFrameHands = { analysis: null, replay: null };
 let activeView = 'play-setup';
 let selectedSingleplayerHumanPlayer = 0;
@@ -175,14 +196,24 @@ let createRoomSettings = {
 };
 let multiplayerClockSyncedAtMs = Date.now();
 let multiplayerClockTimer = null;
+let multiplayerLobbyCountdownTimer = null;
 let playMode = {
   active: false,
   mode: 'bot',
   humanPlayer: 0,
+  viewerRole: 'player',
   botThinking: false,
+  botThinkingKey: null,
+  botThinkingStartedAt: 0,
+  lastBotProgressAt: 0,
+  botThinkingReason: '',
+  pendingBotMoveAfterSearch: false,
+  singleplayerResigned: false,
   forcedMoveKey: null,
   autoRollEndKey: null,
   pendingHumanMove: false,
+  singleplayerNeedsRecovery: false,
+  singleplayerRecoveryGeneration: 0,
   multiplayerRoom: null,
   multiplayerStatus: '',
   rejoiningRoom: false,
@@ -419,7 +450,7 @@ function startProfileUsernameSyncPolling() {
       stopProfileUsernameSyncPolling();
       setProfileStatus('Saved.');
       window.setTimeout(hideProfileModal, 250);
-      startOrReconnectForAuthChange();
+      startOrReconnectForAuthChange({ reason: 'profile-username-updated' });
       return;
     }
     if (Date.now() > deadline) {
@@ -599,7 +630,7 @@ async function saveProfileUsername() {
     syncProfileUsernameFromClerk();
     setProfileStatus('Saved.');
     window.setTimeout(hideProfileModal, 250);
-    startOrReconnectForAuthChange();
+    startOrReconnectForAuthChange({ reason: 'profile-username-updated' });
   } catch (error) {
     pendingProfileSave = false;
     if (save) save.disabled = false;
@@ -616,11 +647,12 @@ controls.isAnalysisBlocked = (target) => (
 );
 controls.onAnalysisBlocked = () => showGuestSignInRequiredModal('Analysis');
 
-function setServerSingleplayerHumanPlayer(player) {
+function setServerSingleplayerHumanPlayer(player, options = {}) {
   const humanPlayer = player == null ? null : player;
-  if (serverSingleplayerHumanPlayer === humanPlayer) return;
+  if (!options.force && serverSingleplayerHumanPlayer === humanPlayer) return false;
   serverSingleplayerHumanPlayer = humanPlayer;
   session.send({ type: 'SetSingleplayer', human_player: humanPlayer });
+  return true;
 }
 
 controls.onNewGame = () => {
@@ -633,7 +665,9 @@ controls.onNewGame = () => {
     pendingNewGameSearch = false;
     playMode.active = false;
     playMode.mode = selectedPlayMode;
-    playMode.botThinking = false;
+    clearPlayBotThinking();
+    playMode.pendingBotMoveAfterSearch = false;
+    playMode.singleplayerResigned = false;
     playMode.forcedMoveKey = null;
     playMode.autoRollEndKey = null;
     playMode.pendingHumanMove = false;
@@ -649,7 +683,9 @@ controls.onNewGame = () => {
   pendingNewGameSearch = true;
   playMode.active = false;
   playMode.mode = selectedPlayMode;
-  playMode.botThinking = false;
+  clearPlayBotThinking();
+  playMode.pendingBotMoveAfterSearch = false;
+  playMode.singleplayerResigned = false;
   playMode.forcedMoveKey = null;
   playMode.autoRollEndKey = null;
   playMode.pendingHumanMove = false;
@@ -726,6 +762,269 @@ function activeActionLogLength(msg) {
 
 function activeActionLogIndex(msg) {
   return activeActionLogLength(msg) - 1;
+}
+
+function actionLogEntriesThroughCursor(msg) {
+  const entries = Array.isArray(msg?.action_log) ? msg.action_log : [];
+  return entries.slice(0, activeActionLogLength(msg));
+}
+
+function parseActionLogPlayer(entry) {
+  const firstLine = String(entry ?? '').split('\n')[0];
+  const match = firstLine.match(/^\s*P([12])\s*:/i);
+  return match ? Number(match[1]) - 1 : null;
+}
+
+function parseDiscardLogEntry(entry, soundKind = '') {
+  if (soundKind && soundKind !== 'discard') return null;
+  const firstLine = String(entry ?? '').split('\n')[0];
+  const player = parseActionLogPlayer(firstLine);
+  if (player == null) return null;
+  const match = firstLine.match(/:\s*Drop\s+([a-z]+)\b/i);
+  if (!match) return null;
+  const resource = match[1].toLowerCase();
+  const resourceIndex = RESOURCE_NAMES.indexOf(resource);
+  if (resourceIndex < 0) return null;
+  return { player, resource, resourceIndex };
+}
+
+function currentPhaseIsDiscard(msg) {
+  return /\bdiscards\b/i.test(String(msg?.phase || ''));
+}
+
+function discardLogGroupKey(group) {
+  return `${group.player}:${group.firstCursor}:${group.lastCursor}`;
+}
+
+function discardSummaryText(player, counts) {
+  const parts = [];
+  for (let i = 0; i < RESOURCE_NAMES.length; i++) {
+    if (counts[i] > 0) parts.push(`${counts[i]} ${capitalizeResourceName(RESOURCE_NAMES[i])}`);
+  }
+  return `P${player + 1}: Discarded ${parts.join(', ')}`;
+}
+
+function buildActionLogDisplayEntries(msg, cursors, activeLogIndex) {
+  const rawEntries = Array.isArray(msg?.action_log) ? msg.action_log : [];
+  const soundKinds = Array.isArray(msg?.action_log_sound_kinds) ? msg.action_log_sound_kinds : [];
+  const displayEntries = [];
+  const discardPhaseActive = currentPhaseIsDiscard(msg);
+  let i = 0;
+
+  while (i < rawEntries.length) {
+    const discard = parseDiscardLogEntry(rawEntries[i], soundKinds[i] || '');
+    if (!discard) {
+      displayEntries.push({
+        type: 'entry',
+        rawText: rawEntries[i],
+        index: i,
+        cursor: cursors[i] ?? i + 1,
+        active: i === activeLogIndex,
+      });
+      i++;
+      continue;
+    }
+
+    const start = i;
+    const player = discard.player;
+    const counts = [0, 0, 0, 0, 0];
+    const children = [];
+    while (i < rawEntries.length) {
+      const next = parseDiscardLogEntry(rawEntries[i], soundKinds[i] || '');
+      if (!next || next.player !== player) break;
+      counts[next.resourceIndex]++;
+      children.push({
+        type: 'entry',
+        rawText: rawEntries[i],
+        index: i,
+        cursor: cursors[i] ?? i + 1,
+        active: i === activeLogIndex,
+        child: true,
+      });
+      i++;
+    }
+
+    const end = i - 1;
+    const reachesLogEnd = end === rawEntries.length - 1;
+    const completed = !(discardPhaseActive && reachesLogEnd);
+    if (children.length >= 2 && completed) {
+      const group = {
+        type: 'discard-group',
+        player,
+        startIndex: start,
+        endIndex: end,
+        firstCursor: children[0].cursor,
+        lastCursor: children[children.length - 1].cursor,
+        counts,
+        children,
+        active: activeLogIndex >= start && activeLogIndex <= end,
+      };
+      group.key = discardLogGroupKey(group);
+      group.rawText = discardSummaryText(player, counts);
+      displayEntries.push(group);
+    } else {
+      displayEntries.push(...children);
+    }
+  }
+
+  return displayEntries;
+}
+
+function applyActionLogLineColor(line, rawText) {
+  if (rawText.startsWith('P1:')) {
+    line.style.color = PLAYER_COLORS[0];
+  } else if (rawText.startsWith('P2:')) {
+    line.style.color = PLAYER_COLORS[1];
+  } else {
+    line.style.color = '#a0a0a0';
+    line.style.fontStyle = 'italic';
+  }
+}
+
+function navigateActionLogCursor(msg, cursor) {
+  if (playMultiplayerActive()) return;
+  controls.stopAutoplay();
+  controls._disableAutoSearch();
+  if (msg.replay) {
+    session.send({ type: 'SetReplayCursor', cursor });
+  } else {
+    session.send({ type: 'SetLogCursor', cursor });
+  }
+}
+
+function renderActionLogEntry(logView, msg, entry) {
+  const line = document.createElement('div');
+  line.className = entry.active
+    ? 'py-0.5 px-1 rounded bg-bg-3 text-gray-100'
+    : 'py-0.5 px-1 rounded hover:bg-bg-3';
+  if (entry.child) line.classList.add('log-discard-child');
+  applyActionLogLineColor(line, entry.rawText);
+
+  const parts = formatPlayerRefs(entry.rawText).split('\n');
+  line.textContent = `${entry.index + 1}. ${parts[0]}`;
+  if (playMultiplayerActive()) {
+    line.style.cursor = 'default';
+  } else {
+    line.style.cursor = 'pointer';
+    line.addEventListener('click', () => navigateActionLogCursor(msg, entry.cursor));
+  }
+  logView.appendChild(line);
+
+  for (let p = 1; p < parts.length; p++) {
+    const sub = document.createElement('div');
+    sub.style.color = '#888';
+    sub.style.fontSize = '0.85em';
+    sub.style.paddingLeft = entry.child ? '2.5em' : '1.5em';
+    sub.textContent = parts[p].trim();
+    logView.appendChild(sub);
+  }
+}
+
+function renderDiscardLogGroup(logView, msg, group) {
+  const expanded = expandedDiscardLogGroups.has(group.key);
+  const line = document.createElement('div');
+  line.className = group.active
+    ? 'log-discard-summary py-0.5 px-1 rounded bg-bg-3 text-gray-100'
+    : 'log-discard-summary py-0.5 px-1 rounded hover:bg-bg-3';
+  applyActionLogLineColor(line, group.rawText);
+  line.style.cursor = playMultiplayerActive() ? 'default' : 'pointer';
+
+  const toggle = document.createElement('button');
+  toggle.type = 'button';
+  toggle.className = 'log-discard-toggle';
+  toggle.textContent = expanded ? 'v' : '>';
+  toggle.setAttribute('aria-label', expanded ? 'Collapse discarded resources' : 'Expand discarded resources');
+  toggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+  toggle.addEventListener('click', (event) => {
+    event.stopPropagation();
+    if (expandedDiscardLogGroups.has(group.key)) {
+      expandedDiscardLogGroups.delete(group.key);
+    } else {
+      expandedDiscardLogGroups.add(group.key);
+    }
+    renderGameState(currentState);
+  });
+
+  const text = document.createElement('span');
+  const indexText = group.startIndex === group.endIndex
+    ? `${group.startIndex + 1}`
+    : `${group.startIndex + 1}-${group.endIndex + 1}`;
+  text.textContent = `${indexText}. ${formatPlayerRefs(group.rawText)}`;
+
+  line.append(toggle, text);
+  if (!playMultiplayerActive()) {
+    line.addEventListener('click', () => navigateActionLogCursor(msg, group.lastCursor));
+  }
+  logView.appendChild(line);
+
+  if (expanded) {
+    for (const child of group.children) {
+      renderActionLogEntry(logView, msg, child);
+    }
+  }
+}
+
+function spatialAction(kind, id, count, player) {
+  if (!Number.isInteger(id) || id < 0 || id >= count) return null;
+  return { player, kind, id };
+}
+
+function parseSpatialActionLogEntry(entry) {
+  const firstLine = String(entry ?? '').split('\n')[0];
+  const player = parseActionLogPlayer(firstLine);
+  if (player == null) return null;
+  let match = firstLine.match(/:\s*Settle\s+N(\d+)\b/i);
+  if (match) {
+    return spatialAction('settlement', Number(match[1]), CATAN_NODE_COUNT, player);
+  }
+  match = firstLine.match(/:\s*Road\s+E(\d+)\b/i);
+  if (match) {
+    return spatialAction('road', Number(match[1]), CATAN_EDGE_COUNT, player);
+  }
+  match = firstLine.match(/:\s*City\s+N(\d+)\b/i);
+  if (match) {
+    return spatialAction('city', Number(match[1]), CATAN_NODE_COUNT, player);
+  }
+  match = firstLine.match(/:\s*Robber\s+T(\d+)\b/i);
+  if (match) {
+    return spatialAction('robber', Number(match[1]), CATAN_TILE_COUNT, player);
+  }
+  return null;
+}
+
+function boardHighlightKey(item) {
+  return `${item.kind}:${item.id}`;
+}
+
+function deriveLastBoardMoveHighlights(msg) {
+  const entries = actionLogEntriesThroughCursor(msg);
+  let lastSpatialIndex = -1;
+  let actor = null;
+
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const spatial = parseSpatialActionLogEntry(entries[i]);
+    if (!spatial) continue;
+    lastSpatialIndex = i;
+    actor = spatial.player;
+    break;
+  }
+
+  if (lastSpatialIndex < 0 || actor == null) return null;
+
+  const pieces = [];
+  const seen = new Set();
+  for (let i = lastSpatialIndex; i >= 0; i--) {
+    const entryPlayer = parseActionLogPlayer(entries[i]);
+    if (entryPlayer != null && entryPlayer !== actor) break;
+    const spatial = parseSpatialActionLogEntry(entries[i]);
+    if (!spatial || spatial.player !== actor) continue;
+    const key = boardHighlightKey(spatial);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    pieces.unshift({ kind: spatial.kind, id: spatial.id });
+  }
+
+  return pieces.length ? { player: actor, pieces } : null;
 }
 
 function readStoredMoveSoundEnabled() {
@@ -829,7 +1128,20 @@ function maybePlayMoveSoundForGameState(msg) {
     return;
   }
   if (!actionLog.length || signature === previousSignature || actionLog.length < previousLength) return;
-  playMoveSound(soundKinds[actionLog.length - 1]);
+
+  const newEntries = actionLog.slice(previousLength);
+  const newSoundKinds = soundKinds.slice(previousLength);
+  const rollSevenStartedDiscard = currentPhaseIsDiscard(msg) && newEntries.some((entry, index) => (
+    newSoundKinds[index] === 'roll' && parseRollTotal(entry) === 7
+  ));
+  if (rollSevenStartedDiscard) {
+    playMoveSound('discard');
+    return;
+  }
+
+  const soundKind = soundKinds[actionLog.length - 1];
+  if (soundKind === 'discard') return;
+  playMoveSound(soundKind);
 }
 
 function playViewActive() {
@@ -840,12 +1152,140 @@ function playMultiplayerActive() {
   return playViewActive() && playMode.mode === 'multiplayer';
 }
 
+function multiplayerSpectatorActive() {
+  return playMultiplayerActive() && playMode.viewerRole === 'spectator';
+}
+
+function multiplayerPlayerActive() {
+  return playMultiplayerActive() && playMode.viewerRole !== 'spectator';
+}
+
 function multiplayerGameOpen() {
   return !!(playMode.active && playMode.mode === 'multiplayer' && playMode.multiplayerRoom?.code);
 }
 
 function playBotActive() {
   return playViewActive() && playMode.mode !== 'multiplayer';
+}
+
+function singleplayerGameActive() {
+  return playViewActive() && playMode.mode !== 'multiplayer';
+}
+
+function singleplayerRecoveryContext(extra = {}) {
+  return {
+    generation: playMode.singleplayerRecoveryGeneration,
+    connected: session.connected,
+    activeView,
+    mode: playMode.mode,
+    current_player: currentState?.current_player,
+    phase: currentState?.phase,
+    search_running: controls.searchRunning,
+    bot_thinking: playMode.botThinking,
+    ...extra,
+  };
+}
+
+function logSingleplayerRecovery(reason, extra = {}) {
+  console.debug('HexFish singleplayer recovery', singleplayerRecoveryContext({ reason, ...extra }));
+}
+
+function markSingleplayerNeedsRecovery(reason, options = {}) {
+  if (!singleplayerGameActive()) return false;
+  const { newGeneration = false, ...extra } = options;
+  if (newGeneration || !playMode.singleplayerNeedsRecovery) {
+    playMode.singleplayerRecoveryGeneration += 1;
+  }
+  playMode.singleplayerNeedsRecovery = true;
+  logSingleplayerRecovery(reason, extra);
+  return true;
+}
+
+function clearSingleplayerRecovery(reason) {
+  if (!playMode.singleplayerNeedsRecovery) return;
+  playMode.singleplayerNeedsRecovery = false;
+  logSingleplayerRecovery(reason);
+}
+
+function resetSingleplayerRecoveryState() {
+  playMode.singleplayerNeedsRecovery = false;
+  playMode.singleplayerRecoveryGeneration += 1;
+}
+
+function scheduleSingleplayerRecoveryTick(generation, attempt = 0) {
+  const delay = attempt === 0 ? SINGLEPLAYER_RECOVERY_REARM_MS : SINGLEPLAYER_RECOVERY_RETRY_MS;
+  window.setTimeout(() => {
+    if (!singleplayerGameActive() || activeView !== 'play') return;
+    if (playMode.singleplayerRecoveryGeneration !== generation) return;
+    if (!session.connected) return;
+    if (playMode.singleplayerNeedsRecovery) {
+      if (attempt < SINGLEPLAYER_RECOVERY_MAX_ATTEMPTS) {
+        logSingleplayerRecovery('retry-get-state', { attempt: attempt + 1 });
+        session.send({ type: 'GetState' });
+        scheduleSingleplayerRecoveryTick(generation, attempt + 1);
+      }
+      return;
+    }
+    if (!isPlayBotTurn(currentState)) {
+      updateActionPanelStatus(currentState, false);
+      return;
+    }
+    if (playMode.botThinking || controls.searchRunning) return;
+    logSingleplayerRecovery('resume-automation');
+    runPlayAutomation(currentState);
+  }, delay);
+}
+
+function recoverSingleplayerConnection(reason) {
+  if (!singleplayerGameActive()) return false;
+  if (!session.connected) return false;
+  if (!playMode.singleplayerNeedsRecovery) {
+    playMode.singleplayerRecoveryGeneration += 1;
+    playMode.singleplayerNeedsRecovery = true;
+  }
+  const generation = playMode.singleplayerRecoveryGeneration;
+  logSingleplayerRecovery(reason);
+  setServerSingleplayerHumanPlayer(playMode.humanPlayer, { force: true });
+  session.send({ type: 'GetState' });
+  scheduleSingleplayerRecoveryTick(generation);
+  return true;
+}
+
+function checkPlayBotWatchdog() {
+  if (!playBotActive() || !playMode.botThinking || controls.searchRunning) return;
+  const elapsedMs = Date.now() - (playMode.botThinkingStartedAt || Date.now());
+  logSingleplayerRecovery('bot-thinking-without-search', {
+    elapsed_ms: elapsedMs,
+    last_progress_age_ms: playMode.lastBotProgressAt ? Date.now() - playMode.lastBotProgressAt : null,
+    bot_thinking_reason: playMode.botThinkingReason,
+  });
+  clearPlayBotThinking();
+  controls.onSearchError();
+  playMode.pendingBotMoveAfterSearch = false;
+  playMode.forcedMoveKey = null;
+  updateActionPanelStatus(currentState, false);
+  if (session.connected) {
+    markSingleplayerNeedsRecovery('watchdog', { newGeneration: true });
+    recoverSingleplayerConnection('watchdog-get-state');
+  } else {
+    markSingleplayerNeedsRecovery('watchdog-disconnected', { newGeneration: true });
+  }
+}
+
+function markSingleplayerSocketRecovery(reason, details = {}) {
+  if (!singleplayerGameActive()) return false;
+  controls.onSearchError();
+  clearPlayBotThinking();
+  playMode.pendingBotMoveAfterSearch = false;
+  playMode.forcedMoveKey = null;
+  playMode.autoRollEndKey = null;
+  playMode.pendingHumanMove = false;
+  markSingleplayerNeedsRecovery(reason, {
+    newGeneration: true,
+    ...details,
+  });
+  updateActionPanelStatus(currentState, false);
+  return true;
 }
 
 window.hexfishIsMultiplayerActive = playMultiplayerActive;
@@ -862,6 +1302,7 @@ function isLocalMultiplayerTurn(msg = currentState) {
     !msg.replay &&
     !msg.is_terminal &&
     !msg.is_chance &&
+    !multiplayerSpectatorActive() &&
     multiplayerRoomFull() &&
     multiplayerOpponentConnected() &&
     msg.current_player === playMode.humanPlayer &&
@@ -924,6 +1365,7 @@ function playNameForPlayer(idx) {
   if (playMultiplayerActive()) {
     const roomName = String(playMode.multiplayerRoom?.players?.[idx]?.name || '').trim();
     if (roomName) return roomName;
+    if (multiplayerSpectatorActive()) return `P${idx + 1}`;
     return idx === playMode.humanPlayer ? (localName || 'You') : 'Opponent';
   }
   return idx === playMode.humanPlayer ? (localName || 'You') : playBotName();
@@ -940,7 +1382,7 @@ function formatPlayerRefs(text) {
 
 function formatResultBanner(text) {
   const winner = parseResultWinner(text);
-  if (playViewActive() && winner === playMode.humanPlayer) {
+  if (playViewActive() && !multiplayerSpectatorActive() && winner === playMode.humanPlayer) {
     const name = playerDisplayName(winner);
     return name === 'You' ? 'You win' : `${name} wins`;
   }
@@ -979,6 +1421,47 @@ function playCanPonder(msg = currentState) {
 
 function playForcedMoveKey(msg, action) {
   return `${logHistoryCursor(msg)}:${msg.current_player}:${msg.phase}:${action}`;
+}
+
+function playBotSearchKey(msg = currentState) {
+  if (!msg) return '';
+  const actions = Array.isArray(msg.legal_actions)
+    ? msg.legal_actions.map(a => Number(a?.action)).join(',')
+    : '';
+  const nodeKind = msg.is_chance ? 'chance' : 'decision';
+  return `${logHistoryCursor(msg)}:${msg.current_player}:${msg.phase}:${nodeKind}:${actions}`;
+}
+
+function clearPlayBotThinking() {
+  playMode.botThinking = false;
+  playMode.botThinkingKey = null;
+  playMode.botThinkingStartedAt = 0;
+  playMode.lastBotProgressAt = 0;
+  playMode.botThinkingReason = '';
+}
+
+function markPlayBotThinking(msg = currentState, reason = 'bot-move') {
+  const now = Date.now();
+  playMode.botThinking = true;
+  playMode.botThinkingKey = playBotSearchKey(msg);
+  playMode.botThinkingStartedAt = now;
+  playMode.lastBotProgressAt = now;
+  playMode.botThinkingReason = reason;
+}
+
+function reconcilePlayBotThinking(msg = currentState) {
+  if (!playMode.botThinking) return;
+  const stale = !playBotActive() ||
+    !msg ||
+    msg.replay ||
+    msg.is_terminal ||
+    msg.is_chance ||
+    msg.current_player === playMode.humanPlayer ||
+    (playMode.botThinkingKey && playMode.botThinkingKey !== playBotSearchKey(msg)) ||
+    (!playMode.botThinkingKey && !controls.searchRunning);
+  if (!stale) return;
+  clearPlayBotThinking();
+  if (controls.searchRunning) controls.onSearchError();
 }
 
 function isAutoRollEndAction(action) {
@@ -1025,6 +1508,7 @@ function setAutoRollEndEnabled(enabled) {
 }
 
 function sendPlayAction(action) {
+  if (multiplayerSpectatorActive()) return;
   if (playMultiplayerActive() && multiplayerTimeoutWinner() != null) return;
   const msg = playMultiplayerActive()
     ? { type: 'PlayMultiplayerAction', action }
@@ -1238,6 +1722,7 @@ function multiplayerRoomFull(room = playMode.multiplayerRoom) {
 }
 
 function multiplayerOpponentConnected(room = playMode.multiplayerRoom) {
+  if (multiplayerSpectatorActive()) return multiplayerRoomFull(room);
   if (!room || (playMode.humanPlayer !== 0 && playMode.humanPlayer !== 1)) return false;
   return !!room.players?.[playMode.humanPlayer === 0 ? 1 : 0]?.connected;
 }
@@ -1284,11 +1769,12 @@ function multiplayerWinner() {
 function multiplayerResultText() {
   const winner = multiplayerWinner();
   if (winner == null) return '';
-  const youWon = winner === playMode.humanPlayer;
+  const winnerName = playerDisplayName(winner);
   const reason = String(playMode.multiplayerRoom?.finish_reason || '').toLowerCase();
-  if (reason === 'timeout') return youWon ? 'You win on time' : 'Opponent wins on time';
-  if (reason === 'resignation') return youWon ? 'You win by resignation' : 'Opponent wins by resignation';
-  return youWon ? 'You win' : 'Opponent wins';
+  const verb = winnerName === 'You' ? 'win' : 'wins';
+  if (reason === 'timeout') return `${winnerName} ${verb} on time`;
+  if (reason === 'resignation') return `${winnerName} ${verb} by resignation`;
+  return `${winnerName} ${verb}`;
 }
 
 function multiplayerTimeoutWinner() {
@@ -1343,7 +1829,7 @@ function updateMultiplayerClockUi() {
     const playerClock = Number.isFinite(baseClock)
       ? Math.max(0, baseClock - (playerInfo?.clock_active && winner == null ? elapsedMs : 0))
       : null;
-    const isOpponent = show && winner == null && player !== playMode.humanPlayer;
+    const isOpponent = show && !multiplayerSpectatorActive() && winner == null && player !== playMode.humanPlayer;
     card.classList.toggle('hidden', !show);
     time.textContent = formatClockMillis(playerClock);
     time.classList.toggle('low-time', playerClock != null && playerClock < 60_000);
@@ -1526,15 +2012,52 @@ function multiplayerLobbyRoomFull(room) {
   return multiplayerLobbySeatCount(room?.occupied) >= 2 || room?.status === 'active';
 }
 
+function multiplayerLobbySpectatorCount(room) {
+  const count = Number(room?.spectator_count);
+  if (!Number.isFinite(count)) return 0;
+  return Math.max(0, Math.round(count));
+}
+
+function formatShortDuration(milliseconds) {
+  const safe = Math.max(0, Math.ceil(Number(milliseconds) / 1000));
+  const minutes = Math.floor(safe / 60);
+  const seconds = safe % 60;
+  return `${minutes}:${String(seconds).padStart(2, '0')}`;
+}
+
+function multiplayerLobbyCloseCountdownText(room) {
+  const deadline = Number(room?.empty_room_closes_at_ms);
+  if (!Number.isFinite(deadline) || deadline <= 0) return '';
+  return `Closes in ${formatShortDuration(deadline - Date.now())}`;
+}
+
 function multiplayerLobbyStatusText(room) {
   const occupied = multiplayerLobbySeatCount(room?.occupied);
   const connected = multiplayerLobbySeatCount(room?.connected);
+  const spectators = multiplayerLobbySpectatorCount(room);
   const timeControl = formatMultiplayerTimeControl(room);
-  const suffix = timeControl ? `, ${timeControl}` : '';
+  const closeText = multiplayerLobbyCloseCountdownText(room);
+  const parts = [];
+  if (timeControl) parts.push(timeControl);
+  if (spectators > 0) parts.push(`${spectators} watching`);
+  if (closeText) parts.push(closeText);
+  const suffix = parts.length ? `, ${parts.join(', ')}` : '';
   if (occupied >= 2) {
     return connected >= 2 ? `Full${suffix}` : `Full, ${connected} online${suffix}`;
   }
   return `${occupied}/2 seats, ${connected} online${suffix}`;
+}
+
+function updateMultiplayerLobbyCountdownTimer() {
+  const hasCountdown = multiplayerLobbyRooms.some(room => multiplayerLobbyCloseCountdownText(room));
+  if (hasCountdown && !multiplayerLobbyCountdownTimer) {
+    multiplayerLobbyCountdownTimer = window.setInterval(() => {
+      renderMultiplayerLobby();
+    }, MULTIPLAYER_LOBBY_COUNTDOWN_MS);
+  } else if (!hasCountdown && multiplayerLobbyCountdownTimer) {
+    window.clearInterval(multiplayerLobbyCountdownTimer);
+    multiplayerLobbyCountdownTimer = null;
+  }
 }
 
 function requestMultiplayerLobby() {
@@ -1555,6 +2078,7 @@ function renderMultiplayerLobby(rooms = multiplayerLobbyRooms) {
     empty.className = 'px-2.5 py-2 text-xs text-gray-500';
     empty.textContent = 'No rooms';
     list.appendChild(empty);
+    updateMultiplayerLobbyCountdownTimer();
     return;
   }
 
@@ -1565,8 +2089,8 @@ function renderMultiplayerLobby(rooms = multiplayerLobbyRooms) {
     const row = document.createElement('button');
     row.type = 'button';
     row.className = 'flex w-full items-center justify-between gap-2 border-b border-gray-700 px-2.5 py-2 text-left text-xs text-gray-200 hover:bg-bg-3 disabled:cursor-default disabled:opacity-50';
-    row.disabled = isFull && !isCurrent;
-    row.title = isCurrent ? `Current room ${code}` : isFull ? `Room ${code} is full` : `Join room ${code}`;
+    row.disabled = !!isCurrent;
+    row.title = isCurrent ? `Current room ${code}` : isFull ? `Spectate room ${code}` : `Join room ${code}`;
     if (isCurrent) row.classList.add('bg-bg-3');
     row.addEventListener('click', () => {
       const input = document.getElementById('multiplayer-room-code-input');
@@ -1586,11 +2110,12 @@ function renderMultiplayerLobby(rooms = multiplayerLobbyRooms) {
 
     const actionText = document.createElement('span');
     actionText.className = 'shrink-0 text-[11px] text-gray-400';
-    actionText.textContent = isCurrent ? 'Current' : isFull ? 'Full' : 'Join';
+    actionText.textContent = isCurrent ? 'Current' : isFull ? 'Spectate' : 'Join';
 
     row.append(roomInfo, actionText);
     list.appendChild(row);
   }
+  updateMultiplayerLobbyCountdownTimer();
 }
 
 function updateMultiplayerReconnectUi() {
@@ -1617,6 +2142,7 @@ function updateMultiplayerRoomUi() {
   updateMultiplayerClockUi();
   updateMultiplayerClockTimer();
   updateMultiplayerResultBanner();
+  updateBoardSpectatorButton();
 
   if (!room) {
     if (selectedPlayMode === 'multiplayer') {
@@ -1625,12 +2151,15 @@ function updateMultiplayerRoomUi() {
     return;
   }
 
+  const spectating = multiplayerSpectatorActive();
   const side = playMode.humanPlayer === 1 ? 'P2' : 'P1';
   const timeControl = formatMultiplayerTimeControl(room);
   const timeText = multiplayerRoomHasClock(room)
     ? timeControl ? ` Clock ${timeControl}.` : ''
     : ' No clock.';
-  if (room.status === 'waiting' || !multiplayerRoomFull(room)) {
+  if (spectating) {
+    setMultiplayerSetupStatus(`Room ${code}.${timeText} Spectating.`);
+  } else if (room.status === 'waiting' || !multiplayerRoomFull(room)) {
     setMultiplayerSetupStatus(`Room ${code} is waiting. You are ${side}.${timeText}`);
   } else if (!multiplayerOpponentConnected(room)) {
     setMultiplayerSetupStatus(`Room ${code}.${timeText} Opponent disconnected.`);
@@ -1645,6 +2174,31 @@ function requestActiveMultiplayerRoomSync() {
   session.send({ type: 'GetMultiplayerRoom' });
 }
 
+function spectatorDisplayNames(room = playMode.multiplayerRoom) {
+  const spectators = Array.isArray(room?.spectators) ? room.spectators : [];
+  return spectators.map((spectator, index) => {
+    const name = String(spectator?.name || '').trim();
+    if (name) return spectator?.you ? `${name} (you)` : name;
+    return spectator?.you ? 'You' : `Spectator ${index + 1}`;
+  });
+}
+
+function updateBoardSpectatorButton() {
+  const btn = document.getElementById('btn-board-spectators');
+  const countEl = document.getElementById('board-spectator-count');
+  if (!btn || !countEl) return;
+  const show = playMultiplayerActive() && !!playMode.multiplayerRoom?.code;
+  const names = spectatorDisplayNames();
+  const count = names.length;
+  btn.classList.toggle('hidden', !show);
+  btn.classList.toggle('active', count > 0);
+  countEl.textContent = String(count);
+  const label = count > 0 ? `Watching: ${names.join(', ')}` : 'No spectators watching';
+  btn.title = label;
+  btn.dataset.spectators = label;
+  btn.setAttribute('aria-label', label);
+}
+
 function updateMultiplayerInviteModal() {
   const modal = document.getElementById('multiplayer-invite-modal');
   const linkInput = document.getElementById('multiplayer-invite-link');
@@ -1653,7 +2207,7 @@ function updateMultiplayerInviteModal() {
   if (!modal || !linkInput || !codeEl || !copyBtn) return;
 
   const code = normalizeRoomCode(playMode.multiplayerRoom?.code);
-  const show = playMultiplayerActive() && !!code && !multiplayerRoomFull();
+  const show = playMultiplayerActive() && !multiplayerSpectatorActive() && !!code && !multiplayerRoomFull();
   if (!show) multiplayerInviteCopiedCode = '';
   modal.classList.toggle('hidden', !show);
   modal.classList.toggle('flex', show);
@@ -1665,7 +2219,7 @@ function updateMultiplayerInviteModal() {
 function updateMultiplayerResignButton() {
   const btn = document.getElementById('btn-resign-multiplayer');
   if (!btn) return;
-  const show = playMultiplayerActive() && multiplayerWinner() == null && !currentState?.is_terminal;
+  const show = multiplayerPlayerActive() && multiplayerWinner() == null && !currentState?.is_terminal;
   const player = playMode.humanPlayer === 1 ? 1 : 0;
   const actions = document.getElementById(`player-${player}-actions`);
   if (actions && btn.parentElement !== actions) {
@@ -1675,12 +2229,31 @@ function updateMultiplayerResignButton() {
   btn.disabled = !show || !multiplayerRoomFull();
 }
 
+function updateSingleplayerResignButton() {
+  const btn = document.getElementById('btn-resign-singleplayer');
+  if (!btn) return;
+  const show = playBotActive() &&
+    activeView === 'play' &&
+    !currentState?.replay &&
+    !currentState?.is_terminal;
+  const player = playMode.humanPlayer === 1 ? 1 : 0;
+  const actions = document.getElementById(`player-${player}-actions`);
+  if (actions && btn.parentElement !== actions) {
+    actions.appendChild(btn);
+  }
+  btn.classList.toggle('hidden', !show);
+  btn.disabled = !show || playMode.botThinking;
+}
+
 function resetMultiplayerState(statusText = '') {
   clearSavedGameOverReplayLink();
   hideMultiplayerDisconnectModal();
   playMode.active = false;
   playMode.mode = 'multiplayer';
-  playMode.botThinking = false;
+  playMode.viewerRole = 'player';
+  clearPlayBotThinking();
+  playMode.pendingBotMoveAfterSearch = false;
+  playMode.singleplayerResigned = false;
   playMode.forcedMoveKey = null;
   playMode.autoRollEndKey = null;
   playMode.pendingHumanMove = false;
@@ -1794,15 +2367,30 @@ function leaveMultiplayerRoom(showSetup = true, preserveReconnect = false) {
 
 function addOpponentClockTime() {
   if (!playMultiplayerActive() || !playMode.multiplayerRoom) return;
+  if (multiplayerSpectatorActive()) return;
   if (!multiplayerRoomHasClock()) return;
   session.send({ type: 'AddMultiplayerOpponentTime' });
 }
 
 function resignMultiplayerGame() {
   if (!playMultiplayerActive() || multiplayerWinner() != null) return;
+  if (multiplayerSpectatorActive()) return;
   if (!multiplayerRoomFull()) return;
   if (!window.confirm('Resign this multiplayer game?')) return;
   session.send({ type: 'ResignMultiplayerGame' });
+}
+
+function resignSingleplayerGame() {
+  if (!playBotActive() || activeView !== 'play' || currentState?.is_terminal || currentState?.replay) return;
+  if (playMode.botThinking) return;
+  if (!window.confirm('Resign this singleplayer game?')) return;
+  controls.stopAutoplay();
+  controls._disableAutoSearch();
+  controls.pauseBeforeCommand();
+  playMode.pendingBotMoveAfterSearch = false;
+  playMode.singleplayerResigned = true;
+  playMode.pendingHumanMove = false;
+  session.send({ type: 'ResignGame' });
 }
 
 async function copyMultiplayerInviteLink() {
@@ -2152,8 +2740,9 @@ function handleMultiplayerRoomMessage(msg) {
     return;
   }
 
+  const viewerRole = msg.viewer_role === 'spectator' ? 'spectator' : 'player';
   const localPlayer = Number(msg.local_player);
-  if (localPlayer !== 0 && localPlayer !== 1) {
+  if (viewerRole === 'player' && localPlayer !== 0 && localPlayer !== 1) {
     resetMultiplayerState('Room joined, but no seat was assigned.');
     updateMultiplayerTurnAttention();
     return;
@@ -2161,13 +2750,17 @@ function handleMultiplayerRoomMessage(msg) {
 
   playMode.active = true;
   playMode.mode = 'multiplayer';
-  playMode.humanPlayer = localPlayer;
-  playMode.botThinking = false;
+  playMode.viewerRole = viewerRole;
+  playMode.humanPlayer = viewerRole === 'player' ? localPlayer : 0;
+  clearPlayBotThinking();
+  playMode.pendingBotMoveAfterSearch = false;
+  playMode.singleplayerResigned = false;
   playMode.forcedMoveKey = null;
   playMode.autoRollEndKey = null;
   playMode.pendingHumanMove = false;
   playMode.rejoiningRoom = false;
   pendingReconnectRoomCode = '';
+  pendingPlayTabReconnectRoomCode = '';
   hideMultiplayerDisconnectModal();
   const previousRoomCode = normalizeRoomCode(playMode.multiplayerRoom?.code);
   const nextRoomCode = normalizeRoomCode(msg.code);
@@ -2177,7 +2770,9 @@ function handleMultiplayerRoomMessage(msg) {
   playMode.multiplayerRoom = {
     code: nextRoomCode,
     status: msg.status,
+    viewer_role: viewerRole,
     players: Array.isArray(msg.players) ? msg.players : [],
+    spectators: Array.isArray(msg.spectators) ? msg.spectators : [],
     time_minutes: msg.time_minutes,
     increment_seconds: msg.increment_seconds,
     winner: msg.winner,
@@ -2187,7 +2782,7 @@ function handleMultiplayerRoomMessage(msg) {
   multiplayerClockSyncedAtMs = Date.now();
   writeLastMultiplayerRoomCode(playMode.multiplayerRoom.code);
   setRoomCodeInUrl(playMode.multiplayerRoom.code);
-  setPlaySide(localPlayer, 'multiplayer');
+  if (viewerRole === 'player') setPlaySide(localPlayer, 'multiplayer');
   updateMultiplayerRoomUi();
   updateMultiplayerResignButton();
 
@@ -2251,12 +2846,17 @@ session.on('GameState', (msg) => {
       return;
     }
     if (activeView === 'play') {
-      renderGameState(msg);
+      const holdSingleplayerAutomation = playMode.mode !== 'multiplayer' && playMode.singleplayerNeedsRecovery;
+      renderGameState(msg, {
+        serverFresh: true,
+        holdPlayAutomation: holdSingleplayerAutomation,
+      });
+      if (holdSingleplayerAutomation) return;
       runPlayAutomation(msg);
       return;
     }
     if (activeView === 'analysis') {
-      renderGameState(msg);
+      renderGameState(msg, { serverFresh: true });
       runPendingNewGameSearch(msg);
     }
   }
@@ -2274,9 +2874,15 @@ function runPendingNewGameSearch(msg) {
   controls.runSearch();
 }
 
-function renderGameState(msg) {
+function renderGameState(msg, options = {}) {
   currentState = msg;
-  if (playViewActive()) playMode.pendingHumanMove = false;
+  if (playViewActive()) {
+    playMode.pendingHumanMove = false;
+    if (options.serverFresh && playMode.mode !== 'multiplayer' && !msg.replay) {
+      clearSingleplayerRecovery('fresh-game-state');
+    }
+    reconcilePlayBotThinking(msg);
+  }
   const state = msg.state;
   const viewKey = msg.replay ? 'replay' : 'analysis';
 
@@ -2292,7 +2898,7 @@ function renderGameState(msg) {
 
   // Update frame
   if (state.frame && currentBoard) {
-    board.updateFrame(state.frame, currentBoard);
+    board.updateFrame(state.frame, currentBoard, deriveLastBoardMoveHighlights(msg));
   }
 
   // Phase / turn
@@ -2316,13 +2922,18 @@ function renderGameState(msg) {
   actionList.innerHTML = '';
   board.clearOverlays();
   const playBotTurn = isPlayBotTurn(msg);
+  const showPlayBotThinking = playBotTurn && !(
+    options.holdPlayAutomation ||
+    (playMode.mode !== 'multiplayer' && playMode.singleplayerNeedsRecovery)
+  );
   const playMultiplayerBlocked = playMultiplayerActive() && (
+    multiplayerSpectatorActive() ||
     multiplayerTimeoutWinner() != null ||
     !multiplayerRoomFull() ||
     !multiplayerOpponentConnected() ||
     msg.current_player !== playMode.humanPlayer
   );
-  updateActionPanelStatus(msg, playBotTurn);
+  updateActionPanelStatus(msg, showPlayBotThinking);
   const canUseLegalActions = !msg.replay && !msg.is_terminal && !msg.is_chance && !playBotTurn && !playMultiplayerBlocked;
   updateBoardPieceCounts(msg, state, canUseLegalActions);
 
@@ -2357,47 +2968,12 @@ function renderGameState(msg) {
   const activeLogIndex = activeActionLogIndex(msg);
   logView.innerHTML = '';
   if (msg.action_log) {
-    for (let i = 0; i < msg.action_log.length; i++) {
-      const line = document.createElement('div');
-      const active = i === activeLogIndex;
-      line.className = active
-        ? 'py-0.5 px-1 rounded bg-bg-3 text-gray-100'
-        : 'py-0.5 px-1 rounded hover:bg-bg-3';
-      const rawText = msg.action_log[i];
-      const text = formatPlayerRefs(rawText);
-      if (rawText.startsWith('P1:')) {
-        line.style.color = PLAYER_COLORS[0];
-      } else if (rawText.startsWith('P2:')) {
-        line.style.color = PLAYER_COLORS[1];
+    const displayEntries = buildActionLogDisplayEntries(msg, cursors, activeLogIndex);
+    for (const entry of displayEntries) {
+      if (entry.type === 'discard-group') {
+        renderDiscardLogGroup(logView, msg, entry);
       } else {
-        line.style.color = '#a0a0a0';
-        line.style.fontStyle = 'italic';
-      }
-      const parts = text.split('\n');
-      line.textContent = `${i + 1}. ${parts[0]}`;
-      if (playMultiplayerActive()) {
-        line.style.cursor = 'default';
-      } else {
-        line.style.cursor = 'pointer';
-        line.addEventListener('click', () => {
-          controls.stopAutoplay();
-          controls._disableAutoSearch();
-          const cursor = cursors[i] ?? i + 1;
-          if (msg.replay) {
-            session.send({ type: 'SetReplayCursor', cursor });
-          } else {
-            session.send({ type: 'SetLogCursor', cursor });
-          }
-        });
-      }
-      logView.appendChild(line);
-      for (let p = 1; p < parts.length; p++) {
-        const sub = document.createElement('div');
-        sub.style.color = '#888';
-        sub.style.fontSize = '0.85em';
-        sub.style.paddingLeft = '1.5em';
-        sub.textContent = parts[p].trim();
-        logView.appendChild(sub);
+        renderActionLogEntry(logView, msg, entry);
       }
     }
     if (wasAtBottom) {
@@ -2408,6 +2984,7 @@ function renderGameState(msg) {
   }
 
   updateRollBadge(msg, state, viewKey);
+  syncRollBadgeActionState(msg);
 
   // Undo/Redo button states
   document.getElementById('btn-undo').disabled = playBotTurn || playMultiplayerActive() || !msg.can_undo;
@@ -2470,6 +3047,8 @@ function updateActionPanelStatus(msg, playBotTurn) {
     }
     if (playMode.rejoiningRoom) {
       status.textContent = 'Reconnecting room';
+    } else if (multiplayerSpectatorActive()) {
+      status.textContent = 'Spectating';
     } else if (!multiplayerRoomFull()) {
       status.textContent = 'Waiting for opponent';
     } else if (!multiplayerOpponentConnected()) {
@@ -2508,12 +3087,63 @@ function showLegalActionPreview(action) {
   if (!currentBoard || !currentState) return;
   if (isPlayBotTurn()) return;
   if (playMultiplayerActive() && (
+    multiplayerSpectatorActive() ||
     multiplayerTimeoutWinner() != null ||
     !multiplayerRoomFull() ||
     !multiplayerOpponentConnected() ||
     currentState.current_player !== playMode.humanPlayer
   )) return;
   board.showActionPreview(action, currentBoard, currentState.current_player);
+}
+
+function hasLegalAction(msg, action) {
+  return Array.isArray(msg?.legal_actions) && msg.legal_actions.some(a => Number(a?.action) === action);
+}
+
+function rollBadgeCanRoll(msg = currentState) {
+  if (!msg || msg.replay || msg.is_terminal || msg.is_chance) return false;
+  if (!hasLegalAction(msg, CATAN_ROLL_ACTION)) return false;
+  if (isPlayBotTurn(msg)) return false;
+  if (playMultiplayerActive()) {
+    if (multiplayerSpectatorActive()) return false;
+    if (multiplayerTimeoutWinner() != null) return false;
+    if (!multiplayerRoomFull() || !multiplayerOpponentConnected()) return false;
+    if (msg.current_player !== playMode.humanPlayer) return false;
+  }
+  return true;
+}
+
+function syncRollBadgeActionState(msg = currentState) {
+  const badge = document.getElementById('roll-badge');
+  if (!badge) return;
+  const canRoll = rollBadgeCanRoll(msg);
+  if (canRoll) {
+    if (badge.classList.contains('hidden') || !badge.textContent.trim()) {
+      badge.textContent = 'Roll';
+      badge.dataset.rollPlaceholder = 'true';
+      badge.style.background = playerColor(msg.current_player);
+      badge.classList.remove('hidden');
+    }
+    badge.disabled = false;
+    badge.classList.add('roll-badge-action');
+    badge.title = 'Roll dice';
+    badge.setAttribute('aria-label', 'Roll dice');
+    return;
+  }
+
+  badge.disabled = true;
+  badge.classList.remove('roll-badge-action');
+  badge.title = '';
+  if (badge.dataset.rollPlaceholder === 'true') {
+    delete badge.dataset.rollPlaceholder;
+    badge.textContent = '';
+    badge.classList.add('hidden');
+  }
+}
+
+function handleRollBadgeClick() {
+  if (!rollBadgeCanRoll(currentState)) return;
+  sendPlayAction(CATAN_ROLL_ACTION);
 }
 
 function updateRollBadge(msg, state, viewKey) {
@@ -2636,6 +3266,7 @@ function showRollBadge(total, roller) {
   const badge = document.getElementById('roll-badge');
   if (!badge) return;
   const playerIndex = roller === 0 || roller === 1 ? roller : null;
+  delete badge.dataset.rollPlaceholder;
   badge.textContent = total;
   badge.style.background = playerColor(playerIndex);
   badge.setAttribute('aria-label', playerIndex == null
@@ -2647,6 +3278,12 @@ function showRollBadge(total, roller) {
 function hideRollBadge() {
   const badge = document.getElementById('roll-badge');
   if (!badge) return;
+  if (badge.dataset.rollPlaceholder === 'true') {
+    delete badge.dataset.rollPlaceholder;
+    badge.textContent = '';
+  }
+  badge.disabled = true;
+  badge.classList.remove('roll-badge-action');
   badge.classList.add('hidden');
 }
 
@@ -2837,6 +3474,7 @@ session.on('Snapshot', (msg) => {
   mctsPanel.updateSnapshot(msg.snapshot, msg.action_labels, currentState?.current_player ?? 0);
   updateSearchHighlights(msg.snapshot, msg.action_labels);
   controls.onSimsDone(msg.snapshot);
+  resumePlayBotAutomationAfterSearchSettles();
 });
 
 session.on('ReplayList', (msg) => {
@@ -2865,6 +3503,7 @@ session.on('Subtree', (msg) => {
 
 session.on('SearchProgress', (msg) => {
   controls.onSearchProgress();
+  if (playMode.botThinking) playMode.lastBotProgressAt = Date.now();
   if (controls.isPausePending()) return;
   mctsPanel.updateSnapshot(msg.snapshot, msg.action_labels, currentState?.current_player ?? 0);
   mctsPanel.showProgress(msg.snapshot, msg.budget, msg.sims_total, msg.cpu_load);
@@ -2882,7 +3521,8 @@ session.on('MultiplayerLobby', (msg) => {
 });
 
 session.on('BotAction', (msg) => {
-  playMode.botThinking = false;
+  clearPlayBotThinking();
+  playMode.pendingBotMoveAfterSearch = false;
   playMode.forcedMoveKey = null;
   playMode.autoRollEndKey = null;
   playMode.pendingHumanMove = false;
@@ -2911,10 +3551,29 @@ session.on('Error', (msg) => {
     const code = pendingReconnectRoomCode;
     pendingReconnectRoomCode = '';
     playMode.rejoiningRoom = false;
+    if (/room not found/i.test(String(msg.message || ''))) {
+      pendingPlayTabReconnectRoomCode = '';
+      writeLastMultiplayerRoomCode('');
+      resetMultiplayerState('Room not found. Create a new room or ask for a fresh invite.');
+      showPlaySetupView();
+      return;
+    }
     showMultiplayerDisconnectModal(
       code,
       msg.message || 'Could not reconnect. Return to the lobby and try again.'
     );
+  }
+  if (
+    playMode.mode === 'multiplayer' &&
+    !playMode.active &&
+    /room not found/i.test(String(msg.message || ''))
+  ) {
+    pendingReconnectRoomCode = '';
+    pendingPlayTabReconnectRoomCode = '';
+    writeLastMultiplayerRoomCode('');
+    resetMultiplayerState('Room not found. Create a new room or ask for a fresh invite.');
+    showPlaySetupView();
+    return;
   }
   if (
     playMode.mode === 'multiplayer' &&
@@ -2938,8 +3597,10 @@ session.on('Error', (msg) => {
     if (save) save.disabled = false;
     setProfileStatus(msg.message, true);
   }
+  const retryPlayBotMove = playMode.pendingBotMoveAfterSearch && playSearchErrorCanRetry(msg.message);
   controls.onSearchError();
-  playMode.botThinking = false;
+  clearPlayBotThinking();
+  playMode.pendingBotMoveAfterSearch = false;
   playMode.forcedMoveKey = null;
   playMode.autoRollEndKey = null;
   playMode.pendingHumanMove = false;
@@ -2951,16 +3612,30 @@ session.on('Error', (msg) => {
   }
   setReplayStatus(msg.message);
   console.error('Server error:', msg.message);
+  if (retryPlayBotMove) {
+    playMode.pendingBotMoveAfterSearch = true;
+    resumePlayBotAutomationAfterSearchSettles();
+  }
 });
 
 session.on('Disconnected', (msg) => {
   suppressNextLiveMoveSound = true;
   loadingSharedReplaySlug = '';
-  controls.onSearchError();
-  playMode.botThinking = false;
-  playMode.forcedMoveKey = null;
-  playMode.autoRollEndKey = null;
-  playMode.pendingHumanMove = false;
+  const singleplayerWasActive = markSingleplayerSocketRecovery('disconnected', {
+    close_code: msg?.code,
+    close_reason: msg?.reason || '',
+    was_clean: msg?.was_clean,
+    last_message_age_ms: msg?.last_message_age_ms,
+    will_reconnect: msg?.will_reconnect,
+  });
+  if (!singleplayerWasActive) {
+    controls.onSearchError();
+    clearPlayBotThinking();
+    playMode.pendingBotMoveAfterSearch = false;
+    playMode.forcedMoveKey = null;
+    playMode.autoRollEndKey = null;
+    playMode.pendingHumanMove = false;
+  }
   updateMultiplayerTurnAttention();
   if (playMode.mode === 'multiplayer' && playMode.multiplayerRoom?.code && appStarted) {
     const code = normalizeRoomCode(playMode.multiplayerRoom.code);
@@ -2994,6 +3669,7 @@ session.on('Connected', () => {
   if (!guestMultiplayerMode() && (pendingSharedReplaySlug || currentSharedReplaySlugFromUrl() || readPendingSharedReplaySlug())) {
     maybeLoadSharedReplayFromUrl();
   }
+  recoverSingleplayerConnection('connected');
 });
 
 // ── View tabs / replay list ────────────────────────────────────────────────
@@ -3022,12 +3698,15 @@ function setTabState(tab) {
 
 function showPlayView() {
   hideMultiplayerAnalysisGuard();
-  if (reconnectMultiplayerRoomFromPlayTab()) return;
+  if (!playMode.active && reconnectMultiplayerRoomFromPlayTab()) return;
   if (!playMode.active) {
     showPlaySetupView();
     return;
   }
-  if (playBotActive()) {
+  controls.stopAutoplay();
+  controls._disableAutoSearch();
+  if (!playMode.botThinking) controls.pauseBeforeCommand();
+  if (playMode.active && playMode.mode !== 'multiplayer') {
     setServerSingleplayerHumanPlayer(playMode.humanPlayer);
   }
   activeView = 'play';
@@ -3038,8 +3717,6 @@ function showPlayView() {
   document.getElementById('play-setup-view').classList.add('hidden');
   document.getElementById('replay-view').classList.add('hidden');
   document.getElementById('controls').classList.remove('hidden');
-  controls.stopAutoplay();
-  controls._disableAutoSearch();
   controls.setOptionsAvailable(false);
   if (analysisState && (!playMultiplayerActive() || analysisState.state?.private_view)) {
     renderGameState(analysisState);
@@ -3195,6 +3872,7 @@ function showEditorView() {
 }
 
 function setGameHeaderLabelsVisible(visible) {
+  document.getElementById('action-panel-context')?.classList.toggle('hidden', !visible);
   document.getElementById('phase-label').classList.toggle('hidden', !visible);
   document.getElementById('turn-label').classList.toggle('hidden', !visible);
 }
@@ -3235,8 +3913,7 @@ function setEditorChrome(enabled) {
   document.getElementById('board-history-controls')?.classList.toggle('hidden', enabled);
   document.getElementById('board-resource-legend')?.classList.toggle('hidden', enabled);
   document.getElementById('resource-animation-layer')?.classList.toggle('hidden', enabled);
-  document.getElementById('phase-label').classList.toggle('hidden', enabled);
-  document.getElementById('turn-label').classList.toggle('hidden', enabled);
+  setGameHeaderLabelsVisible(!enabled);
   board.onTileClick = enabled ? handleEditorTileClick : null;
   board.onPortClick = enabled ? handleEditorPortClick : null;
 
@@ -3271,7 +3948,10 @@ function updateViewChrome(msg) {
   document.getElementById('guest-replay-analysis-panel')?.classList.toggle('hidden', !guestReplayLocked);
   document.getElementById('search-info')?.classList.toggle('hidden', guestReplayLocked);
   document.getElementById('analysis-bar-panel')?.classList.toggle('hidden', activeView === 'editor' || guestReplayLocked);
-  document.getElementById('board-resource-legend')?.classList.toggle('hidden', activeView === 'editor');
+  document.getElementById('board-resource-legend')?.classList.toggle(
+    'hidden',
+    activeView === 'editor' || multiplayerSpectatorActive()
+  );
   document.getElementById('board-piece-counts')?.classList.toggle('hidden', activeView === 'editor');
   document.getElementById('board-history-controls')?.classList.toggle('hidden', activeView === 'editor' || playMultiplayerActive());
   document.getElementById('resource-animation-layer')?.classList.toggle('hidden', activeView === 'editor');
@@ -3279,6 +3959,7 @@ function updateViewChrome(msg) {
   document.getElementById('search-action-control')?.classList.toggle('hidden', inPlay || guestReplayLocked);
   document.getElementById('budget-control')?.classList.toggle('hidden', inPlay || guestReplayLocked);
   updateMultiplayerResignButton();
+  updateSingleplayerResignButton();
 
   const botMove = document.getElementById('btn-bot-move');
   if (botMove) {
@@ -3309,16 +3990,20 @@ function startPlayGame() {
   playMode.active = true;
   playMode.mode = 'bot';
   playMode.humanPlayer = resolvedSingleplayerHumanPlayer();
-  playMode.botThinking = false;
+  clearPlayBotThinking();
+  playMode.pendingBotMoveAfterSearch = false;
+  playMode.singleplayerResigned = false;
   playMode.forcedMoveKey = null;
   playMode.autoRollEndKey = null;
   playMode.pendingHumanMove = false;
   playMode.multiplayerRoom = null;
   playMode.multiplayerStatus = '';
   playMode.rejoiningRoom = false;
+  resetSingleplayerRecoveryState();
   pendingNewGameSearch = false;
   controls.stopAutoplay();
   controls._disableAutoSearch();
+  controls.pauseBeforeCommand();
   document.getElementById('apply-toggle').checked = false;
   document.getElementById('autoplay-toggle').checked = false;
   document.getElementById('autosearch-toggle').checked = false;
@@ -3338,16 +4023,29 @@ function startPlayGame() {
 }
 
 function runPlayAutomation(msg) {
+  reconcilePlayBotThinking(msg);
+  if (playBotActive() && playMode.singleplayerNeedsRecovery) {
+    updateActionPanelStatus(msg, false);
+    recoverSingleplayerConnection('automation-waiting-for-recovery');
+    return;
+  }
+  if (playBotActive() && !session.connected) {
+    markSingleplayerNeedsRecovery('automation-disconnected');
+    updateActionPanelStatus(msg, false);
+    return;
+  }
   if (maybeAutoRollEnd(msg)) return;
   if (playMultiplayerActive()) {
-    playMode.botThinking = false;
+    clearPlayBotThinking();
+    playMode.pendingBotMoveAfterSearch = false;
     playMode.forcedMoveKey = null;
     updateActionPanelStatus(msg, false);
     return;
   }
   if (!isPlayBotTurn(msg)) {
     if (playViewActive() && (msg?.is_terminal || msg?.current_player === playMode.humanPlayer)) {
-      playMode.botThinking = false;
+      clearPlayBotThinking();
+      playMode.pendingBotMoveAfterSearch = false;
       playMode.forcedMoveKey = null;
     }
     updateActionPanelStatus(msg, false);
@@ -3356,21 +4054,53 @@ function runPlayAutomation(msg) {
   }
   updateActionPanelStatus(msg, true);
   if (Array.isArray(msg.legal_actions) && msg.legal_actions.length === 1) {
+    if (controls.searchRunning) {
+      playMode.pendingBotMoveAfterSearch = true;
+      controls.pauseSearch();
+      return;
+    }
     const action = msg.legal_actions[0].action;
     const key = playForcedMoveKey(msg, action);
     if (playMode.forcedMoveKey === key) return;
+    playMode.pendingBotMoveAfterSearch = false;
     playMode.forcedMoveKey = key;
-    playMode.botThinking = false;
+    clearPlayBotThinking();
     session.send({ type: 'PlayAction', action });
     return;
   }
   playMode.forcedMoveKey = null;
   if (playMode.botThinking) return;
-  playMode.botThinking = true;
+  if (controls.searchRunning) {
+    playMode.pendingBotMoveAfterSearch = true;
+    controls.pauseSearch();
+    return;
+  }
+  playMode.pendingBotMoveAfterSearch = false;
+  markPlayBotThinking(msg, 'bot-move');
   session.send({
     type: 'BotMove',
     budget: playDifficultyBudget(),
   });
+  controls.onSearchStarted();
+}
+
+function playSearchErrorCanRetry(message) {
+  if (!playBotActive() || activeView !== 'play' || !isPlayBotTurn(currentState)) return false;
+  const text = String(message || '');
+  return /no search is running/i.test(text) || /search is running; pause/i.test(text);
+}
+
+function resumePlayBotAutomationAfterSearchSettles() {
+  if (!playBotActive() || activeView !== 'play') return;
+  if (!playMode.pendingBotMoveAfterSearch) return;
+  if (!isPlayBotTurn(currentState) || playMode.botThinking) return;
+  window.setTimeout(() => {
+    if (!playBotActive() || activeView !== 'play') return;
+    if (!playMode.pendingBotMoveAfterSearch) return;
+    if (!isPlayBotTurn(currentState) || playMode.botThinking) return;
+    playMode.pendingBotMoveAfterSearch = false;
+    runPlayAutomation(currentState);
+  }, 0);
 }
 
 function runPlayPonderSearch(msg) {
@@ -3813,7 +4543,9 @@ function startEditedGame() {
   }
   pendingEditorStart = true;
   playMode.active = false;
-  playMode.botThinking = false;
+  clearPlayBotThinking();
+  playMode.pendingBotMoveAfterSearch = false;
+  playMode.singleplayerResigned = false;
   playMode.forcedMoveKey = null;
   playMode.autoRollEndKey = null;
   playMode.pendingHumanMove = false;
@@ -3844,6 +4576,8 @@ document.getElementById('btn-reconnect-multiplayer-room')?.addEventListener('cli
 document.getElementById('btn-copy-multiplayer-invite')?.addEventListener('click', copyMultiplayerInviteLink);
 document.getElementById('btn-refresh-multiplayer-lobby')?.addEventListener('click', requestMultiplayerLobby);
 document.getElementById('btn-resign-multiplayer')?.addEventListener('click', resignMultiplayerGame);
+document.getElementById('btn-resign-singleplayer')?.addEventListener('click', resignSingleplayerGame);
+document.getElementById('roll-badge')?.addEventListener('click', handleRollBadgeClick);
 document.getElementById('btn-add-opponent-time-0')?.addEventListener('click', addOpponentClockTime);
 document.getElementById('btn-add-opponent-time-1')?.addEventListener('click', addOpponentClockTime);
 document.getElementById('btn-close-replay-share-modal')?.addEventListener('click', hideReplayShareModal);
@@ -4013,8 +4747,16 @@ function updatePlayerPanel(idx, state) {
   const resourceCount = Number.isFinite(Number(pf.hand_total))
     ? Number(pf.hand_total)
     : (pf.hand ? pf.hand.reduce((sum, count) => sum + count, 0) : 0);
-  document.getElementById(`p${idx}-card-count`).textContent =
-    `${resourceCount} ${resourceCount === 1 ? 'Card' : 'Cards'}`;
+  const cardCountEl = document.getElementById(`p${idx}-card-count`);
+  const discardThreshold = Number.isFinite(Number(state.discard_threshold))
+    ? Number(state.discard_threshold)
+    : DEFAULT_DISCARD_THRESHOLD;
+  const overDiscardLimit = resourceCount > discardThreshold;
+  cardCountEl.textContent = `${resourceCount} ${resourceCount === 1 ? 'Card' : 'Cards'}`;
+  cardCountEl.classList.toggle('discard-limit-warning', overDiscardLimit);
+  cardCountEl.title = overDiscardLimit
+    ? `Over discard limit (${discardThreshold})`
+    : 'Total resource cards';
 
   // VP
   updateVictoryBadge(idx, pf);
@@ -4022,7 +4764,9 @@ function updatePlayerPanel(idx, state) {
   // Hand — always show all 5 resources as colored rectangles
   const handEl = document.getElementById(`p${idx}-hand`);
   handEl.innerHTML = '';
-  const hideResourceBreakdown = playViewActive() && idx !== playMode.humanPlayer;
+  const hideResourceBreakdown = playViewActive() && (
+    multiplayerSpectatorActive() || idx !== playMode.humanPlayer
+  );
   if (!hideResourceBreakdown) {
     for (let r = 0; r < 5; r++) {
       const card = document.createElement('span');
@@ -4035,7 +4779,9 @@ function updatePlayerPanel(idx, state) {
   // Dev cards
   const devEl = document.getElementById(`p${idx}-dev`);
   devEl.innerHTML = '';
-  const hideDevBreakdown = playViewActive() && idx !== playMode.humanPlayer;
+  const hideDevBreakdown = playViewActive() && (
+    multiplayerSpectatorActive() || idx !== playMode.humanPlayer
+  );
   if (hideDevBreakdown) {
     const visibleDevCards = pf.dev_cards ? pf.dev_cards.reduce((sum, count) => sum + count, 0) : 0;
     const hiddenDevCards = pf.hidden_dev_cards || 0;
@@ -4109,6 +4855,9 @@ function publicVictoryPoints(playerFrame) {
 
 function formatVictoryPoints(playerIndex, publicVp, totalVp) {
   const revealFinalScore = !!currentState?.is_terminal || multiplayerWinner() != null;
+  if (multiplayerSpectatorActive() && !revealFinalScore) {
+    return String(publicVp);
+  }
   if (playViewActive() && playerIndex !== playMode.humanPlayer && !revealFinalScore) {
     return String(publicVp);
   }
@@ -4118,6 +4867,11 @@ function formatVictoryPoints(playerIndex, publicVp, totalVp) {
 function updateBoardResourceLegend(msg, state) {
   const legend = document.getElementById('board-resource-legend');
   if (!legend || !state?.frame?.players) return;
+  if (multiplayerSpectatorActive()) {
+    legend.classList.add('hidden');
+    return;
+  }
+  legend.classList.remove('hidden');
 
   const playerIndex = playViewActive()
     ? playMode.humanPlayer
@@ -4155,7 +4909,9 @@ function updateBoardPieceCounts(msg, state, canUseLegalActions = false) {
   const panel = document.getElementById('board-piece-counts');
   if (!panel || !state?.frame?.buildings) return;
 
-  const playerIndex = playViewActive()
+  const playerIndex = multiplayerSpectatorActive()
+    ? (msg.current_player === 0 || msg.current_player === 1 ? msg.current_player : 0)
+    : playViewActive()
     ? playMode.humanPlayer
     : (msg.current_player === 0 || msg.current_player === 1 ? msg.current_player : 0);
   const buildings = state.frame.buildings[playerIndex];
@@ -4372,9 +5128,48 @@ document.addEventListener('keydown', (e) => {
 // ── Start ────────────────────────────────────────────────────────────
 
 let appStarted = false;
+let lastSocketAuthKey = '';
+
+function currentAuthUserId() {
+  const clerk = window.Clerk;
+  return String(clerk?.user?.id || clerk?.session?.user?.id || '')
+    .replace(/[\u0000-\u001f\u007f]/g, '')
+    .trim()
+    .slice(0, 128);
+}
+
+function currentSocketAuthKey() {
+  if (window.hexfishAuthSignedIn === true) {
+    const username = typeof window.hexfishAuthUsername === 'function'
+      ? window.hexfishAuthUsername()
+      : window.hexfishUsername;
+    return `signed-in:${currentAuthUserId() || 'unknown'}:${normalizeProfileUsername(username)}`;
+  }
+  if (guestSharedReplayMode()) {
+    return `guest:replay:${normalizeReplaySlug(window.hexfishGuestReplaySlug || currentSharedReplaySlugFromUrl())}`;
+  }
+  if (guestMultiplayerMode()) {
+    return `guest:room:${normalizeRoomCode(window.hexfishGuestRoomCode || initialUrlRoomCode)}`;
+  }
+  return 'signed-out';
+}
+
+function authKeyFromEvent(event) {
+  return String(event?.detail?.auth_key || window.hexfishAuthKey || currentSocketAuthKey());
+}
+
+function logSkippedDuplicateAuth(reason, authKey) {
+  console.debug('HexFish auth event skipped duplicate', {
+    reason,
+    auth_key: authKey,
+    app_started: appStarted,
+    connected: session.connected,
+  });
+}
 
 window.hexfishStartApp = () => {
   if (appStarted) return;
+  if (!lastSocketAuthKey) lastSocketAuthKey = currentSocketAuthKey();
   appStarted = true;
   if (guestMultiplayerMode()) enterGuestPlayMode();
   else syncGuestUiState();
@@ -4390,46 +5185,87 @@ window.hexfishStartApp = () => {
   }
 };
 
-window.hexfishStopApp = () => {
+window.hexfishStopApp = (options = {}) => {
   if (!appStarted) return;
   appStarted = false;
-  session.disconnect();
+  session.disconnect(options);
 };
 
-function startOrReconnectForAuthChange() {
+function startOrReconnectForAuthChange(options = {}) {
+  const reason = options.reason || 'auth changed';
+  const nextAuthKey = String(options.authKey || currentSocketAuthKey());
+  if (lastSocketAuthKey === nextAuthKey) {
+    logSkippedDuplicateAuth(reason, nextAuthKey);
+    if (!appStarted) {
+      window.hexfishStartApp();
+    } else if (!session.connected) {
+      session.connect();
+    }
+    return false;
+  }
+  const previousAuthKey = lastSocketAuthKey;
+  lastSocketAuthKey = nextAuthKey;
+  console.debug('HexFish auth changed; reconnecting WebSocket if needed', {
+    reason,
+    previous_auth_key: previousAuthKey,
+    auth_key: nextAuthKey,
+    app_started: appStarted,
+    connected: session.connected,
+  });
   if (!appStarted) {
     window.hexfishStartApp();
-    return;
+    return true;
   }
-  session.disconnect();
+  markSingleplayerSocketRecovery('auth-reconnect');
+  session.disconnect({
+    code: APP_WEBSOCKET_AUTH_CHANGED_CLOSE_CODE,
+    reason: 'auth changed',
+  });
   session.connect();
   if (activeView === 'play' || activeView === 'play-setup') requestMultiplayerLobby();
   if (activeView === 'replay-list') requestReplayList();
+  return true;
 }
 
-document.addEventListener('hexfish-auth-signed-in', () => {
+document.addEventListener('hexfish-auth-signed-in', (event) => {
   syncProfileUsernameFromClerk();
   syncGuestUiState();
   updateProfileUi();
   maybePromptForProfileUsername();
-  startOrReconnectForAuthChange();
+  startOrReconnectForAuthChange({
+    authKey: authKeyFromEvent(event),
+    reason: 'signed-in',
+  });
 });
-document.addEventListener('hexfish-auth-guest', () => {
+document.addEventListener('hexfish-auth-guest', (event) => {
   setProfileUsername('');
   if (guestMultiplayerMode()) enterGuestPlayMode();
   else syncGuestUiState();
   updateProfileUi();
-  window.hexfishStartApp();
+  startOrReconnectForAuthChange({
+    authKey: authKeyFromEvent(event),
+    reason: 'guest',
+  });
 });
-document.addEventListener('hexfish-auth-signed-out', () => {
+document.addEventListener('hexfish-auth-signed-out', (event) => {
+  const nextAuthKey = authKeyFromEvent(event);
+  if (lastSocketAuthKey === nextAuthKey && !appStarted) {
+    logSkippedDuplicateAuth('signed-out', nextAuthKey);
+    return;
+  }
+  lastSocketAuthKey = nextAuthKey;
   stopProfileUsernameSyncPolling();
   setProfileUsername('');
   syncGuestUiState();
   updateProfileUi();
-  window.hexfishStopApp();
+  window.hexfishStopApp({
+    code: APP_WEBSOCKET_APP_STOPPED_CLOSE_CODE,
+    reason: 'app stopped',
+  });
 });
 
 window.setInterval(requestActiveMultiplayerRoomSync, MULTIPLAYER_ROOM_SYNC_MS);
+window.setInterval(checkPlayBotWatchdog, PLAY_BOT_WATCHDOG_INTERVAL_MS);
 
 if (window.hexfishAuthSignedIn || guestMode()) {
   window.hexfishStartApp();

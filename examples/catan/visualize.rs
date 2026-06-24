@@ -74,6 +74,13 @@ pub struct BuildingsFrame {
     roads: Vec<u8>,
 }
 
+#[derive(Clone, Copy)]
+enum FramePerspective {
+    Full,
+    Player(Player),
+    Spectator,
+}
+
 // ─── Coordinate math ─────────────────────────────────────────────────────────
 
 const HEX_SIZE: f64 = 50.0;
@@ -237,6 +244,26 @@ fn private_player_frame(state: &GameState, pid: Player, perspective: Player) -> 
     }
 }
 
+fn spectator_player_frame(state: &GameState, pid: Player) -> PlayerFrame {
+    let ps = &state.players[pid];
+    let known_dev_cards: u8 = ps.dev_cards.0.iter().sum();
+    let reveal_score = matches!(state.phase, Phase::GameOver(_));
+    PlayerFrame {
+        hand: [0; 5],
+        hand_total: ps.hand.total(),
+        vp: if reveal_score {
+            state.total_vps(pid)
+        } else {
+            state.public_vps(pid)
+        },
+        dev_cards: [0; 5],
+        dev_cards_bought_this_turn: [0; 5],
+        hidden_dev_cards: known_dev_cards + ps.hidden_dev_cards,
+        knights: ps.knights_played,
+        trade_ratios: ps.trade_ratios,
+    }
+}
+
 fn buildings_frame(state: &GameState, pid: Player) -> BuildingsFrame {
     BuildingsFrame {
         settlements: bits_to_vec(state.boards[pid].settlements),
@@ -252,12 +279,49 @@ pub fn capture_frame_with_perspective(
     last_roll: Option<u8>,
     perspective: Option<Player>,
 ) -> ReplayFrame {
+    capture_frame(
+        state,
+        action,
+        player,
+        last_roll,
+        perspective
+            .map(FramePerspective::Player)
+            .unwrap_or(FramePerspective::Full),
+    )
+}
+
+pub fn capture_frame_for_spectator(
+    state: &GameState,
+    action: &str,
+    player: u8,
+    last_roll: Option<u8>,
+) -> ReplayFrame {
+    capture_frame(
+        state,
+        action,
+        player,
+        last_roll,
+        FramePerspective::Spectator,
+    )
+}
+
+fn capture_frame(
+    state: &GameState,
+    action: &str,
+    player: u8,
+    last_roll: Option<u8>,
+    perspective: FramePerspective,
+) -> ReplayFrame {
     let players = match perspective {
-        Some(perspective) => [
+        FramePerspective::Player(perspective) => [
             private_player_frame(state, Player::One, perspective),
             private_player_frame(state, Player::Two, perspective),
         ],
-        None => [
+        FramePerspective::Spectator => [
+            spectator_player_frame(state, Player::One),
+            spectator_player_frame(state, Player::Two),
+        ],
+        FramePerspective::Full => [
             player_frame(state, Player::One),
             player_frame(state, Player::Two),
         ],
@@ -277,7 +341,10 @@ pub fn capture_frame_with_perspective(
         ],
         longest_road: state.longest_road.map(|(p, len)| [p as u8, len]),
         largest_army: state.largest_army.map(|(p, cnt)| [p as u8, cnt]),
-        dev_pool: if perspective.is_some() {
+        dev_pool: if matches!(
+            perspective,
+            FramePerspective::Player(_) | FramePerspective::Spectator
+        ) {
             [0; 5]
         } else {
             state.unknown_dev_pool()

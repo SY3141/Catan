@@ -410,7 +410,10 @@ fn canonical_discard_batch(
         out.push(next);
     }
 
-    counts.iter().all(|&count| count == 0).then_some((out, trial))
+    counts
+        .iter()
+        .all(|&count| count == 0)
+        .then_some((out, trial))
 }
 
 fn apply_if_replay_legal(state: &mut GameState, action: usize) -> bool {
@@ -1188,6 +1191,41 @@ mod tests {
         assert!(
             human.contains(&lumber) && human.contains(&brick) && human.contains(&wool),
             "human discard should include every resource currently held"
+        );
+    }
+
+    #[test]
+    fn human_discard_actions_ignore_suffix_pruning() {
+        let mut state = make_state();
+        state.players[Player::One].hand = ResourceArray::new(7, 0, 2, 1, 1);
+        state.phase = Phase::Discard {
+            player: Player::One,
+            remaining: 5,
+            roller: Player::Two,
+            min_resource: 0,
+        };
+
+        let lumber = discard_id(Resource::Lumber);
+        let wool = discard_id(Resource::Wool);
+        let grain = discard_id(Resource::Grain);
+        let ore = discard_id(Resource::Ore);
+
+        let mut canonical = Vec::new();
+        legal_actions(&state, &mut canonical);
+        let mut human = Vec::new();
+        human_legal_actions(&state, &mut human);
+
+        assert_eq!(
+            canonical,
+            vec![lumber],
+            "canonical discard should prune resources that cannot finish in sorted order"
+        );
+        assert!(
+            human.contains(&lumber)
+                && human.contains(&wool)
+                && human.contains(&grain)
+                && human.contains(&ore),
+            "human discard should include every held resource despite search suffix pruning"
         );
     }
 

@@ -19,6 +19,14 @@ pub trait GamePresenter<G: Game>: Send + Sync {
         self.serialize_state(state)
     }
 
+    /// Serialize state for a read-only spectator perspective.
+    ///
+    /// Defaults to the full analysis view. Games with private information should
+    /// override this to hide every player's hidden hand/card data.
+    fn serialize_state_for_spectator(&self, state: &G) -> serde_json::Value {
+        self.serialize_state(state)
+    }
+
     /// Human-readable label for an action in the given state (includes player prefix).
     fn action_label(&self, state: &G, action: usize) -> String;
 
@@ -30,9 +38,28 @@ pub trait GamePresenter<G: Game>: Send + Sync {
         state.legal_actions(actions);
     }
 
+    /// Whether a saved replay action is accepted for compatibility.
+    ///
+    /// Defaults to the human-facing legal action set. Games with historical
+    /// UI rule changes may override this to load old logs without changing
+    /// live-play or search legality.
+    fn is_replay_action_legal(&self, state: &G, action: usize) -> bool {
+        let mut actions = Vec::new();
+        self.human_legal_actions(state, &mut actions);
+        actions.contains(&action)
+    }
+
     /// Game-specific actions that should not be undone in singleplayer.
     fn is_singleplayer_undo_barrier(&self, _state: &G, _action: usize) -> bool {
         false
+    }
+
+    /// Resign a singleplayer game for the given player index.
+    ///
+    /// Games that support singleplayer resignation should mutate `state` to a
+    /// terminal position where the opponent has won.
+    fn resign(&self, _state: &mut G, _player: usize) -> Result<(), String> {
+        Err("This game does not support resignation".into())
     }
 
     /// Action description without player prefix (for tree explorer where
@@ -63,6 +90,20 @@ pub trait GamePresenter<G: Game>: Send + Sync {
         _is_chance: bool,
         label: &str,
         _player: usize,
+    ) -> String {
+        label.to_string()
+    }
+
+    /// Redact or rewrite an existing game-log label for spectators.
+    ///
+    /// Defaults to the full analysis/replay label. Multiplayer presenters with
+    /// private information can hide all player-only card identities here.
+    fn action_log_label_for_spectator(
+        &self,
+        _state: &G,
+        _action: usize,
+        _is_chance: bool,
+        label: &str,
     ) -> String {
         label.to_string()
     }

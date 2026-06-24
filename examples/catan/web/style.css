@@ -15,6 +15,38 @@
   display: none !important;
 }
 
+.log-discard-summary {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.log-discard-toggle {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  border: 1px solid #374151;
+  border-radius: 4px;
+  background: #1a1a2e;
+  color: currentColor;
+  font-size: 10px;
+  line-height: 14px;
+  text-align: center;
+  cursor: pointer;
+}
+
+.log-discard-toggle:hover,
+.log-discard-toggle:focus-visible {
+  border-color: #6b7280;
+  background: #22223a;
+  outline: none;
+}
+
+.log-discard-child {
+  margin-left: 20px;
+  opacity: 0.9;
+}
+
 .auth-active {
   min-height: 100vh;
   overflow: auto;
@@ -326,6 +358,15 @@
   border-color: #e94560 !important;
 }
 
+.player-card .discard-limit-warning {
+  color: #fecaca !important;
+  background: rgba(185, 28, 28, 0.55);
+  border: 1px solid rgba(248, 113, 113, 0.85);
+  border-radius: 3px;
+  padding: 1px 4px;
+  font-weight: 700;
+}
+
 .player-card-header {
   min-height: 22px;
   padding-right: 30px;
@@ -629,7 +670,8 @@
 }
 
 .piece-rules-button,
-.board-sound-button {
+.board-sound-button,
+.board-spectator-button {
   position: relative;
   box-sizing: border-box;
   width: 48px;
@@ -649,13 +691,16 @@
 .piece-rules-button:hover,
 .piece-rules-button.active,
 .board-sound-button:hover,
-.board-sound-button.active {
+.board-sound-button.active,
+.board-spectator-button:hover,
+.board-spectator-button.active {
   border-color: #fbbf24;
   color: #fbbf24;
 }
 
 .piece-rules-button:focus-visible,
-.board-sound-button:focus-visible {
+.board-sound-button:focus-visible,
+.board-spectator-button:focus-visible {
   outline: 2px solid #e94560;
   outline-offset: 2px;
 }
@@ -734,6 +779,67 @@
   border-top: 2px solid currentColor;
   border-radius: 0;
   transform: rotate(-42deg);
+}
+
+.board-spectator-button.hidden {
+  display: none;
+}
+
+.board-spectator-button::after {
+  content: attr(data-spectators);
+  position: absolute;
+  z-index: 12;
+  top: 50%;
+  left: calc(100% + 8px);
+  width: max-content;
+  max-width: 220px;
+  border: 1px solid #374151;
+  border-radius: 5px;
+  background: rgba(15, 52, 96, 0.97);
+  color: #e5e7eb;
+  padding: 6px 8px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  line-height: 1.25;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.32);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-50%);
+  transition: opacity 0.12s ease;
+}
+
+.board-spectator-button:hover::after,
+.board-spectator-button:focus-visible::after {
+  opacity: 1;
+}
+
+.spectator-eye-icon {
+  position: relative;
+  width: 18px;
+  height: 12px;
+  border: 1.5px solid currentColor;
+  border-radius: 50%;
+}
+
+.spectator-eye-icon::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: currentColor;
+  transform: translate(-50%, -50%);
+}
+
+.spectator-count {
+  position: absolute;
+  right: 4px;
+  bottom: 2px;
+  font-size: 0.58rem;
+  font-weight: 800;
+  line-height: 1;
 }
 
 .catan-rules-popover {
@@ -1072,6 +1178,7 @@
 }
 
 .roll-badge {
+  appearance: none;
   position: absolute;
   right: 0;
   bottom: 0;
@@ -1087,12 +1194,73 @@
   color: #ffffff;
   font-size: 2.7rem;
   font-weight: 800;
+  font-family: inherit;
+  line-height: 1;
+  padding: 0;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+  pointer-events: none;
+}
+
+.roll-badge.roll-badge-action {
+  cursor: pointer;
+  pointer-events: auto;
+  animation: roll-badge-ready 1.9s ease-in-out infinite;
+}
+
+.roll-badge.roll-badge-action:hover {
+  border-color: #ffffff;
+}
+
+.roll-badge:focus-visible {
+  outline: 3px solid #fbbf24;
+  outline-offset: 4px;
+}
+
+.roll-badge:disabled {
+  cursor: default;
   pointer-events: none;
 }
 
 .roll-badge.hidden {
   display: none;
+}
+
+@keyframes roll-badge-ready {
+  0%, 100% {
+    box-shadow:
+      0 8px 24px rgba(0, 0, 0, 0.28),
+      0 0 0 0 rgba(251, 191, 36, 0.22);
+    outline: 2px solid rgba(251, 191, 36, 0.35);
+    outline-offset: 2px;
+  }
+  50% {
+    box-shadow:
+      0 8px 24px rgba(0, 0, 0, 0.28),
+      0 0 0 8px rgba(251, 191, 36, 0.42);
+    outline: 2px solid rgba(251, 191, 36, 0.92);
+    outline-offset: 6px;
+  }
+}
+
+.robber-action-overlay {
+  animation: robber-action-ready 1.9s ease-in-out infinite;
+}
+
+.robber-action-overlay:hover {
+  stroke: rgba(255, 255, 255, 0.95);
+}
+
+@keyframes robber-action-ready {
+  0%, 100% {
+    stroke: rgba(251, 191, 36, 0.45);
+    stroke-width: 2;
+    filter: drop-shadow(0 0 0 rgba(251, 191, 36, 0));
+  }
+  50% {
+    stroke: rgba(251, 191, 36, 0.95);
+    stroke-width: 5;
+    filter: drop-shadow(0 0 6px rgba(251, 191, 36, 0.65));
+  }
 }
 
 #board-shell {

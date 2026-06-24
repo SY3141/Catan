@@ -68,6 +68,14 @@ pub struct MultiplayerPlayer {
     pub clock_active: bool,
 }
 
+/// Spectator summary for an invite-code multiplayer room.
+#[derive(Clone, Debug, Serialize)]
+pub struct MultiplayerSpectator {
+    pub you: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
 /// Public lobby summary for an invite-code multiplayer room.
 #[derive(Clone, Debug, Serialize)]
 pub struct MultiplayerLobbyRoom {
@@ -75,10 +83,13 @@ pub struct MultiplayerLobbyRoom {
     pub status: String,
     pub occupied: u8,
     pub connected: u8,
+    pub spectator_count: u8,
     pub is_public: bool,
     pub time_minutes: Option<u32>,
     pub increment_seconds: Option<u32>,
     pub last_activity_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub empty_room_closes_at_ms: Option<u64>,
 }
 
 /// Which board state a read-only analysis request should run against.
@@ -167,6 +178,8 @@ pub enum ClientMsg {
     SetReplayCursor { cursor: usize },
     /// Human plays an action.
     PlayAction { action: usize },
+    /// Resign the current singleplayer game and award the win to the opponent.
+    ResignGame,
     /// Create an invite-code multiplayer room.
     CreateMultiplayerRoom {
         preferred_player: Option<u8>,
@@ -280,8 +293,10 @@ pub enum ServerMsg {
     MultiplayerRoom {
         code: String,
         status: String,
+        viewer_role: String,
         local_player: Option<u8>,
         players: Vec<MultiplayerPlayer>,
+        spectators: Vec<MultiplayerSpectator>,
         time_minutes: Option<u32>,
         increment_seconds: Option<u32>,
         winner: Option<u8>,

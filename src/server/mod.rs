@@ -8,26 +8,27 @@ pub use session::GameSession;
 pub use traits::GamePresenter;
 
 use std::{
-    collections::{hash_map::DefaultHasher, HashMap},
+    collections::{HashMap, hash_map::DefaultHasher},
     env,
     hash::{Hash, Hasher},
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex as StdMutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
+    time::{Duration, Instant},
 };
 
 use axum::{
+    Router,
     extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
         Path,
+        ws::{Message, WebSocket, WebSocketUpgrade},
     },
     response::Redirect,
-    Router,
 };
 use futures_util::FutureExt;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tokio_postgres::Row;
 use tower_http::services::ServeDir;
 
@@ -35,11 +36,14 @@ use crate::eval::Evaluator;
 use crate::game::Game;
 use crate::game_log::GameLog;
 use crate::mcts::Config;
-use protocol::{MultiplayerLobbyRoom, MultiplayerPlayer, ReplayEntry, ViewTarget};
+use protocol::{
+    MultiplayerLobbyRoom, MultiplayerPlayer, MultiplayerSpectator, ReplayEntry, ViewTarget,
+};
 use redis_multiplayer::{ActiveRedisMultiplayerRoom, RedisMultiplayerRoomStore};
 
 /// Send a progress snapshot every N simulations.
 const PROGRESS_INTERVAL: u32 = 100;
+const SEARCH_PROGRESS_KEEPALIVE_MS: u64 = 5_000;
 const SEARCH_INTERRUPT_INTERVAL: u32 = 8;
 const MULTIPLAYER_ANALYSIS_SIMS: u32 = 200;
 const MULTIPLAYER_EMPTY_ROOM_GRACE_MS: u64 = 5 * 60_000;
@@ -179,19 +183,6 @@ impl ReplayStore {
             .map(Self::Postgres)
     }
 
-    async fn save(
-        &self,
-        account_key: &str,
-        session_id: u64,
-        counter: u64,
-        log: &GameLog,
-    ) -> Result<ReplayEntry, String> {
-        match self {
-            Self::File(store) => store.save(account_key, session_id, counter, log),
-            Self::Postgres(store) => store.save(account_key, log).await,
-        }
-    }
-
     async fn save_with_result(
         &self,
         account_key: &str,
@@ -257,16 +248,6 @@ struct FileReplayStore {
 impl FileReplayStore {
     fn new(root: PathBuf) -> Self {
         Self { root }
-    }
-
-    fn save(
-        &self,
-        account_key: &str,
-        session_id: u64,
-        counter: u64,
-        log: &GameLog,
-    ) -> Result<ReplayEntry, String> {
-        self.save_with_result(account_key, session_id, counter, log, None)
     }
 
     fn save_with_result(
@@ -515,10 +496,6 @@ impl PostgresReplayStore {
             )
             .await
             .map_err(|e| format!("failed to initialize Postgres replay schema: {e}"))
-    }
-
-    async fn save(&self, account_key: &str, log: &GameLog) -> Result<ReplayEntry, String> {
-        self.save_with_result(account_key, log, None).await
     }
 
     async fn save_with_result(
@@ -978,9 +955,33 @@ struct SeatOwner {
     display_name: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MultiplayerViewer {
+    Player(usize),
+    Spectator,
+}
+
+impl MultiplayerViewer {
+    fn player(self) -> Option<usize> {
+        match self {
+            Self::Player(player) => Some(player),
+            Self::Spectator => None,
+        }
+    }
+
+    fn role_name(self) -> &'static str {
+        match self {
+            Self::Player(_) => "player",
+            Self::Spectator => "spectator",
+        }
+    }
+}
+
+#[derive(Clone)]
 struct MultiplayerSocket {
     user_id: String,
-    player: usize,
+    display_name: Option<String>,
+    viewer: MultiplayerViewer,
     tx: mpsc::UnboundedSender<String>,
 }
 
@@ -1121,7 +1122,7 @@ impl<G: Game + 'static> MultiplayerRoom<G> {
         }
     }
 
-    fn assign_or_find_seat(&self, owner: SeatOwner) -> Result<usize, String> {
+    fn assign_or_find_viewer(&self, owner: SeatOwner) -> MultiplayerViewer {
         let mut seats = self.seats.lock().expect("room seats lock poisoned");
         if let Some(player) = seats.iter().position(|seat| {
             seat.as_ref()
@@ -1131,38 +1132,43 @@ impl<G: Game + 'static> MultiplayerRoom<G> {
                 seats[player] = Some(owner);
                 self.touch();
             }
-            return Ok(player);
+            return MultiplayerViewer::Player(player);
         }
         if let Some(player) = seats.iter().position(Option::is_none) {
             seats[player] = Some(owner);
             self.touch();
-            return Ok(player);
+            return MultiplayerViewer::Player(player);
         }
-        Err("Room is full".into())
+        MultiplayerViewer::Spectator
     }
 
     fn register_socket(
         &self,
         user_id: &str,
+        display_name: Option<&str>,
+        viewer: MultiplayerViewer,
         tx: mpsc::UnboundedSender<String>,
-    ) -> Result<(u64, usize), String> {
-        let player = self
-            .seat_for_user(user_id)
-            .ok_or_else(|| "You are not seated in this room".to_string())?;
+    ) -> Result<u64, String> {
+        if let Some(player) = viewer.player() {
+            if self.seat_for_user(user_id) != Some(player) {
+                return Err("You are not seated in this room".to_string());
+            }
+        }
         let socket_id = self.next_socket_id.fetch_add(1, Ordering::Relaxed);
         let mut sockets = self.sockets.lock().expect("room sockets lock poisoned");
-        sockets.retain(|_, socket| !(socket.user_id == user_id && socket.player == player));
+        sockets.retain(|_, socket| socket.user_id != user_id);
         sockets.insert(
             socket_id,
             MultiplayerSocket {
                 user_id: user_id.to_string(),
-                player,
+                display_name: display_name.map(str::to_string),
+                viewer,
                 tx,
             },
         );
         drop(sockets);
         self.touch();
-        Ok((socket_id, player))
+        Ok(socket_id)
     }
 
     fn socket_registered(&self, socket_id: u64) -> bool {
@@ -1204,7 +1210,11 @@ impl<G: Game + 'static> MultiplayerRoom<G> {
             .all(Option::is_some)
     }
 
-    fn room_msg_for_player(&self, local_player: Option<usize>) -> ServerMsg {
+    fn room_msg_for_viewer(
+        &self,
+        viewer: MultiplayerViewer,
+        local_socket_id: Option<u64>,
+    ) -> ServerMsg {
         let seats = self.seats.lock().expect("room seats lock poisoned");
         let sockets = self.sockets.lock().expect("room sockets lock poisoned");
         let clock = self.clock_snapshot();
@@ -1220,20 +1230,30 @@ impl<G: Game + 'static> MultiplayerRoom<G> {
         let players = (0..2)
             .map(|player| {
                 let connected = occupied[player].map_or(false, |user_id| {
-                    sockets
-                        .values()
-                        .any(|socket| socket.user_id == user_id && socket.player == player)
+                    sockets.values().any(|socket| {
+                        socket.user_id == user_id
+                            && socket.viewer == MultiplayerViewer::Player(player)
+                    })
                 });
                 MultiplayerPlayer {
                     occupied: occupied[player].is_some(),
                     connected,
-                    you: local_player == Some(player),
+                    you: viewer == MultiplayerViewer::Player(player),
                     name: seats[player]
                         .as_ref()
                         .and_then(|seat| seat.display_name.clone()),
                     time_millis: clock.time_millis[player],
                     clock_active: clock.active_player == Some(player),
                 }
+            })
+            .collect::<Vec<_>>();
+        let spectators = sockets
+            .iter()
+            .filter_map(|(socket_id, socket)| {
+                (socket.viewer == MultiplayerViewer::Spectator).then(|| MultiplayerSpectator {
+                    you: local_socket_id == Some(*socket_id),
+                    name: socket.display_name.clone(),
+                })
             })
             .collect::<Vec<_>>();
         let status = if outcome.is_some() || clock.winner.is_some() {
@@ -1246,14 +1266,28 @@ impl<G: Game + 'static> MultiplayerRoom<G> {
         ServerMsg::MultiplayerRoom {
             code: self.code.clone(),
             status: status.into(),
-            local_player: local_player.map(|player| player as u8),
+            viewer_role: viewer.role_name().into(),
+            local_player: viewer.player().map(|player| player as u8),
             players,
+            spectators,
             time_minutes: self.time_minutes,
             increment_seconds: self.increment_seconds,
             winner: winner.map(|player| player as u8),
             finish_reason: outcome.as_ref().map(|outcome| outcome.reason.clone()),
             replay_share_slug: outcome.and_then(|outcome| outcome.replay_share_slug),
         }
+    }
+
+    #[cfg(test)]
+    fn room_msg_for_player(&self, local_player: Option<usize>) -> ServerMsg {
+        let viewer = local_player
+            .map(MultiplayerViewer::Player)
+            .unwrap_or(MultiplayerViewer::Spectator);
+        self.room_msg_for_viewer(viewer, None)
+    }
+
+    fn room_msg_for_active(&self, active: &ActiveMultiplayerRoom<G>) -> ServerMsg {
+        self.room_msg_for_viewer(active.viewer, Some(active.socket_id))
     }
 
     fn lobby_entry(&self) -> MultiplayerLobbyRoom {
@@ -1269,13 +1303,16 @@ impl<G: Game + 'static> MultiplayerRoom<G> {
             let Some(user_id) = user_id else {
                 continue;
             };
-            if sockets
-                .values()
-                .any(|socket| socket.user_id == *user_id && socket.player == player)
-            {
+            if sockets.values().any(|socket| {
+                socket.user_id == *user_id && socket.viewer == MultiplayerViewer::Player(player)
+            }) {
                 connected_count += 1;
             }
         }
+        let spectator_count = sockets
+            .values()
+            .filter(|socket| socket.viewer == MultiplayerViewer::Spectator)
+            .count() as u8;
         let status = if self.outcome_snapshot().is_some() {
             "finished"
         } else if occupied_count == 2 {
@@ -1283,15 +1320,20 @@ impl<G: Game + 'static> MultiplayerRoom<G> {
         } else {
             "waiting"
         };
+        let last_activity_ms = self.last_activity_ms.load(Ordering::Relaxed);
         MultiplayerLobbyRoom {
             code: self.code.clone(),
             status: status.into(),
             occupied: occupied_count,
             connected: connected_count,
+            spectator_count,
             is_public: self.is_public,
             time_minutes: self.time_minutes,
             increment_seconds: self.increment_seconds,
-            last_activity_ms: self.last_activity_ms.load(Ordering::Relaxed),
+            last_activity_ms,
+            empty_room_closes_at_ms: sockets
+                .is_empty()
+                .then_some(last_activity_ms.saturating_add(MULTIPLAYER_EMPTY_ROOM_GRACE_MS)),
         }
     }
 
@@ -1299,6 +1341,7 @@ impl<G: Game + 'static> MultiplayerRoom<G> {
         ServerMsg::MultiplayerRoom {
             code: String::new(),
             status: "left".into(),
+            viewer_role: "player".into(),
             local_player: None,
             players: vec![
                 MultiplayerPlayer {
@@ -1318,6 +1361,7 @@ impl<G: Game + 'static> MultiplayerRoom<G> {
                     clock_active: false,
                 },
             ],
+            spectators: Vec::new(),
             time_minutes: None,
             increment_seconds: None,
             winner: None,
@@ -1473,12 +1517,8 @@ impl<G: Game + 'static> MultiplayerRoom<G> {
     }
 
     fn broadcast_room_info_except(&self, excluded_socket_id: Option<u64>) {
-        let by_player = [
-            serde_json::to_string(&self.room_msg_for_player(Some(0))).ok(),
-            serde_json::to_string(&self.room_msg_for_player(Some(1))).ok(),
-        ];
-        self.broadcast_with(excluded_socket_id, |_room, player| {
-            by_player[player].clone()
+        self.broadcast_with(excluded_socket_id, |room, socket_id, socket| {
+            serde_json::to_string(&room.room_msg_for_viewer(socket.viewer, Some(socket_id))).ok()
         });
     }
 
@@ -1487,31 +1527,50 @@ impl<G: Game + 'static> MultiplayerRoom<G> {
             serde_json::to_string(&session.state_msg_for_player(0)).ok(),
             serde_json::to_string(&session.state_msg_for_player(1)).ok(),
         ];
-        self.broadcast_with(excluded_socket_id, |_room, player| {
-            by_player[player].clone()
-        });
+        let spectator = serde_json::to_string(&session.state_msg_for_spectator()).ok();
+        self.broadcast_with(
+            excluded_socket_id,
+            |_room, _socket_id, socket| match socket.viewer {
+                MultiplayerViewer::Player(player) => by_player[player].clone(),
+                MultiplayerViewer::Spectator => spectator.clone(),
+            },
+        );
     }
 
     fn broadcast_analysis_except(&self, root_wdl: [f32; 3], excluded_socket_id: Option<u64>) {
         let json = serde_json::to_string(&ServerMsg::MultiplayerAnalysis { root_wdl }).ok();
-        self.broadcast_with(excluded_socket_id, |_room, _player| json.clone());
+        self.broadcast_with(excluded_socket_id, |_room, _socket_id, _socket| {
+            json.clone()
+        });
     }
 
     fn broadcast_with(
         &self,
         excluded_socket_id: Option<u64>,
-        mut build: impl FnMut(&Self, usize) -> Option<String>,
+        mut build: impl FnMut(&Self, u64, &MultiplayerSocket) -> Option<String>,
     ) {
-        let mut sockets = self.sockets.lock().expect("room sockets lock poisoned");
-        sockets.retain(|socket_id, socket| {
-            if excluded_socket_id == Some(*socket_id) {
-                return true;
+        let recipients = {
+            let sockets = self.sockets.lock().expect("room sockets lock poisoned");
+            sockets
+                .iter()
+                .filter(|(socket_id, _)| excluded_socket_id != Some(**socket_id))
+                .map(|(socket_id, socket)| (*socket_id, socket.clone()))
+                .collect::<Vec<_>>()
+        };
+        let mut failed = Vec::new();
+        for (socket_id, socket) in recipients {
+            if let Some(json) = build(self, socket_id, &socket) {
+                if socket.tx.send(json).is_err() {
+                    failed.push(socket_id);
+                }
             }
-            match build(self, socket.player) {
-                Some(json) => socket.tx.send(json).is_ok(),
-                None => true,
+        }
+        if !failed.is_empty() {
+            let mut sockets = self.sockets.lock().expect("room sockets lock poisoned");
+            for socket_id in failed {
+                sockets.remove(&socket_id);
             }
-        });
+        }
     }
 
     async fn save_room_replay_once(
@@ -1759,7 +1818,11 @@ impl<G: Game + 'static> MultiplayerRoomStore<G> {
         user_id: &str,
         code: &str,
     ) -> Result<(Arc<MultiplayerRoom<G>>, usize), String> {
-        self.join_room_with_display_name(user_id, None, code)
+        let (room, viewer) = self.join_room_with_display_name(user_id, None, code)?;
+        match viewer {
+            MultiplayerViewer::Player(player) => Ok((room, player)),
+            MultiplayerViewer::Spectator => Err("Room is full".into()),
+        }
     }
 
     fn join_room_with_display_name(
@@ -1767,7 +1830,7 @@ impl<G: Game + 'static> MultiplayerRoomStore<G> {
         user_id: &str,
         display_name: Option<&str>,
         code: &str,
-    ) -> Result<(Arc<MultiplayerRoom<G>>, usize), String> {
+    ) -> Result<(Arc<MultiplayerRoom<G>>, MultiplayerViewer), String> {
         let code = normalize_room_code(code)?;
         let room = self
             .rooms
@@ -1781,8 +1844,8 @@ impl<G: Game + 'static> MultiplayerRoomStore<G> {
             account_key: redacted_account_key(user_id),
             display_name: display_name.map(str::to_string),
         };
-        let player = room.assign_or_find_seat(owner)?;
-        Ok((room, player))
+        let viewer = room.assign_or_find_viewer(owner);
+        Ok((room, viewer))
     }
 
     fn schedule_room_cleanup_if_empty(self: &Arc<Self>, room: Arc<MultiplayerRoom<G>>) -> bool {
@@ -1870,6 +1933,14 @@ async fn save_replay_entry<G: Game + 'static>(
     user_session: &UserSession<G>,
     log: &GameLog,
 ) -> Result<Option<ReplayEntry>, String> {
+    save_replay_entry_with_result(user_session, log, None).await
+}
+
+async fn save_replay_entry_with_result<G: Game + 'static>(
+    user_session: &UserSession<G>,
+    log: &GameLog,
+    result: Option<&str>,
+) -> Result<Option<ReplayEntry>, String> {
     let Some(store) = user_session.replay_store.as_ref() else {
         return Ok(None);
     };
@@ -1877,11 +1948,12 @@ async fn save_replay_entry<G: Game + 'static>(
         .next_replay_counter
         .fetch_add(1, Ordering::Relaxed);
     store
-        .save(
+        .save_with_result(
             &user_session.account_key,
             user_session.session_id,
             counter,
             log,
+            result,
         )
         .await
         .map(Some)
@@ -1892,8 +1964,13 @@ async fn save_current_replay_once<G: Game + 'static>(
     session: &mut GameSession<G>,
 ) -> Option<ServerMsg> {
     let has_store = user_session.replay_store.is_some();
-    let log = session.export_unsaved_current_log()?;
-    match save_replay_entry(user_session, &log).await {
+    let replay_result = session.live_replay_result().map(str::to_owned);
+    let log = if replay_result.is_some() {
+        session.export_unsaved_current_log_allow_empty()?
+    } else {
+        session.export_unsaved_current_log()?
+    };
+    match save_replay_entry_with_result(user_session, &log, replay_result.as_deref()).await {
         Ok(entry) => {
             if has_store {
                 session.mark_current_log_saved(&log);
@@ -2137,7 +2214,7 @@ struct SocketSessionKey {
 struct ActiveMultiplayerRoom<G: Game + 'static> {
     room: Arc<MultiplayerRoom<G>>,
     socket_id: u64,
-    player: usize,
+    viewer: MultiplayerViewer,
 }
 
 enum MultiplayerRuntime<G: Game + 'static> {
@@ -2232,13 +2309,18 @@ async fn multiplayer_runtime_from_config<G: Game + 'static>(
                     "{MULTIPLAYER_BACKEND_ENV}=redis requires {REDIS_URL_ENV} to be set for multiplayer"
                 );
             }
-            return Arc::new(MultiplayerRuntime::Memory(Arc::new(MultiplayerRoomStore::new(
-                factory,
-                replay_store,
-            ))));
+            return Arc::new(MultiplayerRuntime::Memory(Arc::new(
+                MultiplayerRoomStore::new(factory, replay_store),
+            )));
         };
         println!("Multiplayer rooms: Redis {REDIS_URL_ENV}");
-        match RedisMultiplayerRoomStore::connect(redis_url, Arc::clone(&factory), replay_store.clone()).await {
+        match RedisMultiplayerRoomStore::connect(
+            redis_url,
+            Arc::clone(&factory),
+            replay_store.clone(),
+        )
+        .await
+        {
             Ok(store) => return Arc::new(MultiplayerRuntime::Redis(store)),
             Err(error) if required => {
                 panic!(
@@ -2277,8 +2359,12 @@ async fn register_multiplayer_lobby_socket<G: Game + 'static>(
     tx: mpsc::UnboundedSender<String>,
 ) -> ActiveLobbySocket {
     match runtime.as_ref() {
-        MultiplayerRuntime::Memory(rooms) => ActiveLobbySocket::Memory(rooms.register_lobby_socket(tx)),
-        MultiplayerRuntime::Redis(rooms) => ActiveLobbySocket::Redis(rooms.register_lobby_socket(tx)),
+        MultiplayerRuntime::Memory(rooms) => {
+            ActiveLobbySocket::Memory(rooms.register_lobby_socket(tx))
+        }
+        MultiplayerRuntime::Redis(rooms) => {
+            ActiveLobbySocket::Redis(rooms.register_lobby_socket(tx))
+        }
     }
 }
 
@@ -2307,9 +2393,7 @@ async fn unregister_multiplayer_lobby_socket<G: Game + 'static>(
     }
 }
 
-async fn broadcast_multiplayer_lobby<G: Game + 'static>(
-    runtime: &Arc<MultiplayerRuntime<G>>,
-) {
+async fn broadcast_multiplayer_lobby<G: Game + 'static>(runtime: &Arc<MultiplayerRuntime<G>>) {
     match runtime.as_ref() {
         MultiplayerRuntime::Memory(rooms) => rooms.broadcast_lobby(),
         MultiplayerRuntime::Redis(rooms) => rooms.publish_lobby_changed().await,
@@ -2396,22 +2480,23 @@ pub async fn serve<G: Game + 'static>(
     println!("Anonymous HexFish WebSocket sessions enabled");
     tracing::info!("anonymous HexFish WebSocket sessions enabled");
 
-    let app = Router::new()
-        .route(
-            "/ws",
-            axum::routing::get({
-                let store = Arc::clone(&store);
-                move |ws: WebSocketUpgrade| {
+    let app =
+        Router::new()
+            .route(
+                "/ws",
+                axum::routing::get({
                     let store = Arc::clone(&store);
-                    let multiplayer = Arc::clone(&multiplayer);
-                    async move {
-                        ws.on_upgrade(move |socket| handle_socket(socket, store, multiplayer))
+                    move |ws: WebSocketUpgrade| {
+                        let store = Arc::clone(&store);
+                        let multiplayer = Arc::clone(&multiplayer);
+                        async move {
+                            ws.on_upgrade(move |socket| handle_socket(socket, store, multiplayer))
+                        }
                     }
-                }
-            }),
-        )
-        .route("/r/{slug}", axum::routing::get(replay_link_redirect))
-        .fallback_service(ServeDir::new(&static_dir));
+                }),
+            )
+            .route("/r/{slug}", axum::routing::get(replay_link_redirect))
+            .fallback_service(ServeDir::new(&static_dir));
 
     let addr = format!("0.0.0.0:{port}");
     println!("Analysis board: http://localhost:{port}");
@@ -2437,22 +2522,23 @@ pub async fn serve_with_state<G: Game + 'static>(
         MultiplayerRoomStore::new(Arc::clone(&store.factory), None),
     )));
 
-    let app = Router::new()
-        .route(
-            "/ws",
-            axum::routing::get({
-                let store = Arc::clone(&store);
-                move |ws: WebSocketUpgrade| {
+    let app =
+        Router::new()
+            .route(
+                "/ws",
+                axum::routing::get({
                     let store = Arc::clone(&store);
-                    let multiplayer = Arc::clone(&multiplayer);
-                    async move {
-                        ws.on_upgrade(move |socket| handle_socket(socket, store, multiplayer))
+                    move |ws: WebSocketUpgrade| {
+                        let store = Arc::clone(&store);
+                        let multiplayer = Arc::clone(&multiplayer);
+                        async move {
+                            ws.on_upgrade(move |socket| handle_socket(socket, store, multiplayer))
+                        }
                     }
-                }
-            }),
-        )
-        .route("/r/{slug}", axum::routing::get(replay_link_redirect))
-        .fallback_service(ServeDir::new(&static_dir));
+                }),
+            )
+            .route("/r/{slug}", axum::routing::get(replay_link_redirect))
+            .fallback_service(ServeDir::new(&static_dir));
 
     let addr = format!("0.0.0.0:{port}");
     println!("Analysis board: http://localhost:{port}");
@@ -2477,22 +2563,23 @@ pub async fn serve_with_timeline<G: Game + 'static>(
         MultiplayerRoomStore::new(Arc::clone(&store.factory), None),
     )));
 
-    let app = Router::new()
-        .route(
-            "/ws",
-            axum::routing::get({
-                let store = Arc::clone(&store);
-                move |ws: WebSocketUpgrade| {
+    let app =
+        Router::new()
+            .route(
+                "/ws",
+                axum::routing::get({
                     let store = Arc::clone(&store);
-                    let multiplayer = Arc::clone(&multiplayer);
-                    async move {
-                        ws.on_upgrade(move |socket| handle_socket(socket, store, multiplayer))
+                    move |ws: WebSocketUpgrade| {
+                        let store = Arc::clone(&store);
+                        let multiplayer = Arc::clone(&multiplayer);
+                        async move {
+                            ws.on_upgrade(move |socket| handle_socket(socket, store, multiplayer))
+                        }
                     }
-                }
-            }),
-        )
-        .route("/r/{slug}", axum::routing::get(replay_link_redirect))
-        .fallback_service(ServeDir::new(&static_dir));
+                }),
+            )
+            .route("/r/{slug}", axum::routing::get(replay_link_redirect))
+            .fallback_service(ServeDir::new(&static_dir));
 
     let addr = format!("0.0.0.0:{port}");
     println!("Analysis board: http://localhost:{port}");
@@ -2512,7 +2599,8 @@ pub async fn run_search<G: Game + 'static>(
     match session.begin_search(msg) {
         Err(msgs) => Ok(msgs),
         Ok(active_budget) => {
-            let mut last_progress = 0;
+            let mut last_progress_sent = 0;
+            let mut last_progress_sent_at = Instant::now();
             let mut ticks_since_interrupt_check = 0;
             let mut cpu_load = CpuLoadSampler::new();
             let result = loop {
@@ -2528,8 +2616,13 @@ pub async fn run_search<G: Game + 'static>(
                     }
                 }
                 if let Some((snap, labels)) = session.snapshot_with_labels() {
-                    if snap.fresh_simulations >= last_progress + PROGRESS_INTERVAL {
-                        last_progress = snap.fresh_simulations;
+                    if should_send_search_progress(
+                        snap.fresh_simulations,
+                        last_progress_sent,
+                        last_progress_sent_at.elapsed(),
+                    ) {
+                        last_progress_sent = snap.fresh_simulations;
+                        last_progress_sent_at = Instant::now();
                         send_msg(
                             socket,
                             &ServerMsg::SearchProgress {
@@ -2551,7 +2644,7 @@ pub async fn run_search<G: Game + 'static>(
                 }
             };
             if let Some((snap, labels)) = session.snapshot_with_labels() {
-                if snap.fresh_simulations > last_progress {
+                if snap.fresh_simulations > last_progress_sent {
                     send_msg(
                         socket,
                         &ServerMsg::SearchProgress {
@@ -2568,6 +2661,15 @@ pub async fn run_search<G: Game + 'static>(
             Ok(session.finish_search(msg, result))
         }
     }
+}
+
+fn should_send_search_progress(
+    fresh_simulations: u32,
+    last_progress_sent: u32,
+    elapsed_since_last_send: Duration,
+) -> bool {
+    fresh_simulations >= last_progress_sent.saturating_add(PROGRESS_INTERVAL)
+        || elapsed_since_last_send >= Duration::from_millis(SEARCH_PROGRESS_KEEPALIVE_MS)
 }
 
 async fn handle_search_interrupt<G: Game + 'static>(
@@ -2716,7 +2818,7 @@ async fn handle_socket<G: Game + 'static>(
     let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
     let socket_id = user_session.register_socket(outbound_tx.clone());
 
-    let _ = handle_authenticated_socket(
+    let disconnect = handle_authenticated_socket(
         &mut socket,
         Arc::clone(&store),
         Arc::clone(&user_session),
@@ -2729,6 +2831,7 @@ async fn handle_socket<G: Game + 'static>(
     )
     .await;
     user_session.unregister_socket(socket_id);
+    let close_code = disconnect.close_code.as_deref().unwrap_or("");
     tracing::info!(
         account = %account_key,
         scope = session_scope,
@@ -2736,6 +2839,9 @@ async fn handle_socket<G: Game + 'static>(
         seed = user_session.seed,
         board_code = %board_code,
         socket_id,
+        disconnect_kind = disconnect.kind,
+        close_code,
+        close_reason = %disconnect.close_reason,
         "disconnected HexFish game socket"
     );
     if session_key.ephemeral {
@@ -2753,6 +2859,61 @@ fn format_board_fingerprint(fingerprint: Option<u64>) -> String {
     fingerprint
         .map(|value| value.to_string())
         .unwrap_or_else(|| "none".into())
+}
+
+#[derive(Debug, Clone)]
+struct SocketDisconnectInfo {
+    kind: &'static str,
+    close_code: Option<String>,
+    close_reason: String,
+}
+
+impl SocketDisconnectInfo {
+    fn recv_closed() -> Self {
+        Self {
+            kind: "recv_closed",
+            close_code: None,
+            close_reason: String::new(),
+        }
+    }
+
+    fn recv_error() -> Self {
+        Self {
+            kind: "recv_error",
+            close_code: None,
+            close_reason: String::new(),
+        }
+    }
+
+    fn send_failed() -> Self {
+        Self {
+            kind: "send_failed",
+            close_code: None,
+            close_reason: String::new(),
+        }
+    }
+
+    fn server_closed() -> Self {
+        Self {
+            kind: "server_closed",
+            close_code: None,
+            close_reason: String::new(),
+        }
+    }
+
+    fn client_close(close_code: Option<String>, close_reason: String) -> Self {
+        Self {
+            kind: "client_close",
+            close_code,
+            close_reason,
+        }
+    }
+}
+
+impl From<()> for SocketDisconnectInfo {
+    fn from(_: ()) -> Self {
+        Self::send_failed()
+    }
 }
 
 async fn authenticate_socket(socket: &mut WebSocket) -> Result<SocketSessionKey, ()> {
@@ -2944,7 +3105,7 @@ async fn handle_authenticated_socket<G: Game + 'static>(
     socket_id: u64,
     outbound_tx: mpsc::UnboundedSender<String>,
     mut outbound_rx: mpsc::UnboundedReceiver<String>,
-) -> Result<(), ()> {
+) -> SocketDisconnectInfo {
     let mut auto_search: Option<SearchBudget> = None;
     let mut active_room: Option<ActiveMultiplayer<G>> = None;
 
@@ -2953,30 +3114,45 @@ async fn handle_authenticated_socket<G: Game + 'static>(
         let mut session = user_session.session.lock().await;
         let init_msgs = session.handle(ClientMsg::GetState);
         for msg in init_msgs {
-            send_msg(socket, &msg).await?;
+            if send_msg(socket, &msg).await.is_err() {
+                return SocketDisconnectInfo::send_failed();
+            }
         }
     }
-    send_msg(socket, &store.profile_msg(&user_id)).await?;
+    if send_msg(socket, &store.profile_msg(&user_id))
+        .await
+        .is_err()
+    {
+        return SocketDisconnectInfo::send_failed();
+    }
 
     let lobby_socket_id =
         register_multiplayer_lobby_socket(&multiplayer, outbound_tx.clone()).await;
     send_multiplayer_lobby_to(&multiplayer, &outbound_tx).await;
 
-    let result = loop {
+    let disconnect = loop {
         tokio::select! {
             outbound = outbound_rx.recv() => {
                 let Some(json) = outbound else {
-                    break Ok(());
+                    break SocketDisconnectInfo::server_closed();
                 };
                 if send_raw_msg(socket, json).await.is_err() {
-                    break Err(());
+                    break SocketDisconnectInfo::send_failed();
                 }
             }
             inbound = socket.recv() => {
-                let Some(Ok(ws_msg)) = inbound else {
-                    break Ok(());
+                let ws_msg = match inbound {
+                    Some(Ok(Message::Close(frame))) => {
+                        let (close_code, close_reason) = frame
+                            .map(|frame| (Some(frame.code.to_string()), frame.reason.to_string()))
+                            .unwrap_or((None, String::new()));
+                        break SocketDisconnectInfo::client_close(close_code, close_reason);
+                    }
+                    Some(Ok(ws_msg)) => ws_msg,
+                    Some(Err(_)) => break SocketDisconnectInfo::recv_error(),
+                    None => break SocketDisconnectInfo::recv_closed(),
                 };
-                if handle_authenticated_message(
+                if let Err(disconnect) = handle_authenticated_message(
                     socket,
                     &store,
                     &user_session,
@@ -2990,8 +3166,8 @@ async fn handle_authenticated_socket<G: Game + 'static>(
                     ws_msg,
                 )
                 .await
-                .is_err() {
-                    break Err(());
+                {
+                    break disconnect;
                 }
             }
         }
@@ -3002,7 +3178,7 @@ async fn handle_authenticated_socket<G: Game + 'static>(
     if detached {
         broadcast_multiplayer_lobby(&multiplayer).await;
     }
-    result
+    disconnect
 }
 
 async fn handle_authenticated_message<G: Game + 'static>(
@@ -3017,10 +3193,15 @@ async fn handle_authenticated_message<G: Game + 'static>(
     active_room: &mut Option<ActiveMultiplayer<G>>,
     auto_search: &mut Option<SearchBudget>,
     ws_msg: Message,
-) -> Result<(), ()> {
+) -> Result<(), SocketDisconnectInfo> {
     let text = match ws_msg {
         Message::Text(t) => t,
-        Message::Close(_) => return Err(()),
+        Message::Close(frame) => {
+            let (close_code, close_reason) = frame
+                .map(|frame| (Some(frame.code.to_string()), frame.reason.to_string()))
+                .unwrap_or((None, String::new()));
+            return Err(SocketDisconnectInfo::client_close(close_code, close_reason));
+        }
         _ => return Ok(()),
     };
 
@@ -3233,6 +3414,7 @@ fn is_blocked_while_in_multiplayer(msg: &ClientMsg) -> bool {
             | ClientMsg::StartEditedGame { .. }
             | ClientMsg::SaveReplay
             | ClientMsg::PlayAction { .. }
+            | ClientMsg::ResignGame
             | ClientMsg::BotMove { .. }
             | ClientMsg::RunSims { .. }
             | ClientMsg::RunSearch { .. }
@@ -3299,13 +3481,7 @@ async fn handle_multiplayer_runtime_message<G: Game + 'static>(
                 Some(ActiveMultiplayer::Memory(_)) | None => None,
             };
             let responses = rooms
-                .handle_message_for_user(
-                    user_id,
-                    display_name,
-                    outbound_tx,
-                    &mut redis_active,
-                    msg,
-                )
+                .handle_message_for_user(user_id, display_name, outbound_tx, &mut redis_active, msg)
                 .await;
             *active_room = redis_active.map(ActiveMultiplayer::Redis);
             responses
@@ -3347,7 +3523,7 @@ async fn handle_multiplayer_message_for_user<G: Game + 'static>(
                     message: "Join a multiplayer room before refreshing it".into(),
                 }];
             };
-            vec![active.room.room_msg_for_player(Some(active.player))]
+            vec![active.room.room_msg_for_active(active)]
         }
         ClientMsg::CreateMultiplayerRoom {
             preferred_player,
@@ -3359,7 +3535,7 @@ async fn handle_multiplayer_message_for_user<G: Game + 'static>(
             if detach_active_room(rooms, active_room) {
                 rooms.broadcast_lobby();
             }
-            let (room, _) = match rooms.create_room_with_display_name(
+            let (room, player) = match rooms.create_room_with_display_name(
                 user_id,
                 display_name,
                 preferred_player,
@@ -3371,8 +3547,15 @@ async fn handle_multiplayer_message_for_user<G: Game + 'static>(
                 Ok(room) => room,
                 Err(message) => return vec![ServerMsg::Error { message }],
             };
-            let responses =
-                activate_multiplayer_room(room, user_id, outbound_tx, active_room).await;
+            let responses = activate_multiplayer_room(
+                room,
+                user_id,
+                display_name,
+                MultiplayerViewer::Player(player),
+                outbound_tx,
+                active_room,
+            )
+            .await;
             rooms.broadcast_lobby();
             responses
         }
@@ -3380,12 +3563,20 @@ async fn handle_multiplayer_message_for_user<G: Game + 'static>(
             if detach_active_room(rooms, active_room) {
                 rooms.broadcast_lobby();
             }
-            let (room, _) = match rooms.join_room_with_display_name(user_id, display_name, &code) {
-                Ok(room) => room,
-                Err(message) => return vec![ServerMsg::Error { message }],
-            };
-            let responses =
-                activate_multiplayer_room(room, user_id, outbound_tx, active_room).await;
+            let (room, viewer) =
+                match rooms.join_room_with_display_name(user_id, display_name, &code) {
+                    Ok(room) => room,
+                    Err(message) => return vec![ServerMsg::Error { message }],
+                };
+            let responses = activate_multiplayer_room(
+                room,
+                user_id,
+                display_name,
+                viewer,
+                outbound_tx,
+                active_room,
+            )
+            .await;
             rooms.broadcast_lobby();
             responses
         }
@@ -3401,9 +3592,13 @@ async fn handle_multiplayer_message_for_user<G: Game + 'static>(
                     message: "Join a multiplayer room before playing".into(),
                 }];
             };
+            let Some(player) = active.viewer.player() else {
+                return vec![ServerMsg::Error {
+                    message: "Spectators cannot play multiplayer actions".into(),
+                }];
+            };
             let room = Arc::clone(&active.room);
             let socket_id = active.socket_id;
-            let player = active.player;
             if !room.is_full() {
                 return vec![ServerMsg::Error {
                     message: "Room is waiting for an opponent".into(),
@@ -3412,7 +3607,7 @@ async fn handle_multiplayer_message_for_user<G: Game + 'static>(
             if room.is_finished() {
                 let _ = save_finished_multiplayer_replay(Arc::clone(&room)).await;
                 room.broadcast_room_info_except(Some(socket_id));
-                return vec![room.room_msg_for_player(Some(player))];
+                return vec![room.room_msg_for_active(active)];
             }
             let (responses, analysis_generation, analysis_session) = {
                 let mut session = room.session.lock().await;
@@ -3430,7 +3625,7 @@ async fn handle_multiplayer_message_for_user<G: Game + 'static>(
                 room.broadcast_state_except(&session, Some(socket_id));
                 room.broadcast_room_info_except(Some(socket_id));
                 let mut responses = vec![
-                    room.room_msg_for_player(Some(player)),
+                    room.room_msg_for_active(active),
                     session.state_msg_for_player(player),
                 ];
                 responses.extend(save_errors);
@@ -3451,6 +3646,11 @@ async fn handle_multiplayer_message_for_user<G: Game + 'static>(
                     message: "Join a multiplayer room before resigning".into(),
                 }];
             };
+            let Some(player) = active.viewer.player() else {
+                return vec![ServerMsg::Error {
+                    message: "Spectators cannot resign multiplayer games".into(),
+                }];
+            };
             let room = Arc::clone(&active.room);
             if !room.is_full() {
                 return vec![ServerMsg::Error {
@@ -3458,12 +3658,12 @@ async fn handle_multiplayer_message_for_user<G: Game + 'static>(
                 }];
             }
             if !room.is_finished() {
-                room.mark_finished(Some(1 - active.player), "resignation");
+                room.mark_finished(Some(1 - player), "resignation");
             }
             let save_errors = save_finished_multiplayer_replay(Arc::clone(&room)).await;
             room.broadcast_room_info_except(Some(active.socket_id));
             schedule_lobby_broadcast(Arc::clone(rooms));
-            let mut responses = vec![room.room_msg_for_player(Some(active.player))];
+            let mut responses = vec![room.room_msg_for_active(active)];
             responses.extend(save_errors);
             responses
         }
@@ -3473,13 +3673,18 @@ async fn handle_multiplayer_message_for_user<G: Game + 'static>(
                     message: "Join a multiplayer room before adjusting clocks".into(),
                 }];
             };
+            let Some(player) = active.viewer.player() else {
+                return vec![ServerMsg::Error {
+                    message: "Spectators cannot adjust multiplayer clocks".into(),
+                }];
+            };
             let room = Arc::clone(&active.room);
-            let opponent = if active.player == 0 { 1 } else { 0 };
+            let opponent = if player == 0 { 1 } else { 0 };
             if !room.add_clock_seconds(opponent, 15) {
                 if room.is_finished() {
                     let _ = save_finished_multiplayer_replay(Arc::clone(&room)).await;
                     room.broadcast_room_info_except(Some(active.socket_id));
-                    return vec![room.room_msg_for_player(Some(active.player))];
+                    return vec![room.room_msg_for_active(active)];
                 }
                 return vec![ServerMsg::Error {
                     message: "This room does not have clocks enabled".into(),
@@ -3487,7 +3692,7 @@ async fn handle_multiplayer_message_for_user<G: Game + 'static>(
             }
             room.broadcast_room_info_except(Some(active.socket_id));
             schedule_multiplayer_clock_timeout(Arc::clone(&room));
-            vec![room.room_msg_for_player(Some(active.player))]
+            vec![room.room_msg_for_active(active)]
         }
         _ => vec![ServerMsg::Error {
             message: "Unsupported multiplayer message".into(),
@@ -3498,25 +3703,28 @@ async fn handle_multiplayer_message_for_user<G: Game + 'static>(
 async fn activate_multiplayer_room<G: Game + 'static>(
     room: Arc<MultiplayerRoom<G>>,
     user_id: &str,
+    display_name: Option<&str>,
+    viewer: MultiplayerViewer,
     outbound_tx: &mpsc::UnboundedSender<String>,
     active_room: &mut Option<ActiveMultiplayerRoom<G>>,
 ) -> Vec<ServerMsg> {
-    let (socket_id, player) = match room.register_socket(user_id, outbound_tx.clone()) {
+    let socket_id = match room.register_socket(user_id, display_name, viewer, outbound_tx.clone()) {
         Ok(active) => active,
         Err(message) => return vec![ServerMsg::Error { message }],
     };
     *active_room = Some(ActiveMultiplayerRoom {
         room: Arc::clone(&room),
         socket_id,
-        player,
+        viewer,
     });
     room.broadcast_room_info_except(Some(socket_id));
     let (responses, analysis_job) = {
         let session = room.session.lock().await;
-        let responses = vec![
-            room.room_msg_for_player(Some(player)),
-            session.state_msg_for_player(player),
-        ];
+        let state_msg = match viewer {
+            MultiplayerViewer::Player(player) => session.state_msg_for_player(player),
+            MultiplayerViewer::Spectator => session.state_msg_for_spectator(),
+        };
+        let responses = vec![room.room_msg_for_viewer(viewer, Some(socket_id)), state_msg];
         let analysis_job = room.is_full().then(|| {
             (
                 room.next_analysis_generation(),
@@ -3734,8 +3942,8 @@ mod tests {
     use std::{
         path::{Path, PathBuf},
         sync::{
-            atomic::{AtomicUsize, Ordering},
             Arc,
+            atomic::{AtomicUsize, Ordering},
         },
         time::Duration,
     };
@@ -3748,12 +3956,13 @@ mod tests {
     use tokio::{sync::mpsc, time::timeout};
 
     use super::{
-        anonymous_user_id_from_id, anonymous_user_id_from_token, client_msg_target,
-        current_unix_ms, detach_active_room, handle_multiplayer_message, handle_profile_message,
-        parse_env_bool, redacted_account_key, replay_result_for_room_outcome, safe_replay_id,
-        safe_share_slug, socket_session_key_from_auth, ActiveMultiplayerRoom, ClientMsg,
-        FileReplayStore, GamePresenter, MultiplayerRoomStore, ReplayStore, RoomClock, RoomOutcome,
-        SearchBudget, ServerMsg, SessionFactory, UserSessionStore, ViewTarget,
+        ActiveMultiplayerRoom, ClientMsg, FileReplayStore, GamePresenter, MultiplayerRoomStore,
+        MultiplayerViewer, ReplayStore, RoomClock, RoomOutcome, SearchBudget, ServerMsg,
+        SessionFactory, UserSessionStore, ViewTarget, anonymous_user_id_from_id,
+        anonymous_user_id_from_token, client_msg_target, current_unix_ms, detach_active_room,
+        handle_multiplayer_message, handle_profile_message, list_replay_entries, parse_env_bool,
+        redacted_account_key, replay_result_for_room_outcome, safe_replay_id, safe_share_slug,
+        save_current_replay_once, should_send_search_progress, socket_session_key_from_auth,
     };
 
     #[derive(Clone)]
@@ -3766,7 +3975,11 @@ mod tests {
         const NUM_ACTIONS: usize = 1;
 
         fn status(&self) -> Status {
-            Status::Decision(1.0)
+            if self.moves == u8::MAX {
+                Status::Terminal(-1.0)
+            } else {
+                Status::Decision(1.0)
+            }
         }
 
         fn legal_actions(&self, buf: &mut Vec<usize>) {
@@ -3798,6 +4011,35 @@ mod tests {
         for value in ["", "0", "false", "no", "off", "required", "enabled"] {
             assert!(!parse_env_bool(value), "{value:?} should be disabled");
         }
+    }
+
+    #[test]
+    fn search_progress_predicate_uses_sim_delta_or_keepalive_elapsed() {
+        assert!(!should_send_search_progress(
+            99,
+            0,
+            Duration::from_millis(4_999)
+        ));
+        assert!(should_send_search_progress(
+            100,
+            0,
+            Duration::from_millis(1)
+        ));
+        assert!(!should_send_search_progress(
+            64,
+            64,
+            Duration::from_millis(4_999)
+        ));
+        assert!(should_send_search_progress(
+            64,
+            64,
+            Duration::from_millis(5_000)
+        ));
+        assert!(should_send_search_progress(
+            164,
+            64,
+            Duration::from_millis(1)
+        ));
     }
 
     #[test]
@@ -3878,6 +4120,14 @@ mod tests {
             })
         }
 
+        fn serialize_state_for_spectator(&self, state: &TestGame) -> serde_json::Value {
+            serde_json::json!({
+                "board_id": state.board_id,
+                "moves": state.moves,
+                "viewer": "spectator",
+            })
+        }
+
         fn action_label(&self, _state: &TestGame, action: usize) -> String {
             format!("Action {action}")
         }
@@ -3908,6 +4158,11 @@ mod tests {
         fn new_game(&self, _seed: u64) -> TestGame {
             let board_id = self.created_games.fetch_add(1, Ordering::SeqCst) as u64 + 1;
             TestGame { board_id, moves: 0 }
+        }
+
+        fn resign(&self, state: &mut TestGame, _player: usize) -> Result<(), String> {
+            state.moves = u8::MAX;
+            Ok(())
         }
     }
 
@@ -4133,20 +4388,22 @@ mod tests {
             let (_, player_b) = rooms.join_room("user_b", &code).unwrap();
             let (tx_a, _rx_a) = mpsc::unbounded_channel();
             let (tx_b, _rx_b) = mpsc::unbounded_channel();
-            let (socket_a, socket_player_a) = room.register_socket("user_a", tx_a).unwrap();
-            let (socket_b, socket_player_b) = room.register_socket("user_b", tx_b).unwrap();
-            assert_eq!(socket_player_a, player_a);
-            assert_eq!(socket_player_b, player_b);
+            let socket_a = room
+                .register_socket("user_a", None, MultiplayerViewer::Player(player_a), tx_a)
+                .unwrap();
+            let socket_b = room
+                .register_socket("user_b", None, MultiplayerViewer::Player(player_b), tx_b)
+                .unwrap();
 
             let mut active_a = Some(ActiveMultiplayerRoom {
                 room: Arc::clone(&room),
                 socket_id: socket_a,
-                player: player_a,
+                viewer: MultiplayerViewer::Player(player_a),
             });
             let mut active_b = Some(ActiveMultiplayerRoom {
                 room: Arc::clone(&room),
                 socket_id: socket_b,
-                player: player_b,
+                viewer: MultiplayerViewer::Player(player_b),
             });
 
             assert!(detach_active_room(&rooms, &mut active_a));
@@ -4173,9 +4430,9 @@ mod tests {
             assert_eq!(rejoined_player, player_a);
 
             let (tx_c, _rx_c) = mpsc::unbounded_channel();
-            let (socket_c, socket_player_c) =
-                rejoined_room.register_socket("user_a", tx_c).unwrap();
-            assert_eq!(socket_player_c, player_a);
+            let socket_c = rejoined_room
+                .register_socket("user_a", None, MultiplayerViewer::Player(player_a), tx_c)
+                .unwrap();
             assert!(!rooms.close_room_if_still_empty(&cleanup_room));
             rejoined_room.unregister_socket(socket_c);
             assert!(rooms.close_room_if_still_empty(&cleanup_room));
@@ -4198,18 +4455,20 @@ mod tests {
             rooms.join_room("user_b", "REJOIN").unwrap();
             let (old_tx, _old_rx) = mpsc::unbounded_channel();
             let (new_tx, _new_rx) = mpsc::unbounded_channel();
-            let (old_socket, old_player) = room.register_socket("user_a", old_tx).unwrap();
-            let (new_socket, new_player) = room.register_socket("user_a", new_tx).unwrap();
+            let old_socket = room
+                .register_socket("user_a", None, MultiplayerViewer::Player(player_a), old_tx)
+                .unwrap();
+            let new_socket = room
+                .register_socket("user_a", None, MultiplayerViewer::Player(player_a), new_tx)
+                .unwrap();
 
-            assert_eq!(old_player, player_a);
-            assert_eq!(new_player, player_a);
             assert!(!room.socket_registered(old_socket));
             assert!(room.socket_registered(new_socket));
 
             let mut old_active = Some(ActiveMultiplayerRoom {
                 room: Arc::clone(&room),
                 socket_id: old_socket,
-                player: player_a,
+                viewer: MultiplayerViewer::Player(player_a),
             });
             let (tx, _rx) = mpsc::unbounded_channel();
             let responses = handle_multiplayer_message(
@@ -4284,6 +4543,229 @@ mod tests {
                 other => panic!("expected room refresh response, got {other:?}"),
             }
         });
+    }
+
+    #[test]
+    fn multiplayer_full_room_join_returns_spectator_without_legal_actions() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let (rooms, _) = test_room_store();
+            let rooms = Arc::new(rooms);
+            let (room, _) = rooms
+                .create_room(
+                    "user_a",
+                    Some(0),
+                    Some("SPEC12".into()),
+                    Some(true),
+                    None,
+                    None,
+                )
+                .unwrap();
+            rooms.join_room("user_b", &room.code).unwrap();
+
+            let (tx_c, _rx_c) = mpsc::unbounded_channel();
+            let mut active_c = None;
+            let responses = handle_multiplayer_message(
+                &rooms,
+                "user_c",
+                &tx_c,
+                &mut active_c,
+                ClientMsg::JoinMultiplayerRoom {
+                    code: "SPEC12".into(),
+                },
+            )
+            .await;
+
+            match responses.as_slice() {
+                [
+                    ServerMsg::MultiplayerRoom {
+                        viewer_role,
+                        local_player,
+                        spectators,
+                        ..
+                    },
+                    ServerMsg::GameState {
+                        state,
+                        legal_actions,
+                        ..
+                    },
+                ] => {
+                    assert_eq!(viewer_role, "spectator");
+                    assert_eq!(*local_player, None);
+                    assert_eq!(spectators.len(), 1);
+                    assert!(spectators[0].you);
+                    assert!(legal_actions.is_empty());
+                    assert_eq!(state["viewer"], serde_json::json!("spectator"));
+                }
+                other => panic!("expected spectator join response, got {other:?}"),
+            }
+            assert!(matches!(
+                active_c.as_ref().map(|active| active.viewer),
+                Some(MultiplayerViewer::Spectator)
+            ));
+        });
+    }
+
+    #[test]
+    fn multiplayer_seated_user_rejoins_full_room_as_player() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let (rooms, _) = test_room_store();
+            let rooms = Arc::new(rooms);
+            let (room, player_a) = rooms
+                .create_room(
+                    "user_a",
+                    Some(0),
+                    Some("PLAYER".into()),
+                    Some(true),
+                    None,
+                    None,
+                )
+                .unwrap();
+            rooms.join_room("user_b", &room.code).unwrap();
+
+            let (tx_a, _rx_a) = mpsc::unbounded_channel();
+            let mut active_a = None;
+            let responses = handle_multiplayer_message(
+                &rooms,
+                "user_a",
+                &tx_a,
+                &mut active_a,
+                ClientMsg::JoinMultiplayerRoom {
+                    code: "PLAYER".into(),
+                },
+            )
+            .await;
+
+            match responses.as_slice() {
+                [
+                    ServerMsg::MultiplayerRoom {
+                        viewer_role,
+                        local_player,
+                        spectators,
+                        ..
+                    },
+                    ServerMsg::GameState { legal_actions, .. },
+                ] => {
+                    assert_eq!(viewer_role, "player");
+                    assert_eq!(*local_player, Some(player_a as u8));
+                    assert!(spectators.is_empty());
+                    assert!(!legal_actions.is_empty());
+                }
+                other => panic!("expected seated player rejoin response, got {other:?}"),
+            }
+            assert!(matches!(
+                active_a.as_ref().map(|active| active.viewer),
+                Some(MultiplayerViewer::Player(0))
+            ));
+        });
+    }
+
+    #[test]
+    fn multiplayer_spectator_receives_state_updates_and_cannot_act() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let (rooms, _) = test_room_store();
+            let rooms = Arc::new(rooms);
+            let (tx_c, mut rx_c) = mpsc::unbounded_channel();
+            let (room, player_a) = rooms
+                .create_room(
+                    "user_a",
+                    Some(0),
+                    Some("WATCH1".into()),
+                    Some(true),
+                    Some(10),
+                    Some(0),
+                )
+                .unwrap();
+            rooms.join_room("user_b", &room.code).unwrap();
+            let socket_id = room
+                .register_socket(
+                    "user_c",
+                    Some("Spec"),
+                    MultiplayerViewer::Spectator,
+                    tx_c.clone(),
+                )
+                .unwrap();
+            let mut active_c = Some(ActiveMultiplayerRoom {
+                room: Arc::clone(&room),
+                socket_id,
+                viewer: MultiplayerViewer::Spectator,
+            });
+
+            for msg in [
+                ClientMsg::PlayMultiplayerAction { action: 0 },
+                ClientMsg::ResignMultiplayerGame,
+                ClientMsg::AddMultiplayerOpponentTime,
+            ] {
+                let responses =
+                    handle_multiplayer_message(&rooms, "user_c", &tx_c, &mut active_c, msg).await;
+                match responses.as_slice() {
+                    [ServerMsg::Error { message }] => {
+                        assert!(message.contains("Spectators cannot"));
+                    }
+                    other => panic!("expected spectator command rejection, got {other:?}"),
+                }
+            }
+
+            {
+                let mut session = room.session.lock().await;
+                session.play_human_action(player_a, 0).unwrap();
+                room.broadcast_state_except(&session, None);
+            }
+
+            let mut spectator_state = None;
+            for _ in 0..3 {
+                let raw = rx_c.try_recv().expect("spectator state broadcast");
+                let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+                if value["type"] == serde_json::json!("GameState") {
+                    spectator_state = Some(value);
+                    break;
+                }
+            }
+            let state = spectator_state.expect("spectator should receive game state update");
+            assert_eq!(state["state"]["viewer"], serde_json::json!("spectator"));
+            assert_eq!(state["legal_actions"], serde_json::json!([]));
+        });
+    }
+
+    #[test]
+    fn multiplayer_lobby_empty_deadline_requires_zero_connected_viewers() {
+        let (rooms, _) = test_room_store();
+        let (room, _) = rooms
+            .create_room(
+                "user_a",
+                Some(0),
+                Some("EMPTY1".into()),
+                Some(true),
+                None,
+                None,
+            )
+            .unwrap();
+        rooms.join_room("user_b", &room.code).unwrap();
+
+        match rooms.lobby_msg() {
+            ServerMsg::MultiplayerLobby { rooms } => {
+                assert_eq!(rooms.len(), 1);
+                assert_eq!(rooms[0].connected, 0);
+                assert_eq!(rooms[0].spectator_count, 0);
+                assert!(rooms[0].empty_room_closes_at_ms.is_some());
+            }
+            other => panic!("expected lobby message, got {other:?}"),
+        }
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        room.register_socket("user_c", Some("Spec"), MultiplayerViewer::Spectator, tx)
+            .unwrap();
+        match rooms.lobby_msg() {
+            ServerMsg::MultiplayerLobby { rooms } => {
+                assert_eq!(rooms.len(), 1);
+                assert_eq!(rooms[0].connected, 0);
+                assert_eq!(rooms[0].spectator_count, 1);
+                assert!(rooms[0].empty_room_closes_at_ms.is_none());
+            }
+            other => panic!("expected lobby message, got {other:?}"),
+        }
     }
 
     #[test]
@@ -4430,12 +4912,18 @@ mod tests {
             rooms.join_room("user_b", "QUIT12").unwrap();
 
             let (tx, _rx) = mpsc::unbounded_channel();
-            let (socket_id, socket_player) = room.register_socket("user_a", tx.clone()).unwrap();
-            assert_eq!(socket_player, player_a);
+            let socket_id = room
+                .register_socket(
+                    "user_a",
+                    None,
+                    MultiplayerViewer::Player(player_a),
+                    tx.clone(),
+                )
+                .unwrap();
             let mut active_room = Some(ActiveMultiplayerRoom {
                 room,
                 socket_id,
-                player: player_a,
+                viewer: MultiplayerViewer::Player(player_a),
             });
 
             let responses = handle_multiplayer_message(
@@ -4448,13 +4936,15 @@ mod tests {
             .await;
 
             let share_slug = match responses.as_slice() {
-                [ServerMsg::MultiplayerRoom {
-                    status,
-                    winner,
-                    finish_reason,
-                    replay_share_slug,
-                    ..
-                }] => {
+                [
+                    ServerMsg::MultiplayerRoom {
+                        status,
+                        winner,
+                        finish_reason,
+                        replay_share_slug,
+                        ..
+                    },
+                ] => {
                     assert_eq!(status, "finished");
                     assert_eq!(*winner, Some(1));
                     assert_eq!(finish_reason.as_deref(), Some("resignation"));
@@ -4617,11 +5107,15 @@ mod tests {
             .await;
 
             match responses.as_slice() {
-                [ServerMsg::MultiplayerRoom {
-                    status,
-                    local_player,
-                    ..
-                }, ServerMsg::GameState { .. }, ..] => {
+                [
+                    ServerMsg::MultiplayerRoom {
+                        status,
+                        local_player,
+                        ..
+                    },
+                    ServerMsg::GameState { .. },
+                    ..,
+                ] => {
                     assert_eq!(status, "waiting");
                     assert_eq!(*local_player, Some(0));
                 }
@@ -4636,15 +5130,22 @@ mod tests {
         runtime.block_on(async {
             let (rooms, _) = test_room_store();
             let rooms = Arc::new(rooms);
-            let (room, _) = rooms
+            let (room, player_a) = rooms
                 .create_room("user_a", Some(0), None, None, None, None)
                 .unwrap();
             let (tx, _rx) = mpsc::unbounded_channel();
-            let (socket_id, player) = room.register_socket("user_a", tx.clone()).unwrap();
+            let socket_id = room
+                .register_socket(
+                    "user_a",
+                    None,
+                    MultiplayerViewer::Player(player_a),
+                    tx.clone(),
+                )
+                .unwrap();
             let mut active_room = Some(ActiveMultiplayerRoom {
                 room,
                 socket_id,
-                player,
+                viewer: MultiplayerViewer::Player(player_a),
             });
 
             let responses = handle_multiplayer_message(
@@ -4670,14 +5171,16 @@ mod tests {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
             let (rooms, _) = test_room_store();
-            let (room, _) = rooms
+            let (room, player_a) = rooms
                 .create_room("user_a", Some(0), None, None, None, None)
                 .unwrap();
-            rooms.join_room("user_b", &room.code).unwrap();
+            let (_, player_b) = rooms.join_room("user_b", &room.code).unwrap();
             let (tx_a, mut rx_a) = mpsc::unbounded_channel();
             let (tx_b, mut rx_b) = mpsc::unbounded_channel();
-            room.register_socket("user_a", tx_a).unwrap();
-            room.register_socket("user_b", tx_b).unwrap();
+            room.register_socket("user_a", None, MultiplayerViewer::Player(player_a), tx_a)
+                .unwrap();
+            room.register_socket("user_b", None, MultiplayerViewer::Player(player_b), tx_b)
+                .unwrap();
 
             let mut session = room.session.lock().await;
             assert!(session.play_human_action(1, 0).is_err());
@@ -4702,18 +5205,26 @@ mod tests {
         runtime.block_on(async {
             let (rooms, _) = test_room_store();
             let rooms = Arc::new(rooms);
-            let (room, _) = rooms
+            let (room, player_a) = rooms
                 .create_room("user_a", Some(0), None, None, None, None)
                 .unwrap();
-            rooms.join_room("user_b", &room.code).unwrap();
+            let (_, player_b) = rooms.join_room("user_b", &room.code).unwrap();
             let (tx_a, mut rx_a) = mpsc::unbounded_channel();
             let (tx_b, mut rx_b) = mpsc::unbounded_channel();
-            let (socket_id, player) = room.register_socket("user_a", tx_a.clone()).unwrap();
-            room.register_socket("user_b", tx_b).unwrap();
+            let socket_id = room
+                .register_socket(
+                    "user_a",
+                    None,
+                    MultiplayerViewer::Player(player_a),
+                    tx_a.clone(),
+                )
+                .unwrap();
+            room.register_socket("user_b", None, MultiplayerViewer::Player(player_b), tx_b)
+                .unwrap();
             let mut active_room = Some(ActiveMultiplayerRoom {
                 room,
                 socket_id,
-                player,
+                viewer: MultiplayerViewer::Player(player_a),
             });
 
             let responses = handle_multiplayer_message(
@@ -4725,12 +5236,16 @@ mod tests {
             )
             .await;
 
-            assert!(responses
-                .iter()
-                .any(|msg| matches!(msg, ServerMsg::GameState { .. })));
-            assert!(!responses
-                .iter()
-                .any(|msg| matches!(msg, ServerMsg::MultiplayerAnalysis { .. })));
+            assert!(
+                responses
+                    .iter()
+                    .any(|msg| matches!(msg, ServerMsg::GameState { .. }))
+            );
+            assert!(
+                !responses
+                    .iter()
+                    .any(|msg| matches!(msg, ServerMsg::MultiplayerAnalysis { .. }))
+            );
 
             let _state_msg: serde_json::Value =
                 serde_json::from_str(&rx_b.try_recv().expect("p2 state broadcast")).unwrap();
@@ -4753,8 +5268,12 @@ mod tests {
             actions: vec![0, 0],
         };
 
-        let saved_a = store.save("account_a", 11, 1, &log).unwrap();
-        store.save("account_b", 22, 1, &log).unwrap();
+        let saved_a = store
+            .save_with_result("account_a", 11, 1, &log, None)
+            .unwrap();
+        store
+            .save_with_result("account_b", 22, 1, &log, None)
+            .unwrap();
 
         let entries_a = store.list("account_a").unwrap();
         let entries_b = store.list("account_b").unwrap();
@@ -4784,7 +5303,9 @@ mod tests {
             actions: vec![0],
         };
 
-        let saved = store.save("account_a", 11, 1, &log).unwrap();
+        let saved = store
+            .save_with_result("account_a", 11, 1, &log, None)
+            .unwrap();
         assert!(!store.list("account_a").unwrap()[0].favorite);
 
         store
@@ -4824,6 +5345,90 @@ mod tests {
         assert_eq!(entries[0].result, "won_on_time");
 
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn list_replay_entries_preserves_stored_resignation_result() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let replay_store = Arc::new(ReplayStore::File(FileReplayStore::new(temp_replay_dir(
+                "replay-list-resignation-result",
+            ))));
+            let presenter = Arc::new(CountingPresenter {
+                created_games: AtomicUsize::new(0),
+            });
+            let evaluator: Arc<dyn Evaluator<TestGame> + Sync> = Arc::new(TestEvaluator);
+            let factory =
+                SessionFactory::new_game(evaluator, "test", presenter, [true, true], None);
+            let store = UserSessionStore::new(factory, Some(Arc::clone(&replay_store)));
+            let (user_session, _) = store.get_or_create("user_a");
+            let log = GameLog {
+                initial_state: "1".into(),
+                actions: Vec::new(),
+            };
+
+            replay_store
+                .save_with_result(
+                    &user_session.account_key,
+                    user_session.session_id,
+                    0,
+                    &log,
+                    Some("lost_by_resignation"),
+                )
+                .await
+                .expect("save resignation replay result");
+            let entries = list_replay_entries(&user_session)
+                .await
+                .expect("list replay entries");
+
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].result, "lost_by_resignation");
+        });
+    }
+
+    #[test]
+    fn save_current_replay_once_after_singleplayer_resign_saves_result() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let replay_store = Arc::new(ReplayStore::File(FileReplayStore::new(temp_replay_dir(
+                "singleplayer-resign-save-replay",
+            ))));
+            let presenter = Arc::new(CountingPresenter {
+                created_games: AtomicUsize::new(0),
+            });
+            let evaluator: Arc<dyn Evaluator<TestGame> + Sync> = Arc::new(TestEvaluator);
+            let factory =
+                SessionFactory::new_game(evaluator, "test", presenter, [true, true], None);
+            let store = UserSessionStore::new(factory, Some(Arc::clone(&replay_store)));
+            let (user_session, _) = store.get_or_create("user_a");
+
+            let saved = {
+                let mut session = user_session.session.lock().await;
+                session.handle(ClientMsg::SetSingleplayer {
+                    human_player: Some(0),
+                });
+                match session.handle(ClientMsg::ResignGame).as_slice() {
+                    [ServerMsg::GameState { is_terminal, .. }] => assert!(*is_terminal),
+                    other => panic!("expected terminal GameState after resign, got {other:?}"),
+                }
+                save_current_replay_once(&user_session, &mut session)
+                    .await
+                    .expect("resign should save a replay")
+            };
+
+            match saved {
+                ServerMsg::ReplaySaved { entry } => {
+                    assert_eq!(entry.action_count, 0);
+                    assert_eq!(entry.result, "lost_by_resignation");
+                }
+                other => panic!("expected ReplaySaved after resign, got {other:?}"),
+            }
+            let entries = list_replay_entries(&user_session)
+                .await
+                .expect("list replay entries");
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].result, "lost_by_resignation");
+        });
     }
 
     #[test]
@@ -4879,7 +5484,7 @@ mod tests {
             };
 
             let saved = store
-                .save(&account, 11, 1, &log)
+                .save_with_result(&account, 11, 1, &log, None)
                 .await
                 .expect("save replay");
             assert!(safe_share_slug(&saved.share_slug));

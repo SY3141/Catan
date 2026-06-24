@@ -78,6 +78,13 @@ const CITY_ACTION_RADIUS = 10 * BUILDING_SCALE;
 const CITY_HIGHLIGHT_HALF = 8 * BUILDING_SCALE;
 const CITY_HIGHLIGHT_SIZE = CITY_HIGHLIGHT_HALF * 2;
 const CITY_HIGHLIGHT_RX = 2 * BUILDING_SCALE;
+const ROAD_STROKE_WIDTH = 8;
+const LAST_MOVE_HIGHLIGHT_COLOR = '#fbbf24';
+const LAST_MOVE_ROAD_OUTLINE_WIDTH = ROAD_STROKE_WIDTH + 6;
+const LAST_MOVE_BUILDING_OUTLINE_WIDTH = 4.5;
+const ROAD_PREVIEW_STROKE_WIDTH = 12;
+const ROAD_ACTION_STROKE_WIDTH = 10;
+const ROAD_HIT_STROKE_WIDTH = 12;
 
 function catanPips(number) {
   return number === 7 ? 0 : Math.max(0, 6 - Math.abs(7 - number));
@@ -215,7 +222,7 @@ class Board {
         const [x1, y1] = board.nodes[n1];
         const el = this._el('line', {
           x1: x0, y1: y0, x2: x1, y2: y1,
-          stroke: 'transparent', 'stroke-width': 6,
+          stroke: 'transparent', 'stroke-width': ROAD_HIT_STROKE_WIDTH,
           'stroke-linecap': 'round', 'pointer-events': 'stroke'
         });
         this._attachTooltip(el, `E${eid}`);
@@ -258,9 +265,10 @@ class Board {
   }
 
   // Update dynamic elements from a frame.
-  updateFrame(frame, board) {
+  updateFrame(frame, board, lastMoveHighlights = null) {
     if (!this.boardData) return;
     const nodes = board.nodes;
+    const highlights = this._lastMoveHighlightSets(lastMoveHighlights);
 
     // Roads
     const roadsG = this.svg.querySelector('.roads');
@@ -273,9 +281,18 @@ class Board {
         const [n0, n1] = edge;
         const [x0, y0] = nodes[n0];
         const [x1, y1] = nodes[n1];
+        if (highlights.roads.has(Number(eid))) {
+          roadsG.appendChild(this._el('line', {
+            x1: x0, y1: y0, x2: x1, y2: y1,
+            stroke: LAST_MOVE_HIGHLIGHT_COLOR,
+            'stroke-width': LAST_MOVE_ROAD_OUTLINE_WIDTH,
+            'stroke-linecap': 'round',
+            'pointer-events': 'none'
+          }));
+        }
         const line = this._el('line', {
           x1: x0, y1: y0, x2: x1, y2: y1,
-          stroke: color, 'stroke-width': 4, 'stroke-linecap': 'round'
+          stroke: color, 'stroke-width': ROAD_STROKE_WIDTH, 'stroke-linecap': 'round'
         });
         roadsG.appendChild(line);
       }
@@ -288,6 +305,17 @@ class Board {
       const color = p === 0 ? '#4a9eff' : '#ff6b6b';
       for (const nid of frame.buildings[p].settlements) {
         const [x, y] = nodes[nid];
+        if (highlights.settlements.has(Number(nid))) {
+          const outline = this._el('polygon', {
+            points: this._settlementPoints(x, y),
+            fill: 'none',
+            stroke: LAST_MOVE_HIGHLIGHT_COLOR,
+            'stroke-width': LAST_MOVE_BUILDING_OUTLINE_WIDTH,
+            'stroke-linejoin': 'round',
+            'pointer-events': 'none'
+          });
+          buildG.appendChild(this._keepUpright(outline, x, y));
+        }
         const settlement = this._el('polygon', {
           points: this._settlementPoints(x, y),
           fill: color, stroke: '#111', 'stroke-width': 1
@@ -296,6 +324,17 @@ class Board {
       }
       for (const nid of frame.buildings[p].cities) {
         const [x, y] = nodes[nid];
+        if (highlights.cities.has(Number(nid))) {
+          const outline = this._el('polygon', {
+            points: this._cityPoints(x, y),
+            fill: 'none',
+            stroke: LAST_MOVE_HIGHLIGHT_COLOR,
+            'stroke-width': LAST_MOVE_BUILDING_OUTLINE_WIDTH,
+            'stroke-linejoin': 'round',
+            'pointer-events': 'none'
+          });
+          buildG.appendChild(this._keepUpright(outline, x, y));
+        }
         const city = this._el('polygon', {
           points: this._cityPoints(x, y),
           fill: color, stroke: '#111', 'stroke-width': 1
@@ -309,6 +348,15 @@ class Board {
     robberG.innerHTML = '';
     if (board.tiles[frame.robber]) {
       const tile = board.tiles[frame.robber];
+      if (highlights.robbers.has(Number(frame.robber))) {
+        robberG.appendChild(this._el('circle', {
+          cx: tile.cx, cy: tile.cy - 18, r: 11,
+          fill: 'none',
+          stroke: LAST_MOVE_HIGHLIGHT_COLOR,
+          'stroke-width': 4,
+          'pointer-events': 'none'
+        }));
+      }
       robberG.appendChild(this._el('circle', {
         cx: tile.cx, cy: tile.cy - 18, r: 8,
         fill: '#111', stroke: '#e94560', 'stroke-width': 2
@@ -316,6 +364,24 @@ class Board {
     }
 
     this._applyRotation();
+  }
+
+  _lastMoveHighlightSets(highlight) {
+    const sets = {
+      settlements: new Set(),
+      roads: new Set(),
+      cities: new Set(),
+      robbers: new Set(),
+    };
+    for (const piece of highlight?.pieces || []) {
+      const id = Number(piece?.id);
+      if (!Number.isInteger(id)) continue;
+      if (piece.kind === 'settlement') sets.settlements.add(id);
+      else if (piece.kind === 'road') sets.roads.add(id);
+      else if (piece.kind === 'city') sets.cities.add(id);
+      else if (piece.kind === 'robber') sets.robbers.add(id);
+    }
+    return sets;
   }
 
   // Show legal action overlays on the board.
@@ -366,7 +432,7 @@ class Board {
         const [x1, y1] = nodes[edge[1]];
         el = this._el('line', {
           x1: x0, y1: y0, x2: x1, y2: y1,
-          stroke: color, 'stroke-width': 6, 'stroke-linecap': 'round'
+          stroke: color, 'stroke-width': ROAD_PREVIEW_STROKE_WIDTH, 'stroke-linecap': 'round'
         });
       }
     }
@@ -445,7 +511,7 @@ class Board {
           const [x1, y1] = nodes[e[1]];
           el = this._el('line', {
             x1: x0, y1: y0, x2: x1, y2: y1,
-            stroke: color, 'stroke-width': 5, 'stroke-linecap': 'round',
+            stroke: color, 'stroke-width': ROAD_ACTION_STROKE_WIDTH, 'stroke-linecap': 'round',
             'pointer-events': 'none', class: 'search-highlight', opacity: 0.8,
           });
         }
@@ -597,7 +663,7 @@ class Board {
       const [x1, y1] = nodes[n1];
       const el = this._el('line', {
         x1: x0, y1: y0, x2: x1, y2: y1,
-        stroke: 'rgba(255,255,255,0.4)', 'stroke-width': 5,
+        stroke: 'rgba(255,255,255,0.4)', 'stroke-width': ROAD_ACTION_STROKE_WIDTH,
         'stroke-linecap': 'round', cursor: 'pointer', class: 'action-overlay'
       });
       el.dataset.action = action;
@@ -629,9 +695,9 @@ class Board {
       const tile = board.tiles[tid];
       if (!tile) return null;
       const el = this._el('circle', {
-        cx: tile.cx, cy: tile.cy, r: 15,
-        fill: 'rgba(255,255,255,0.15)', stroke: 'rgba(255,255,255,0.5)',
-        'stroke-width': 1.5, cursor: 'pointer', class: 'action-overlay'
+        cx: tile.cx, cy: tile.cy, r: 18,
+        fill: 'rgba(251,191,36,0.08)', stroke: 'rgba(251,191,36,0.55)',
+        'stroke-width': 2, cursor: 'pointer', class: 'action-overlay robber-action-overlay'
       });
       el.dataset.action = action;
       el.addEventListener('click', () => this.onActionClick?.(action));

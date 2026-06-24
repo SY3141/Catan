@@ -5,7 +5,11 @@
 const ANONYMOUS_SESSION_KEY_V1 = 'hexfish-anonymous-session-id';
 const ANONYMOUS_SESSION_KEY_V2 = 'hexfish-anonymous-session-id-v2';
 const WEBSOCKET_HEARTBEAT_INTERVAL_MS = 10000;
-const WEBSOCKET_HEARTBEAT_TIMEOUT_MS = 30000;
+const WEBSOCKET_HEARTBEAT_TIMEOUT_MS = 90000;
+const WEBSOCKET_HEARTBEAT_TIMEOUT_CLOSE_CODE = 4000;
+const WEBSOCKET_HEARTBEAT_SEND_FAILED_CLOSE_CODE = 4001;
+const WEBSOCKET_AUTH_CHANGED_CLOSE_CODE = 4002;
+const WEBSOCKET_APP_STOPPED_CLOSE_CODE = 4003;
 
 class Session {
   constructor(options = {}) {
@@ -74,10 +78,7 @@ class Session {
         this.connected = true;
         this._startHeartbeat(ws);
         if (handler) handler(msg);
-        for (const queued of this.queue) {
-          ws.send(queued);
-        }
-        this.queue = [];
+        this._flushQueue();
         const connectedHandler = this.handlers.Connected;
         if (connectedHandler) connectedHandler({ type: 'Connected' });
         return;
@@ -86,21 +87,38 @@ class Session {
       if (handler) handler(msg);
     };
 
-    ws.onclose = () => {
+    ws.onclose = (event) => {
       if (this.ws !== ws) return;
       const shouldReconnect = this.shouldReconnect;
+      const lastMessageAgeMs = Date.now() - this.lastMessageAt;
+      const discardedQueuedMessages = this.deferDuringSearch ? this.queue.length : 0;
+      if (this.deferDuringSearch) {
+        this.queue = [];
+        this.deferDuringSearch = false;
+      }
       this.connected = false;
       this.authenticated = false;
       this.ws = null;
       this._stopHeartbeat();
+      const details = {
+        type: 'Disconnected',
+        will_reconnect: shouldReconnect,
+        code: event.code,
+        reason: event.reason || '',
+        was_clean: event.wasClean,
+        last_message_age_ms: lastMessageAgeMs,
+        discarded_queued_messages: discardedQueuedMessages,
+      };
+      console.warn('HexFish WebSocket disconnected', details);
       const handler = this.handlers.Disconnected;
-      if (handler) handler({ type: 'Disconnected', will_reconnect: shouldReconnect });
+      if (handler) handler(details);
       if (shouldReconnect) {
         setTimeout(() => this.connect(), 2000);
       }
     };
 
     ws.onerror = () => {
+      console.warn('HexFish WebSocket error', { readyState: ws.readyState });
       ws.close();
     };
   }
@@ -135,6 +153,7 @@ class Session {
     if (!this.connected || !this.authenticated || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
       return;
     }
+    if (this.deferDuringSearch) return;
     const queued = this.queue;
     this.queue = [];
     for (const json of queued) {
@@ -142,7 +161,7 @@ class Session {
     }
   }
 
-  disconnect() {
+  disconnect(options = {}) {
     this.shouldReconnect = false;
     this.connected = false;
     this.authenticated = false;
@@ -150,7 +169,13 @@ class Session {
     this.queue = [];
     this._stopHeartbeat();
     if (this.ws) {
-      this.ws.close();
+      const code = Number(options.code);
+      const reason = String(options.reason || '').slice(0, 123);
+      if (Number.isInteger(code) && code >= 3000 && code <= 4999) {
+        this.ws.close(code, reason);
+      } else {
+        this.ws.close();
+      }
       this.ws = null;
     }
   }
@@ -168,13 +193,13 @@ class Session {
         return;
       }
       if (Date.now() - this.lastMessageAt > WEBSOCKET_HEARTBEAT_TIMEOUT_MS) {
-        ws.close();
+        ws.close(WEBSOCKET_HEARTBEAT_TIMEOUT_CLOSE_CODE, 'heartbeat timeout');
         return;
       }
       try {
         ws.send(JSON.stringify({ type: 'Ping' }));
       } catch (_error) {
-        ws.close();
+        ws.close(WEBSOCKET_HEARTBEAT_SEND_FAILED_CLOSE_CODE, 'heartbeat send failed');
       }
     }, WEBSOCKET_HEARTBEAT_INTERVAL_MS);
   }
