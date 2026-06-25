@@ -658,40 +658,6 @@
   min-width: 11rem;
 }
 
-#container-22b9435bf5d21daf1267cb569cf13015 {
-  width: 100%;
-  min-width: 0;
-}
-
-#container-22b9435bf5d21daf1267cb569cf13015 .container-22b9435bf5d21daf1267cb569cf13015__stand {
-  display: grid !important;
-  gap: 8px;
-  grid-template-columns: minmax(0, 1fr) !important;
-  justify-content: flex-start !important;
-}
-
-#container-22b9435bf5d21daf1267cb569cf13015 .container-22b9435bf5d21daf1267cb569cf13015__bn-container {
-  flex: 0 0 auto !important;
-  max-width: 100% !important;
-  padding: 0 !important;
-  width: 100% !important;
-}
-
-#container-22b9435bf5d21daf1267cb569cf13015 .container-22b9435bf5d21daf1267cb569cf13015__bn-container:nth-of-type(n + 7) {
-  display: none !important;
-}
-
-#container-22b9435bf5d21daf1267cb569cf13015 .container-22b9435bf5d21daf1267cb569cf13015__bn {
-  max-width: 100% !important;
-}
-
-#container-22b9435bf5d21daf1267cb569cf13015 .container-22b9435bf5d21daf1267cb569cf13015__title {
-  font-size: 11px !important;
-  line-height: 1.25 !important;
-  min-height: 0 !important;
-  padding: 6px 4px !important;
-}
-
 #board-play-area {
   min-width: 0;
   min-height: 0;

@@ -110,7 +110,6 @@ const MULTIPLAYER_LOBBY_COUNTDOWN_MS = 1000;
 const MULTIPLAYER_ROOM_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const DEFAULT_MULTIPLAYER_TIME_MINUTES = 15;
 const DEFAULT_MULTIPLAYER_INCREMENT_SECONDS = 0;
-const NATIVE_AD_SCRIPT_SRC = 'https://pl29822875.effectivecpmnetwork.com/22b9435bf5d21daf1267cb569cf13015/invoke.js';
 const SINGLEPLAYER_RECOVERY_REARM_MS = 250;
 const SINGLEPLAYER_RECOVERY_RETRY_MS = 1000;
 const SINGLEPLAYER_RECOVERY_MAX_ATTEMPTS = 3;
@@ -229,25 +228,8 @@ let multiplayerChatMessages = [];
 let serverSingleplayerHumanPlayer = undefined;
 let multiplayerTurnTitleTimer = null;
 let multiplayerTurnTitleActive = false;
-let nativeAdScriptRequested = false;
 window.hexfishProfileUsername = '';
 clearStoredProfileUsername();
-
-function loadNativeAdScript() {
-  if (nativeAdScriptRequested) return;
-  const adPanel = document.getElementById('native-ad-panel');
-  const adContainer = document.getElementById('container-22b9435bf5d21daf1267cb569cf13015');
-  if (!adPanel || !adContainer) return;
-  nativeAdScriptRequested = true;
-  const script = document.createElement('script');
-  script.async = true;
-  script.dataset.cfasync = 'false';
-  script.src = NATIVE_AD_SCRIPT_SRC;
-  adPanel.insertBefore(script, adContainer);
-}
-
-window.hexfishLoadNativeAds = loadNativeAdScript;
-document.addEventListener('hexfish-auth-signed-in', loadNativeAdScript);
 
 function guestMultiplayerMode() {
   return window.hexfishGuestMultiplayer === true;
