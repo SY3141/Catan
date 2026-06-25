@@ -779,6 +779,7 @@ impl<G: Game + 'static> GameSession<G> {
             | ClientMsg::JoinMultiplayerRoom { .. }
             | ClientMsg::LeaveMultiplayerRoom
             | ClientMsg::PlayMultiplayerAction { .. }
+            | ClientMsg::SendMultiplayerChat { .. }
             | ClientMsg::ResignMultiplayerGame
             | ClientMsg::AddMultiplayerOpponentTime => vec![ServerMsg::Error {
                 message: "Replay storage is not available in this session".into(),

@@ -76,6 +76,17 @@ pub struct MultiplayerSpectator {
     pub name: Option<String>,
 }
 
+/// One player-to-player chat message scoped to a live multiplayer room.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct MultiplayerChatMessage {
+    pub id: u64,
+    pub sent_at_ms: u64,
+    pub player: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub text: String,
+}
+
 /// Public lobby summary for an invite-code multiplayer room.
 #[derive(Clone, Debug, Serialize)]
 pub struct MultiplayerLobbyRoom {
@@ -198,6 +209,8 @@ pub enum ClientMsg {
     LeaveMultiplayerRoom,
     /// Human plays an action in the current multiplayer room.
     PlayMultiplayerAction { action: usize },
+    /// Send a player-only chat message in the current multiplayer room.
+    SendMultiplayerChat { text: String },
     /// Resign the current multiplayer game and award the win to the opponent.
     ResignMultiplayerGame,
     /// Add a small clock bonus to the opponent in the current multiplayer room.
@@ -307,6 +320,10 @@ pub enum ServerMsg {
     MultiplayerLobby { rooms: Vec<MultiplayerLobbyRoom> },
     /// Public multiplayer analysis bar update. Contains no action policy details.
     MultiplayerAnalysis { root_wdl: [f32; 3] },
+    /// Player-only chat history for the current multiplayer room.
+    MultiplayerChat {
+        messages: Vec<MultiplayerChatMessage>,
+    },
     /// MCTS search snapshot.
     Snapshot {
         snapshot: SearchSnapshot,
@@ -339,4 +356,37 @@ pub enum ServerMsg {
 pub struct ActionInfo {
     pub action: usize,
     pub label: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn multiplayer_chat_protocol_round_trips_client_and_server_shapes() {
+        let client: ClientMsg =
+            serde_json::from_str(r#"{"type":"SendMultiplayerChat","text":"hello"}"#)
+                .expect("chat client message");
+        match client {
+            ClientMsg::SendMultiplayerChat { text } => assert_eq!(text, "hello"),
+            other => panic!("expected SendMultiplayerChat, got {other:?}"),
+        }
+
+        let server = ServerMsg::MultiplayerChat {
+            messages: vec![MultiplayerChatMessage {
+                id: 7,
+                sent_at_ms: 1234,
+                player: 1,
+                name: Some("Bob".into()),
+                text: "hi".into(),
+            }],
+        };
+        let value: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&server).unwrap()).unwrap();
+        assert_eq!(value["type"], "MultiplayerChat");
+        assert_eq!(value["messages"][0]["id"], 7);
+        assert_eq!(value["messages"][0]["player"], 1);
+        assert_eq!(value["messages"][0]["name"], "Bob");
+        assert_eq!(value["messages"][0]["text"], "hi");
+    }
 }

@@ -224,6 +224,8 @@ let playMode = {
   multiplayerStatus: '',
   rejoiningRoom: false,
 };
+let multiplayerChatRoomCode = '';
+let multiplayerChatMessages = [];
 let serverSingleplayerHumanPlayer = undefined;
 let multiplayerTurnTitleTimer = null;
 let multiplayerTurnTitleActive = false;
@@ -2138,6 +2140,91 @@ function scheduleMultiplayerRoomUiUpdate() {
   });
 }
 
+function resetMultiplayerChat(roomCode = '') {
+  multiplayerChatRoomCode = normalizeRoomCode(roomCode);
+  multiplayerChatMessages = [];
+  renderMultiplayerChat();
+}
+
+function normalizeMultiplayerChatMessages(messages) {
+  if (!Array.isArray(messages)) return [];
+  return messages.map((message) => {
+    const player = Number(message?.player);
+    const id = Number(message?.id);
+    const sentAt = Number(message?.sent_at_ms);
+    return {
+      id: Number.isFinite(id) ? id : 0,
+      sent_at_ms: Number.isFinite(sentAt) ? sentAt : 0,
+      player: player === 0 || player === 1 ? player : null,
+      name: String(message?.name || '').trim(),
+      text: String(message?.text || ''),
+    };
+  }).filter(message => message.player != null && message.text);
+}
+
+function updateMultiplayerChatUi() {
+  renderMultiplayerChat();
+}
+
+function renderMultiplayerChat() {
+  const panel = document.getElementById('multiplayer-chat-panel');
+  const log = document.getElementById('multiplayer-chat-log');
+  const form = document.getElementById('multiplayer-chat-form');
+  const input = document.getElementById('multiplayer-chat-input');
+  const button = document.getElementById('btn-send-multiplayer-chat');
+  const roomEl = document.getElementById('multiplayer-chat-room');
+  if (!panel || !log || !form || !input || !button) return;
+
+  const roomCode = normalizeRoomCode(playMode.multiplayerRoom?.code || multiplayerChatRoomCode);
+  const show = multiplayerPlayerActive() && !!roomCode;
+  panel.classList.toggle('hidden', !show);
+  input.disabled = !show || !session.connected;
+  button.disabled = !show || !session.connected;
+  if (roomEl) roomEl.textContent = show ? roomCode : '';
+  if (!show) return;
+
+  const wasAtBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 8;
+  log.innerHTML = '';
+  for (const message of multiplayerChatMessages) {
+    const own = message.player === playMode.humanPlayer;
+    const row = document.createElement('div');
+    row.className = `multiplayer-chat-message ${own ? 'own' : 'other'} p${message.player + 1}`;
+
+    const meta = document.createElement('div');
+    meta.className = 'multiplayer-chat-meta';
+    meta.textContent = message.name || playerDisplayName(message.player);
+
+    const text = document.createElement('div');
+    text.className = 'multiplayer-chat-text';
+    text.textContent = message.text;
+
+    row.append(meta, text);
+    log.appendChild(row);
+  }
+  if (wasAtBottom) log.scrollTop = log.scrollHeight;
+}
+
+function handleMultiplayerChatMessage(msg) {
+  if (!multiplayerPlayerActive()) return;
+  const roomCode = normalizeRoomCode(playMode.multiplayerRoom?.code);
+  if (!roomCode) return;
+  multiplayerChatRoomCode = roomCode;
+  multiplayerChatMessages = normalizeMultiplayerChatMessages(msg.messages);
+  renderMultiplayerChat();
+}
+
+function sendMultiplayerChat(event) {
+  event?.preventDefault();
+  if (!multiplayerPlayerActive() || !session.connected) return;
+  const input = document.getElementById('multiplayer-chat-input');
+  if (!input) return;
+  const text = String(input.value || '');
+  if (!text.trim()) return;
+  input.value = '';
+  session.send({ type: 'SendMultiplayerChat', text });
+  renderMultiplayerChat();
+}
+
 function updateMultiplayerReconnectUi() {
   const row = document.getElementById('multiplayer-reconnect-row');
   const codeEl = document.getElementById('multiplayer-reconnect-code');
@@ -2163,6 +2250,7 @@ function updateMultiplayerRoomUi() {
   updateMultiplayerClockTimer();
   updateMultiplayerResultBanner();
   updateBoardSpectatorButton();
+  updateMultiplayerChatUi();
 
   if (!room) {
     if (selectedPlayMode === 'multiplayer') {
@@ -2282,6 +2370,7 @@ function resetMultiplayerState(statusText = '') {
   playMode.rejoiningRoom = false;
   pendingReconnectRoomCode = '';
   shownMultiplayerReplayShareSlug = '';
+  resetMultiplayerChat('');
   updateMultiplayerRoomUi();
   updateMultiplayerResignButton();
   if (statusText) setMultiplayerSetupStatus(statusText);
@@ -2754,6 +2843,7 @@ function handleMultiplayerRoomMessage(msg) {
   if (msg.status === 'left') {
     setRoomCodeInUrl('');
     resetMultiplayerState('');
+    resetMultiplayerChat('');
     shownMultiplayerReplayShareSlug = '';
     if (activeView === 'play') showPlaySetupView();
     updateMultiplayerTurnAttention();
@@ -2799,6 +2889,11 @@ function handleMultiplayerRoomMessage(msg) {
     finish_reason: msg.finish_reason,
     replay_share_slug: msg.replay_share_slug,
   };
+  if (previousRoomCode !== nextRoomCode) {
+    resetMultiplayerChat(nextRoomCode);
+  } else {
+    updateMultiplayerChatUi();
+  }
   multiplayerClockSyncedAtMs = Date.now();
   writeLastMultiplayerRoomCode(playMode.multiplayerRoom.code);
   setRoomCodeInUrl(playMode.multiplayerRoom.code);
@@ -2883,6 +2978,7 @@ session.on('GameState', (msg) => {
 });
 
 session.on('MultiplayerRoom', handleMultiplayerRoomMessage);
+session.on('MultiplayerChat', handleMultiplayerChatMessage);
 
 function runPendingNewGameSearch(msg) {
   if (!pendingNewGameSearch || msg.replay) return;
@@ -4097,6 +4193,7 @@ function startPlayGame() {
   playMode.multiplayerRoom = null;
   playMode.multiplayerStatus = '';
   playMode.rejoiningRoom = false;
+  resetMultiplayerChat('');
   resetSingleplayerRecoveryState();
   pendingNewGameSearch = false;
   controls.stopAutoplay();
@@ -4675,6 +4772,7 @@ document.getElementById('btn-copy-multiplayer-invite')?.addEventListener('click'
 document.getElementById('btn-refresh-multiplayer-lobby')?.addEventListener('click', requestMultiplayerLobby);
 document.getElementById('btn-resign-multiplayer')?.addEventListener('click', resignMultiplayerGame);
 document.getElementById('btn-resign-singleplayer')?.addEventListener('click', resignSingleplayerGame);
+document.getElementById('multiplayer-chat-form')?.addEventListener('submit', sendMultiplayerChat);
 document.getElementById('roll-badge')?.addEventListener('click', handleRollBadgeClick);
 document.getElementById('end-turn-badge')?.addEventListener('click', handleEndTurnBadgeClick);
 document.getElementById('btn-add-opponent-time-0')?.addEventListener('click', addOpponentClockTime);

@@ -3,7 +3,7 @@ mod redis_multiplayer;
 mod session;
 mod traits;
 
-pub use protocol::{ClientMsg, SearchBudget, ServerMsg};
+pub use protocol::{ClientMsg, MultiplayerChatMessage, SearchBudget, ServerMsg};
 pub use session::GameSession;
 pub use traits::GamePresenter;
 
@@ -25,7 +25,7 @@ use axum::{
         Path,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
-    response::Redirect,
+    response::{Html, Redirect},
 };
 use futures_util::FutureExt;
 use tokio::sync::{Mutex, mpsc};
@@ -47,6 +47,9 @@ const SEARCH_PROGRESS_KEEPALIVE_MS: u64 = 5_000;
 const SEARCH_INTERRUPT_INTERVAL: u32 = 8;
 const MULTIPLAYER_ANALYSIS_SIMS: u32 = 200;
 const MULTIPLAYER_EMPTY_ROOM_GRACE_MS: u64 = 5 * 60_000;
+const MULTIPLAYER_CHAT_HISTORY_LIMIT: usize = 100;
+const MULTIPLAYER_CHAT_TEXT_LIMIT: usize = 280;
+const ALL_REPLAYS_PAGE_LIMIT: usize = 500;
 const MAX_WEBSOCKET_MESSAGE_BYTES: usize = 64 * 1024;
 const BOARD_FINGERPRINT_RETRIES: usize = 64;
 const DATABASE_URL_ENV: &str = "DATABASE_URL";
@@ -167,6 +170,11 @@ struct LoadedReplay {
     log: GameLog,
 }
 
+struct ReplayEntryWithAccount {
+    account_key: String,
+    entry: ReplayEntry,
+}
+
 #[derive(Clone)]
 enum ReplayStore {
     File(FileReplayStore),
@@ -204,6 +212,13 @@ impl ReplayStore {
         match self {
             Self::File(store) => store.list(account_key),
             Self::Postgres(store) => store.list(account_key).await,
+        }
+    }
+
+    async fn list_all(&self, limit: usize) -> Result<Vec<ReplayEntryWithAccount>, String> {
+        match self {
+            Self::File(store) => store.list_all(limit),
+            Self::Postgres(store) => store.list_all(limit).await,
         }
     }
 
@@ -322,6 +337,44 @@ impl FileReplayStore {
                 .cmp(&a.saved_at_ms)
                 .then_with(|| b.id.cmp(&a.id))
         });
+        Ok(out)
+    }
+
+    fn list_all(&self, limit: usize) -> Result<Vec<ReplayEntryWithAccount>, String> {
+        let accounts = match std::fs::read_dir(&self.root) {
+            Ok(accounts) => accounts,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(format!("failed to read replay storage: {e}")),
+        };
+
+        let mut out = Vec::new();
+        for account in accounts {
+            let account = account.map_err(|e| format!("failed to read replay account: {e}"))?;
+            let account_path = account.path();
+            if !account_path.is_dir() {
+                continue;
+            }
+            let Some(account_key) = account_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_string)
+            else {
+                continue;
+            };
+            for entry in self.list(&account_key)? {
+                out.push(ReplayEntryWithAccount {
+                    account_key: account_key.clone(),
+                    entry,
+                });
+            }
+        }
+        out.sort_by(|a, b| {
+            b.entry
+                .saved_at_ms
+                .cmp(&a.entry.saved_at_ms)
+                .then_with(|| b.entry.id.cmp(&a.entry.id))
+        });
+        out.truncate(limit);
         Ok(out)
     }
 
@@ -572,6 +625,33 @@ impl PostgresReplayStore {
             .map_err(|e| format!("failed to list replays: {e}"))?;
 
         rows.iter().map(replay_entry_from_row).collect()
+    }
+
+    async fn list_all(&self, limit: usize) -> Result<Vec<ReplayEntryWithAccount>, String> {
+        let limit = i64::try_from(limit)
+            .map_err(|_| "replay list limit does not fit in Postgres BIGINT".to_string())?;
+        let rows = self
+            .client
+            .query(
+                r#"
+                SELECT account_key, id, saved_at_ms, action_count, result, favorite, share_slug
+                FROM replay_logs
+                ORDER BY saved_at_ms DESC, id DESC
+                LIMIT $1
+                "#,
+                &[&limit],
+            )
+            .await
+            .map_err(|e| format!("failed to list all replays: {e}"))?;
+
+        rows.iter()
+            .map(|row| {
+                Ok(ReplayEntryWithAccount {
+                    account_key: row.get("account_key"),
+                    entry: replay_entry_from_row(row)?,
+                })
+            })
+            .collect()
     }
 
     async fn delete(&self, account_key: &str, id: &str) -> Result<(), String> {
@@ -1074,10 +1154,12 @@ struct MultiplayerRoom<G: Game + 'static> {
     session: Arc<Mutex<GameSession<G>>>,
     seats: StdMutex<[Option<SeatOwner>; 2]>,
     sockets: StdMutex<HashMap<u64, MultiplayerSocket>>,
+    chat_messages: StdMutex<Vec<MultiplayerChatMessage>>,
     clock: StdMutex<RoomClock>,
     outcome: StdMutex<Option<RoomOutcome>>,
     clock_generation: AtomicU64,
     next_socket_id: AtomicU64,
+    next_chat_id: AtomicU64,
     replay_store: Option<Arc<ReplayStore>>,
     next_replay_counter: AtomicU64,
     replay_saved: AtomicBool,
@@ -1108,10 +1190,12 @@ impl<G: Game + 'static> MultiplayerRoom<G> {
             session: Arc::new(Mutex::new(session)),
             seats: StdMutex::new(seats),
             sockets: StdMutex::new(HashMap::new()),
+            chat_messages: StdMutex::new(Vec::new()),
             clock: StdMutex::new(RoomClock::new(time_minutes)),
             outcome: StdMutex::new(None),
             clock_generation: AtomicU64::new(0),
             next_socket_id: AtomicU64::new(1),
+            next_chat_id: AtomicU64::new(1),
             replay_store,
             next_replay_counter: AtomicU64::new(1),
             replay_saved: AtomicBool::new(false),
@@ -1289,6 +1373,60 @@ impl<G: Game + 'static> MultiplayerRoom<G> {
 
     fn room_msg_for_active(&self, active: &ActiveMultiplayerRoom<G>) -> ServerMsg {
         self.room_msg_for_viewer(active.viewer, Some(active.socket_id))
+    }
+
+    fn chat_msg(&self) -> Option<ServerMsg> {
+        let messages = self
+            .chat_messages
+            .lock()
+            .expect("room chat lock poisoned")
+            .clone();
+        (!messages.is_empty()).then_some(ServerMsg::MultiplayerChat { messages })
+    }
+
+    fn player_chat_name(&self, player: usize) -> Option<String> {
+        self.seats
+            .lock()
+            .expect("room seats lock poisoned")
+            .get(player)
+            .and_then(|seat| seat.as_ref())
+            .and_then(|seat| seat.display_name.clone())
+    }
+
+    fn push_chat_message(&self, player: usize, text: &str) -> Result<ServerMsg, String> {
+        let text = sanitize_multiplayer_chat_text(text)?;
+        let id = self.next_chat_id.fetch_add(1, Ordering::Relaxed);
+        let message = MultiplayerChatMessage {
+            id,
+            sent_at_ms: current_unix_ms(),
+            player: player as u8,
+            name: self.player_chat_name(player),
+            text,
+        };
+        let messages = {
+            let mut messages = self
+                .chat_messages
+                .lock()
+                .expect("room chat lock poisoned");
+            messages.push(message);
+            let overflow = messages.len().saturating_sub(MULTIPLAYER_CHAT_HISTORY_LIMIT);
+            if overflow > 0 {
+                messages.drain(0..overflow);
+            }
+            messages.clone()
+        };
+        self.touch();
+        Ok(ServerMsg::MultiplayerChat { messages })
+    }
+
+    fn broadcast_chat_except(&self, excluded_socket_id: Option<u64>) {
+        let Some(msg) = self.chat_msg() else {
+            return;
+        };
+        let json = serde_json::to_string(&msg).ok();
+        self.broadcast_with(excluded_socket_id, |_room, _socket_id, socket| {
+            socket.viewer.player().and(json.clone())
+        });
     }
 
     fn lobby_entry(&self) -> MultiplayerLobbyRoom {
@@ -2355,6 +2493,21 @@ fn parse_env_bool(value: &str) -> bool {
     )
 }
 
+fn sanitize_multiplayer_chat_text(text: &str) -> Result<String, String> {
+    let cleaned = text
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .collect::<String>();
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        return Err("Chat message cannot be empty".into());
+    }
+    Ok(trimmed
+        .chars()
+        .take(MULTIPLAYER_CHAT_TEXT_LIMIT)
+        .collect())
+}
+
 async fn register_multiplayer_lobby_socket<G: Game + 'static>(
     runtime: &Arc<MultiplayerRuntime<G>>,
     tx: mpsc::UnboundedSender<String>,
@@ -2456,6 +2609,126 @@ async fn replay_link_redirect(Path(slug): Path<String>) -> Redirect {
     }
 }
 
+async fn all_replays_page(replay_store: Option<Arc<ReplayStore>>) -> Html<String> {
+    let (rows, error) = match replay_store {
+        Some(store) => match store.list_all(ALL_REPLAYS_PAGE_LIMIT).await {
+            Ok(rows) => (rows, None),
+            Err(message) => (Vec::new(), Some(message)),
+        },
+        None => (
+            Vec::new(),
+            Some("Replay storage is not configured".to_string()),
+        ),
+    };
+    Html(render_all_replays_page(&rows, error.as_deref()))
+}
+
+fn render_all_replays_page(rows: &[ReplayEntryWithAccount], error: Option<&str>) -> String {
+    let mut html = String::from(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>All Replay Logs</title>
+<style>
+:root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #111827; color: #e5e7eb; }
+body { margin: 0; padding: 24px; background: #111827; }
+main { max-width: 1180px; margin: 0 auto; }
+header { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
+h1 { margin: 0; font-size: 22px; font-weight: 800; }
+.meta { color: #9ca3af; font-size: 13px; }
+.error { margin-bottom: 16px; border: 1px solid #7f1d1d; border-radius: 6px; background: #3f1218; color: #fecaca; padding: 10px 12px; }
+table { width: 100%; border-collapse: collapse; overflow: hidden; border: 1px solid #374151; border-radius: 6px; background: #16213e; }
+th, td { padding: 8px 10px; border-bottom: 1px solid #283247; text-align: left; font-size: 13px; vertical-align: top; }
+th { position: sticky; top: 0; background: #0f172a; color: #cbd5e1; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+tr:last-child td { border-bottom: 0; }
+td.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; color: #cbd5e1; }
+td.number { text-align: right; }
+a { color: #93c5fd; text-decoration: none; font-weight: 700; }
+a:hover { color: #bfdbfe; text-decoration: underline; }
+.empty { border: 1px dashed #374151; border-radius: 6px; color: #9ca3af; padding: 18px; background: #16213e; }
+@media (max-width: 760px) { body { padding: 12px; } table { display: block; overflow-x: auto; } header { display: block; } .meta { margin-top: 6px; } }
+</style>
+</head>
+<body>
+<main>
+"#,
+    );
+    html.push_str("<header><h1>All Replay Logs</h1><div class=\"meta\">Latest ");
+    html.push_str(&ALL_REPLAYS_PAGE_LIMIT.to_string());
+    html.push_str(" saved games</div></header>\n");
+    if let Some(error) = error {
+        html.push_str("<div class=\"error\">");
+        html.push_str(&escape_html(error));
+        html.push_str("</div>\n");
+    }
+    if rows.is_empty() {
+        html.push_str("<div class=\"empty\">No replay logs found.</div>\n");
+    } else {
+        html.push_str(
+            r#"<table>
+<thead><tr><th>Saved</th><th>Result</th><th>Actions</th><th>Account</th><th>Replay ID</th><th>Open</th></tr></thead>
+<tbody>
+"#,
+        );
+        for row in rows {
+            let replay = &row.entry;
+            html.push_str("<tr><td><time data-ms=\"");
+            html.push_str(&replay.saved_at_ms.to_string());
+            html.push_str("\">");
+            html.push_str(&replay.saved_at_ms.to_string());
+            html.push_str("</time></td><td>");
+            html.push_str(&escape_html(&replay.result));
+            html.push_str("</td><td class=\"number\">");
+            html.push_str(&replay.action_count.to_string());
+            html.push_str("</td><td class=\"mono\">");
+            html.push_str(&escape_html(&row.account_key));
+            html.push_str("</td><td class=\"mono\">");
+            html.push_str(&escape_html(&replay.id));
+            html.push_str("</td><td><a href=\"/r/");
+            html.push_str(&escape_html(&replay.share_slug));
+            html.push_str("\">Open</a></td></tr>\n");
+        }
+        html.push_str(
+            r#"</tbody>
+</table>
+"#,
+        );
+    }
+    html.push_str(
+        r#"</main>
+<script>
+for (const el of document.querySelectorAll('time[data-ms]')) {
+  const ms = Number(el.dataset.ms);
+  if (Number.isFinite(ms)) {
+    el.textContent = new Date(ms).toLocaleString();
+    el.title = String(ms);
+  }
+}
+</script>
+</body>
+</html>
+"#,
+    );
+    html
+}
+
+fn escape_html(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
 /// Launch the web analysis board server.
 ///
 /// Serves static files from the presenter's `static_dir()` and provides
@@ -2477,7 +2750,7 @@ pub async fn serve<G: Game + 'static>(
         replay_store.clone(),
     ));
     let multiplayer =
-        multiplayer_runtime_from_config(Arc::clone(&store.factory), replay_store).await;
+        multiplayer_runtime_from_config(Arc::clone(&store.factory), replay_store.clone()).await;
     println!("Anonymous HexFish WebSocket sessions enabled");
     tracing::info!("anonymous HexFish WebSocket sessions enabled");
 
@@ -2493,6 +2766,16 @@ pub async fn serve<G: Game + 'static>(
                         async move {
                             ws.on_upgrade(move |socket| handle_socket(socket, store, multiplayer))
                         }
+                    }
+                }),
+            )
+            .route(
+                "/all",
+                axum::routing::get({
+                    let replay_store = replay_store.clone();
+                    move || {
+                        let replay_store = replay_store.clone();
+                        async move { all_replays_page(replay_store).await }
                     }
                 }),
             )
@@ -3416,6 +3699,7 @@ fn is_multiplayer_msg(msg: &ClientMsg) -> bool {
             | ClientMsg::JoinMultiplayerRoom { .. }
             | ClientMsg::LeaveMultiplayerRoom
             | ClientMsg::PlayMultiplayerAction { .. }
+            | ClientMsg::SendMultiplayerChat { .. }
             | ClientMsg::ResignMultiplayerGame
             | ClientMsg::AddMultiplayerOpponentTime
     )
@@ -3537,7 +3821,13 @@ async fn handle_multiplayer_message_for_user<G: Game + 'static>(
                     message: "Join a multiplayer room before refreshing it".into(),
                 }];
             };
-            vec![active.room.room_msg_for_active(active)]
+            let mut messages = vec![active.room.room_msg_for_active(active)];
+            if active.viewer.player().is_some() {
+                if let Some(chat) = active.room.chat_msg() {
+                    messages.push(chat);
+                }
+            }
+            messages
         }
         ClientMsg::CreateMultiplayerRoom {
             preferred_player,
@@ -3653,6 +3943,25 @@ async fn handle_multiplayer_message_for_user<G: Game + 'static>(
             schedule_multiplayer_clock_timeout(Arc::clone(&room));
             schedule_multiplayer_analysis(room, analysis_generation, analysis_session);
             responses
+        }
+        ClientMsg::SendMultiplayerChat { text } => {
+            let Some(active) = active_room.as_ref() else {
+                return vec![ServerMsg::Error {
+                    message: "Join a multiplayer room before chatting".into(),
+                }];
+            };
+            let Some(player) = active.viewer.player() else {
+                return vec![ServerMsg::Error {
+                    message: "Spectators cannot send multiplayer chat".into(),
+                }];
+            };
+            let room = Arc::clone(&active.room);
+            let msg = match room.push_chat_message(player, &text) {
+                Ok(msg) => msg,
+                Err(message) => return vec![ServerMsg::Error { message }],
+            };
+            room.broadcast_chat_except(Some(active.socket_id));
+            vec![msg]
         }
         history_msg @ (ClientMsg::Undo | ClientMsg::Redo) => {
             let Some(active) = active_room.as_ref() else {
@@ -3785,7 +4094,12 @@ async fn activate_multiplayer_room<G: Game + 'static>(
             MultiplayerViewer::Player(player) => session.state_msg_for_player(player),
             MultiplayerViewer::Spectator => session.state_msg_for_spectator(),
         };
-        let responses = vec![room.room_msg_for_viewer(viewer, Some(socket_id)), state_msg];
+        let mut responses = vec![room.room_msg_for_viewer(viewer, Some(socket_id)), state_msg];
+        if viewer.player().is_some() {
+            if let Some(chat) = room.chat_msg() {
+                responses.push(chat);
+            }
+        }
         let analysis_job = room.is_full().then(|| {
             (
                 room.next_analysis_generation(),
@@ -4019,11 +4333,12 @@ mod tests {
     use super::{
         ActiveMultiplayerRoom, ClientMsg, FileReplayStore, GamePresenter, MultiplayerRoomStore,
         MultiplayerViewer, ReplayStore, RoomClock, RoomOutcome, SearchBudget, ServerMsg,
-        SessionFactory, UserSessionStore, ViewTarget, anonymous_user_id_from_id,
-        anonymous_user_id_from_token, client_msg_target, current_unix_ms, detach_active_room,
-        handle_multiplayer_message, handle_profile_message, list_replay_entries, parse_env_bool,
-        redacted_account_key, replay_result_for_room_outcome, safe_replay_id, safe_share_slug,
-        save_current_replay_once, should_send_search_progress, socket_session_key_from_auth,
+        SessionFactory, UserSessionStore, ViewTarget, MULTIPLAYER_CHAT_HISTORY_LIMIT,
+        anonymous_user_id_from_id, anonymous_user_id_from_token, client_msg_target,
+        current_unix_ms, detach_active_room, handle_multiplayer_message, handle_profile_message,
+        list_replay_entries, parse_env_bool, redacted_account_key, replay_result_for_room_outcome,
+        safe_replay_id, safe_share_slug, save_current_replay_once, should_send_search_progress,
+        socket_session_key_from_auth,
     };
 
     #[derive(Clone)]
@@ -4270,6 +4585,22 @@ mod tests {
         panic!("expected multiplayer analysis broadcast");
     }
 
+    async fn recv_multiplayer_chat(
+        rx: &mut mpsc::UnboundedReceiver<String>,
+    ) -> serde_json::Value {
+        for _ in 0..4 {
+            let raw = timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .expect("multiplayer chat timeout")
+                .expect("multiplayer chat broadcast");
+            let msg: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            if msg["type"] == "MultiplayerChat" {
+                return msg;
+            }
+        }
+        panic!("expected multiplayer chat broadcast");
+    }
+
     #[test]
     fn anonymous_tokens_are_stable_when_safe() {
         assert_eq!(
@@ -4433,6 +4764,218 @@ mod tests {
             }
             other => panic!("expected multiplayer room message, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn multiplayer_chat_broadcasts_to_players_and_survives_reconnect() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let (rooms, _) = test_room_store();
+            let rooms = Arc::new(rooms);
+            let (tx_a, mut rx_a) = mpsc::unbounded_channel();
+            let (tx_b, mut rx_b) = mpsc::unbounded_channel();
+            let mut active_a = None;
+            let mut active_b = None;
+
+            let _ = handle_multiplayer_message(
+                &rooms,
+                "user_a",
+                &tx_a,
+                &mut active_a,
+                ClientMsg::CreateMultiplayerRoom {
+                    preferred_player: Some(0),
+                    code: Some("CHAT01".into()),
+                    is_public: Some(true),
+                    time_minutes: None,
+                    increment_seconds: None,
+                },
+            )
+            .await;
+            let _ = handle_multiplayer_message(
+                &rooms,
+                "user_b",
+                &tx_b,
+                &mut active_b,
+                ClientMsg::JoinMultiplayerRoom {
+                    code: "CHAT01".into(),
+                },
+            )
+            .await;
+            while rx_a.try_recv().is_ok() {}
+
+            let responses = handle_multiplayer_message(
+                &rooms,
+                "user_a",
+                &tx_a,
+                &mut active_a,
+                ClientMsg::SendMultiplayerChat {
+                    text: " hello opponent ".into(),
+                },
+            )
+            .await;
+            match responses.as_slice() {
+                [ServerMsg::MultiplayerChat { messages }] => {
+                    assert_eq!(messages.len(), 1);
+                    assert_eq!(messages[0].player, 0);
+                    assert_eq!(messages[0].text, "hello opponent");
+                }
+                other => panic!("expected chat response, got {other:?}"),
+            }
+
+            let broadcast = recv_multiplayer_chat(&mut rx_b).await;
+            assert_eq!(broadcast["messages"][0]["text"], "hello opponent");
+
+            let refresh = handle_multiplayer_message(
+                &rooms,
+                "user_b",
+                &tx_b,
+                &mut active_b,
+                ClientMsg::GetMultiplayerRoom,
+            )
+            .await;
+            assert!(refresh.iter().any(|msg| {
+                matches!(
+                    msg,
+                    ServerMsg::MultiplayerChat { messages }
+                        if messages.first().is_some_and(|message| message.text == "hello opponent")
+                )
+            }));
+
+            assert!(detach_active_room(&rooms, &mut active_b));
+            let (tx_b_rejoin, _rx_b_rejoin) = mpsc::unbounded_channel();
+            let rejoin = handle_multiplayer_message(
+                &rooms,
+                "user_b",
+                &tx_b_rejoin,
+                &mut active_b,
+                ClientMsg::JoinMultiplayerRoom {
+                    code: "CHAT01".into(),
+                },
+            )
+            .await;
+            assert!(rejoin.iter().any(|msg| {
+                matches!(
+                    msg,
+                    ServerMsg::MultiplayerChat { messages }
+                        if messages.first().is_some_and(|message| message.text == "hello opponent")
+                )
+            }));
+        });
+    }
+
+    #[test]
+    fn multiplayer_chat_sanitizes_and_caps_messages() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let (rooms, _) = test_room_store();
+            let rooms = Arc::new(rooms);
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let mut active_room = None;
+            let _ = handle_multiplayer_message(
+                &rooms,
+                "user_a",
+                &tx,
+                &mut active_room,
+                ClientMsg::CreateMultiplayerRoom {
+                    preferred_player: Some(0),
+                    code: Some("CHAT02".into()),
+                    is_public: Some(true),
+                    time_minutes: None,
+                    increment_seconds: None,
+                },
+            )
+            .await;
+
+            let empty = handle_multiplayer_message(
+                &rooms,
+                "user_a",
+                &tx,
+                &mut active_room,
+                ClientMsg::SendMultiplayerChat { text: " \t ".into() },
+            )
+            .await;
+            assert!(matches!(
+                empty.as_slice(),
+                [ServerMsg::Error { message }] if message.contains("empty")
+            ));
+
+            let long = "x".repeat(300);
+            let capped = handle_multiplayer_message(
+                &rooms,
+                "user_a",
+                &tx,
+                &mut active_room,
+                ClientMsg::SendMultiplayerChat {
+                    text: format!("hi\u{0007}{long}"),
+                },
+            )
+            .await;
+            match capped.as_slice() {
+                [ServerMsg::MultiplayerChat { messages }] => {
+                    let text = &messages[0].text;
+                    assert!(text.starts_with("hix"));
+                    assert_eq!(text.chars().count(), 280);
+                    assert!(!text.chars().any(char::is_control));
+                }
+                other => panic!("expected capped chat, got {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn multiplayer_chat_history_is_capped_to_latest_messages() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let (rooms, _) = test_room_store();
+            let rooms = Arc::new(rooms);
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let mut active_room = None;
+            let _ = handle_multiplayer_message(
+                &rooms,
+                "user_a",
+                &tx,
+                &mut active_room,
+                ClientMsg::CreateMultiplayerRoom {
+                    preferred_player: Some(0),
+                    code: Some("CHAT03".into()),
+                    is_public: Some(true),
+                    time_minutes: None,
+                    increment_seconds: None,
+                },
+            )
+            .await;
+
+            let mut last_len = 0;
+            let mut first_text = String::new();
+            let mut last_text = String::new();
+            for i in 0..(MULTIPLAYER_CHAT_HISTORY_LIMIT + 2) {
+                let responses = handle_multiplayer_message(
+                    &rooms,
+                    "user_a",
+                    &tx,
+                    &mut active_room,
+                    ClientMsg::SendMultiplayerChat {
+                        text: format!("msg {i}"),
+                    },
+                )
+                .await;
+                match responses.as_slice() {
+                    [ServerMsg::MultiplayerChat { messages }] => {
+                        last_len = messages.len();
+                        first_text = messages.first().unwrap().text.clone();
+                        last_text = messages.last().unwrap().text.clone();
+                    }
+                    other => panic!("expected chat response, got {other:?}"),
+                }
+            }
+
+            assert_eq!(last_len, MULTIPLAYER_CHAT_HISTORY_LIMIT);
+            assert_eq!(first_text, "msg 2");
+            assert_eq!(
+                last_text,
+                format!("msg {}", MULTIPLAYER_CHAT_HISTORY_LIMIT + 1)
+            );
+        });
     }
 
     #[test]
@@ -4756,6 +5299,9 @@ mod tests {
 
             for msg in [
                 ClientMsg::PlayMultiplayerAction { action: 0 },
+                ClientMsg::SendMultiplayerChat {
+                    text: "watching".into(),
+                },
                 ClientMsg::ResignMultiplayerGame,
                 ClientMsg::AddMultiplayerOpponentTime,
             ] {
@@ -5512,6 +6058,16 @@ mod tests {
         assert_eq!(entries_b.len(), 1);
         assert_ne!(entries_a[0].id, entries_b[0].id);
 
+        let all_entries = store.list_all(50).unwrap();
+        assert_eq!(all_entries.len(), 2);
+        assert!(all_entries.iter().any(|entry| {
+            entry.account_key == "account_a" && entry.entry.id == entries_a[0].id
+        }));
+        assert!(all_entries.iter().any(|entry| {
+            entry.account_key == "account_b" && entry.entry.id == entries_b[0].id
+        }));
+        assert_eq!(store.list_all(1).unwrap().len(), 1);
+
         let shared = store
             .load_shared(&entries_a[0].share_slug)
             .expect("shared replay load");
@@ -5722,6 +6278,11 @@ mod tests {
             assert_eq!(entries[0].id, saved.id);
             assert_eq!(entries[0].action_count, 3);
             assert!(!entries[0].favorite);
+
+            let all_entries = store.list_all(500).await.expect("list all replays");
+            assert!(all_entries.iter().any(|entry| {
+                entry.account_key == account && entry.entry.id == saved.id
+            }));
 
             let loaded = store
                 .load(&account, &saved.id)

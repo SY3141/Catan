@@ -19,11 +19,12 @@ use tokio::{
 use crate::{game::Game, game_log::GameLog};
 
 use super::{
-    GameSession, MULTIPLAYER_ANALYSIS_SIMS, MULTIPLAYER_EMPTY_ROOM_GRACE_MS, MultiplayerLobbyRoom,
+    GameSession, MULTIPLAYER_ANALYSIS_SIMS, MULTIPLAYER_CHAT_HISTORY_LIMIT,
+    MULTIPLAYER_EMPTY_ROOM_GRACE_MS, MultiplayerChatMessage, MultiplayerLobbyRoom,
     MultiplayerPlayer, MultiplayerSpectator, ReplayStore, RoomOutcome, SearchBudget, ServerMsg,
     SessionFactory, current_unix_ms, new_room_code, normalize_room_code,
     normalize_room_increment_seconds, normalize_room_time_minutes, replay_result_for_room_outcome,
-    winner_from_reward,
+    sanitize_multiplayer_chat_text, winner_from_reward,
 };
 
 const DEFAULT_REDIS_PORT: u16 = 6379;
@@ -432,6 +433,10 @@ struct RedisRoomSnapshot {
     actions: Vec<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     history_cursor: Option<usize>,
+    #[serde(default)]
+    chat_messages: Vec<MultiplayerChatMessage>,
+    #[serde(default)]
+    next_chat_id: u64,
     clock: RedisRoomClock,
     outcome: Option<RedisRoomOutcome>,
     replay_saved: bool,
@@ -465,6 +470,8 @@ impl RedisRoomSnapshot {
             initial_state,
             actions: Vec::new(),
             history_cursor: Some(0),
+            chat_messages: Vec::new(),
+            next_chat_id: 1,
             clock: RedisRoomClock::new(time_minutes),
             outcome: None,
             replay_saved: false,
@@ -573,6 +580,10 @@ enum RedisMultiplayerEvent {
         code: String,
         version: u64,
         root_wdl: [f32; 3],
+    },
+    ChatChanged {
+        code: String,
+        excluded_connection_id: Option<String>,
     },
 }
 
@@ -760,6 +771,9 @@ impl<G: Game + 'static> RedisMultiplayerRoomStore<G> {
             }
             super::ClientMsg::PlayMultiplayerAction { action } => {
                 self.play_action(active_room.as_ref(), action).await
+            }
+            super::ClientMsg::SendMultiplayerChat { text } => {
+                self.send_chat(active_room.as_ref(), text).await
             }
             super::ClientMsg::Undo => self.history_action(active_room.as_ref(), true).await,
             super::ClientMsg::Redo => self.history_action(active_room.as_ref(), false).await,
@@ -1046,6 +1060,69 @@ impl<G: Game + 'static> RedisMultiplayerRoomStore<G> {
             responses.extend(self.save_finished_room_replay_once(&room.code, false).await);
         }
         responses
+    }
+
+    async fn send_chat(
+        &self,
+        active: Option<&ActiveRedisMultiplayerRoom>,
+        text: String,
+    ) -> Vec<ServerMsg> {
+        let Some(active) = active else {
+            return vec![ServerMsg::Error {
+                message: "Join a multiplayer room before chatting".into(),
+            }];
+        };
+        if let Err(message) = self.refresh_current_connection(active).await {
+            return vec![ServerMsg::Error { message }];
+        }
+        let Some(player) = active.player else {
+            return vec![ServerMsg::Error {
+                message: "Spectators cannot send multiplayer chat".into(),
+            }];
+        };
+        let connection_id = active.connection_id.clone();
+        let mut direct_chat = None;
+        let updated = self
+            .update_room(&active.code, |room| {
+                self.ensure_active_connection(room, player, &connection_id)?;
+                let text = sanitize_multiplayer_chat_text(&text)?;
+                let id = room.next_chat_id.max(1);
+                room.next_chat_id = id.saturating_add(1);
+                let name = room.seats[player]
+                    .as_ref()
+                    .and_then(|seat| seat.display_name.clone());
+                room.chat_messages.push(MultiplayerChatMessage {
+                    id,
+                    sent_at_ms: current_unix_ms(),
+                    player: player as u8,
+                    name,
+                    text,
+                });
+                let overflow = room
+                    .chat_messages
+                    .len()
+                    .saturating_sub(MULTIPLAYER_CHAT_HISTORY_LIMIT);
+                if overflow > 0 {
+                    room.chat_messages.drain(0..overflow);
+                }
+                room.touch();
+                direct_chat = Some(ServerMsg::MultiplayerChat {
+                    messages: room.chat_messages.clone(),
+                });
+                Ok(())
+            })
+            .await;
+        let (_, room) = match updated {
+            Ok(updated) => updated,
+            Err(message) => return vec![ServerMsg::Error { message }],
+        };
+        let _ = self
+            .publish_event(RedisMultiplayerEvent::ChatChanged {
+                code: room.code,
+                excluded_connection_id: Some(connection_id),
+            })
+            .await;
+        direct_chat.into_iter().collect()
     }
 
     async fn history_action(
@@ -1439,6 +1516,11 @@ impl<G: Game + 'static> RedisMultiplayerRoomStore<G> {
         include_state: bool,
     ) -> Vec<ServerMsg> {
         let mut messages = vec![self.room_msg_for_viewer(room, player, connection_id).await];
+        if player.is_some() && !room.chat_messages.is_empty() {
+            messages.push(ServerMsg::MultiplayerChat {
+                messages: room.chat_messages.clone(),
+            });
+        }
         if include_state {
             match self.session_from_snapshot(room) {
                 Ok(session) => messages.push(match player {
@@ -1895,6 +1977,13 @@ impl<G: Game + 'static> RedisMultiplayerRoomStore<G> {
                     }
                 }
             }
+            RedisMultiplayerEvent::ChatChanged {
+                code,
+                excluded_connection_id,
+            } => {
+                self.broadcast_chat(&code, excluded_connection_id.as_deref())
+                    .await
+            }
         }
     }
 
@@ -1932,6 +2021,26 @@ impl<G: Game + 'static> RedisMultiplayerRoomStore<G> {
                 if let Ok(json) = serde_json::to_string(&msg) {
                     let _ = socket.tx.send(json);
                 }
+            }
+        }
+    }
+
+    async fn broadcast_chat(&self, code: &str, excluded_connection_id: Option<&str>) {
+        let Ok(Some(room)) = self.load_room(code).await else {
+            return;
+        };
+        if room.chat_messages.is_empty() {
+            return;
+        }
+        let Ok(json) = serde_json::to_string(&ServerMsg::MultiplayerChat {
+            messages: room.chat_messages,
+        }) else {
+            return;
+        };
+        let sockets = self.local_room_sockets(code, excluded_connection_id);
+        for socket in sockets {
+            if socket.player.is_some() {
+                let _ = socket.tx.send(json.clone());
             }
         }
     }
@@ -1995,6 +2104,7 @@ mod tests {
     use std::sync::Arc;
 
     use serde_json::json;
+    use tokio::time::{Duration, timeout};
 
     use crate::{
         eval::{Evaluation, Evaluator},
@@ -2113,6 +2223,7 @@ mod tests {
         );
         let mut room = room;
         room.actions = vec![0];
+        room.history_cursor = Some(room.actions.len());
         let session = store.session_from_snapshot(&room).unwrap();
         match session.state_msg_for_player(1) {
             ServerMsg::GameState { state, .. } => {
@@ -2162,7 +2273,7 @@ mod tests {
                     .unwrap();
             let code = format!("T{:05}", fastrand::u32(0..100_000));
             let (tx_a, _rx_a) = mpsc::unbounded_channel();
-            let (tx_b, _rx_b) = mpsc::unbounded_channel();
+            let (tx_b, mut rx_b) = mpsc::unbounded_channel();
             let mut active_a = None;
             let mut active_b = None;
 
@@ -2211,6 +2322,33 @@ mod tests {
             assert_eq!(room.seat_for_user("user_a"), Some(0));
             assert_eq!(room.seat_for_user("user_b"), Some(1));
 
+            let sent_chat = store_a
+                .handle_message_for_user(
+                    "user_a",
+                    Some("Alice"),
+                    &tx_a,
+                    &mut active_a,
+                    super::super::ClientMsg::SendMultiplayerChat {
+                        text: "hello from redis".into(),
+                    },
+                )
+                .await;
+            match sent_chat.as_slice() {
+                [ServerMsg::MultiplayerChat { messages }] => {
+                    assert_eq!(messages.len(), 1);
+                    assert_eq!(messages[0].name.as_deref(), Some("Alice"));
+                    assert_eq!(messages[0].text, "hello from redis");
+                }
+                other => panic!("expected Redis chat response, got {other:?}"),
+            }
+            let raw_chat = timeout(Duration::from_secs(2), rx_b.recv())
+                .await
+                .expect("redis chat broadcast timeout")
+                .expect("redis chat broadcast");
+            let chat_value: serde_json::Value = serde_json::from_str(&raw_chat).unwrap();
+            assert_eq!(chat_value["type"], "MultiplayerChat");
+            assert_eq!(chat_value["messages"][0]["text"], "hello from redis");
+
             assert!(store_b.detach_active_room(&mut active_b).await);
             let played = store_a
                 .handle_message_for_user(
@@ -2245,11 +2383,13 @@ mod tests {
                         local_player,
                         ..
                     },
+                    ServerMsg::MultiplayerChat { messages },
                     ServerMsg::GameState { state, .. },
                     ..,
                 ] => {
                     assert_eq!(*local_player, Some(1));
                     assert_eq!(players.iter().filter(|player| player.occupied).count(), 2);
+                    assert_eq!(messages[0].text, "hello from redis");
                     assert_eq!(state["moves"], json!(1));
                 }
                 other => panic!("expected caught-up Redis rejoin response, got {other:?}"),

@@ -361,6 +361,17 @@ tailwind.config = {
         <div id="player-1-actions" class="player-card-actions"></div>
         <button class="takeover-btn hidden mt-2 w-full py-1 text-xs bg-bg-3 border border-gray-700 text-gray-300 rounded hover:bg-accent transition-colors cursor-pointer" data-player="1">Take Over</button>
       </div>
+      <div id="multiplayer-chat-panel" class="multiplayer-chat-card hidden bg-bg rounded-md p-2.5 border border-gray-700">
+        <div class="multiplayer-chat-header">
+          <h3 class="text-sm font-medium text-gray-400">Chat</h3>
+          <span id="multiplayer-chat-room" class="font-mono text-[10px] text-gray-600"></span>
+        </div>
+        <div id="multiplayer-chat-log" class="multiplayer-chat-log" aria-live="polite"></div>
+        <form id="multiplayer-chat-form" class="multiplayer-chat-form">
+          <input id="multiplayer-chat-input" type="text" maxlength="280" autocomplete="off" class="multiplayer-chat-input" aria-label="Chat message" placeholder="Message opponent">
+          <button id="btn-send-multiplayer-chat" type="submit" class="multiplayer-chat-send">Send</button>
+        </form>
+      </div>
       <div class="bg-bg rounded-md p-2.5 border border-gray-700" id="dice-panel" style="display:none">
         <h3 class="text-sm font-medium text-gray-400 mb-1">Dice <span id="dice-cards" class="text-gray-500 font-normal"></span></h3>
         <div id="dice-chart" class="flex items-end gap-px" style="height:64px"></div>

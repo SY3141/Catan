@@ -402,6 +402,10 @@
   font-weight: 700;
 }
 
+#players-panel {
+  min-height: 0;
+}
+
 .player-card-header {
   min-height: 22px;
   padding-right: 30px;
@@ -449,6 +453,126 @@
 
 #player-1 .vp-badge {
   color: #ff6b6b;
+}
+
+.multiplayer-chat-card.hidden {
+  display: none;
+}
+
+.multiplayer-chat-card:not(.hidden) {
+  display: flex;
+  flex: 1 1 0;
+  min-height: 140px;
+  flex-direction: column;
+}
+
+.multiplayer-chat-header {
+  display: flex;
+  min-height: 22px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.multiplayer-chat-log {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+  flex-direction: column;
+  gap: 5px;
+  overflow-y: auto;
+  border: 1px solid #283247;
+  border-radius: 5px;
+  background: rgba(15, 52, 96, 0.22);
+  padding: 6px;
+}
+
+.multiplayer-chat-message {
+  display: grid;
+  gap: 2px;
+  border-left: 2px solid #4a9eff;
+  border-radius: 0 4px 4px 0;
+  padding-left: 6px;
+}
+
+.multiplayer-chat-message.p2 {
+  border-left-color: #ff6b6b;
+}
+
+.multiplayer-chat-message.own {
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.multiplayer-chat-meta {
+  overflow: hidden;
+  color: #9ca3af;
+  font-size: 0.62rem;
+  font-weight: 800;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.multiplayer-chat-text {
+  overflow-wrap: anywhere;
+  color: #e5e7eb;
+  font-size: 0.72rem;
+  line-height: 1.25;
+}
+
+.multiplayer-chat-form {
+  display: flex;
+  gap: 5px;
+  margin-top: 6px;
+}
+
+.multiplayer-chat-input {
+  min-width: 0;
+  flex: 1 1 auto;
+  height: 28px;
+  border: 1px solid #374151;
+  border-radius: 5px;
+  background: #16213e;
+  color: #f3f4f6;
+  padding: 0 7px;
+  font: inherit;
+  font-size: 0.72rem;
+  line-height: 1;
+}
+
+.multiplayer-chat-input:focus-visible {
+  border-color: #e94560;
+  outline: none;
+}
+
+.multiplayer-chat-send {
+  flex: 0 0 auto;
+  height: 28px;
+  border: 1px solid #374151;
+  border-radius: 5px;
+  background: #0f3460;
+  color: #e5e7eb;
+  padding: 0 8px;
+  font-size: 0.68rem;
+  font-weight: 800;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.multiplayer-chat-send:hover,
+.multiplayer-chat-send:focus-visible {
+  border-color: #e94560;
+  background: #223b68;
+  color: #ffffff;
+  outline: none;
+}
+
+.multiplayer-chat-send:disabled,
+.multiplayer-chat-input:disabled {
+  cursor: default;
+  opacity: 0.5;
 }
 
 .multiplayer-clock-card {
