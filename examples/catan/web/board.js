@@ -390,10 +390,28 @@ class Board {
     overlayG.innerHTML = '';
     if (!board) return;
 
-    for (const { action, label } of actions) {
+    for (const { action, label } of this._orderedActionOverlays(actions)) {
       const overlay = this._actionOverlay(action, label, board, playerIndex);
       if (overlay) overlayG.appendChild(overlay);
     }
+  }
+
+  _orderedActionOverlays(actions) {
+    return [...actions]
+      .map((entry, index) => ({ entry, index }))
+      .sort((a, b) => {
+        const priority = this._actionOverlayPriority(a.entry?.action) -
+          this._actionOverlayPriority(b.entry?.action);
+        return priority || a.index - b.index;
+      })
+      .map(item => item.entry);
+  }
+
+  _actionOverlayPriority(action) {
+    const value = Number(action);
+    if (value >= 54 && value < 126) return 0;
+    if ((value >= 0 && value < 54) || (value >= 126 && value < 180)) return 2;
+    return 1;
   }
 
   clearOverlays() {

@@ -87,6 +87,13 @@ const MOVE_SOUND_ASSETS = {
 const MOVE_SOUND_KINDS = Object.keys(MOVE_SOUND_ASSETS);
 const CATAN_ROLL_ACTION = 180;
 const CATAN_END_TURN_ACTION = 181;
+const CATAN_BUY_DEV_ACTION = 182;
+const CATAN_PLAY_KNIGHT_ACTION = 183;
+const CATAN_PLAY_ROAD_BUILDING_ACTION = 184;
+const CATAN_YOP_START = 185;
+const CATAN_YOP_END = 200;
+const CATAN_MONOPOLY_START = 200;
+const CATAN_MONOPOLY_END = 205;
 const CATAN_SETTLEMENT_START = 0;
 const CATAN_SETTLEMENT_END = 54;
 const CATAN_ROAD_START = 54;
@@ -95,11 +102,56 @@ const CATAN_CITY_START = 126;
 const CATAN_CITY_END = 180;
 const CATAN_ROBBER_START = 205;
 const CATAN_ROBBER_END = 224;
+const CATAN_DISCARD_START = 224;
+const CATAN_DISCARD_END = 229;
 const CATAN_MARITIME_START = 229;
 const CATAN_MARITIME_END = 249;
 const CATAN_NODE_COUNT = CATAN_SETTLEMENT_END - CATAN_SETTLEMENT_START;
 const CATAN_EDGE_COUNT = CATAN_ROAD_END - CATAN_ROAD_START;
 const CATAN_TILE_COUNT = CATAN_ROBBER_END - CATAN_ROBBER_START;
+const CATAN_YOP_RESOURCE_PAIRS = [
+  [0, 0],
+  [0, 1],
+  [0, 2],
+  [0, 3],
+  [0, 4],
+  [1, 1],
+  [1, 2],
+  [1, 3],
+  [1, 4],
+  [2, 2],
+  [2, 3],
+  [2, 4],
+  [3, 3],
+  [3, 4],
+  [4, 4],
+];
+const DEV_CARD_ACTION_CONFIGS = [
+  {
+    key: 'knight',
+    action: CATAN_PLAY_KNIGHT_ACTION,
+    title: 'Play Knight',
+  },
+  {
+    key: 'road-building',
+    action: CATAN_PLAY_ROAD_BUILDING_ACTION,
+    title: 'Play Road Building',
+  },
+  {
+    key: 'yop',
+    start: CATAN_YOP_START,
+    end: CATAN_YOP_END,
+    menuId: 'dev-card-yop-menu',
+    title: 'Play Year of Plenty',
+  },
+  {
+    key: 'monopoly',
+    start: CATAN_MONOPOLY_START,
+    end: CATAN_MONOPOLY_END,
+    menuId: 'dev-card-monopoly-menu',
+    title: 'Play Monopoly',
+  },
+];
 const DEFAULT_DISCARD_THRESHOLD = 9;
 const BASE_DOCUMENT_TITLE = document.title || 'HexFish';
 const MULTIPLAYER_TURN_DOCUMENT_TITLE = 'Your turn - HexFish';
@@ -111,6 +163,7 @@ const MULTIPLAYER_PENDING_ACTION_STALE_MS = 10000;
 const MULTIPLAYER_ROOM_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const DEFAULT_MULTIPLAYER_TIME_MINUTES = 15;
 const DEFAULT_MULTIPLAYER_INCREMENT_SECONDS = 0;
+const AWARD_BANNER_MS = 2600;
 const SINGLEPLAYER_RECOVERY_REARM_MS = 250;
 const SINGLEPLAYER_RECOVERY_RETRY_MS = 1000;
 const SINGLEPLAYER_RECOVERY_MAX_ATTEMPTS = 3;
@@ -153,6 +206,9 @@ let selectedEditorPort = null;
 let pendingEditorStart = false;
 let pendingNewGameSearch = false;
 let lastActionLogLength = { analysis: null, replay: null };
+let lastAwardActionLogLength = { analysis: null, replay: null };
+let lastAwardSnapshot = { analysis: null, replay: null };
+let awardBannerTimer = null;
 const expandedDiscardLogGroups = new Set();
 let previousFrameHands = { analysis: null, replay: null };
 let activeView = 'play-setup';
@@ -789,6 +845,37 @@ function parseDiscardLogEntry(entry, soundKind = '') {
 
 function currentPhaseIsDiscard(msg) {
   return /\bdiscards\b/i.test(String(msg?.phase || ''));
+}
+
+function discardPhaseInfo(msg) {
+  const match = String(msg?.phase || '').match(/\bP([12])\s+discards\s+\((\d+)\s+left\)/i);
+  if (!match) return null;
+  const player = Number(match[1]) - 1;
+  const remaining = Number(match[2]);
+  if (!Number.isInteger(player) || !Number.isInteger(remaining)) return null;
+  return { player, remaining };
+}
+
+function currentDiscardSelection(msg) {
+  const phase = discardPhaseInfo(msg);
+  if (!phase) return null;
+
+  const counts = [0, 0, 0, 0, 0];
+  const entries = actionLogEntriesThroughCursor(msg);
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const discard = parseDiscardLogEntry(entries[i]);
+    if (!discard || discard.player !== phase.player) break;
+    counts[discard.resourceIndex]++;
+  }
+
+  const chosen = counts.reduce((sum, count) => sum + count, 0);
+  return {
+    player: phase.player,
+    remaining: phase.remaining,
+    chosen,
+    total: phase.remaining + chosen,
+    counts,
+  };
 }
 
 function discardLogGroupKey(group) {
@@ -3164,6 +3251,7 @@ function renderGameState(msg, options = {}) {
   updateActionPanelStatus(msg, showPlayBotThinking);
   const canUseLegalActions = !msg.replay && !msg.is_terminal && !msg.is_chance && !playBotTurn && !playMultiplayerBlocked;
   updateBoardResourceLegend(msg, state, canUseLegalActions);
+  syncDiscardModal(msg, state, canUseLegalActions);
   updateBoardPieceCounts(msg, state, canUseLegalActions);
 
   if (canUseLegalActions) {
@@ -3217,7 +3305,10 @@ function renderGameState(msg, options = {}) {
 
   updateRollBadge(msg, state, viewKey);
   syncRollBadgeActionState(msg);
+  syncDevCardActionButtons(msg);
+  syncBuyDevBadgeActionState(msg);
   syncEndTurnBadgeActionState(msg);
+  updateAwardBanner(msg, state, viewKey);
 
   // Undo/Redo button states
   document.getElementById('btn-undo').disabled = playBotTurn || !msg.can_undo;
@@ -3352,6 +3443,36 @@ function legalActionCount(msg) {
   return Array.isArray(msg?.legal_actions) ? msg.legal_actions.length : 0;
 }
 
+function devCardActionConfig(kind) {
+  return DEV_CARD_ACTION_CONFIGS.find(config => config.key === kind) || null;
+}
+
+function actionMatchesDevCardConfig(action, config) {
+  const value = Number(action);
+  if (!Number.isInteger(value) || !config) return false;
+  if (Number.isInteger(config.action)) return value === config.action;
+  return value >= config.start && value < config.end;
+}
+
+function decodeCatanYopAction(action) {
+  const value = Number(action);
+  if (!Number.isInteger(value) || value < CATAN_YOP_START || value >= CATAN_YOP_END) return null;
+  const pair = CATAN_YOP_RESOURCE_PAIRS[value - CATAN_YOP_START];
+  return pair ? { first: pair[0], second: pair[1], action: value } : null;
+}
+
+function decodeCatanMonopolyAction(action) {
+  const value = Number(action);
+  if (!Number.isInteger(value) || value < CATAN_MONOPOLY_START || value >= CATAN_MONOPOLY_END) return null;
+  return { resource: value - CATAN_MONOPOLY_START, action: value };
+}
+
+function decodeCatanDiscardAction(action) {
+  const value = Number(action);
+  if (!Number.isInteger(value) || value < CATAN_DISCARD_START || value >= CATAN_DISCARD_END) return null;
+  return { resource: value - CATAN_DISCARD_START, action: value };
+}
+
 function decodeCatanMaritimeAction(action) {
   const value = Number(action);
   if (!Number.isInteger(value) || value < CATAN_MARITIME_START || value >= CATAN_MARITIME_END) {
@@ -3365,6 +3486,20 @@ function decodeCatanMaritimeAction(action) {
     return null;
   }
   return { give, receive, action: value };
+}
+
+function legalDiscardsByResource(msg, canUseLegalActions) {
+  const discards = new Map();
+  if (!canUseLegalActions || !currentPhaseIsDiscard(msg) || !Array.isArray(msg?.legal_actions)) return discards;
+  for (const entry of msg.legal_actions) {
+    const discard = decodeCatanDiscardAction(entry?.action);
+    if (!discard) continue;
+    discards.set(discard.resource, {
+      action: discard.action,
+      label: entry?.label || '',
+    });
+  }
+  return discards;
 }
 
 function legalMaritimeTradesByGive(msg, canUseLegalActions) {
@@ -3387,9 +3522,8 @@ function legalMaritimeTradesByGive(msg, canUseLegalActions) {
   return trades;
 }
 
-function endTurnBadgeCanEnd(msg = currentState) {
+function boardActionContextCanSend(msg) {
   if (!msg || msg.replay || msg.is_terminal || msg.is_chance) return false;
-  if (!hasLegalAction(msg, CATAN_END_TURN_ACTION)) return false;
   if (isPlayBotTurn(msg)) return false;
   if (playMultiplayerActive()) {
     if (playMode.pendingMultiplayerAction) return false;
@@ -3399,6 +3533,14 @@ function endTurnBadgeCanEnd(msg = currentState) {
     if (msg.current_player !== playMode.humanPlayer) return false;
   }
   return true;
+}
+
+function boardBadgeCanSend(msg, action) {
+  return boardActionContextCanSend(msg) && hasLegalAction(msg, action);
+}
+
+function endTurnBadgeCanEnd(msg = currentState) {
+  return boardBadgeCanSend(msg, CATAN_END_TURN_ACTION);
 }
 
 function syncEndTurnBadgeActionState(msg = currentState) {
@@ -3417,18 +3559,155 @@ function handleEndTurnBadgeClick() {
   sendPlayAction(CATAN_END_TURN_ACTION);
 }
 
-function rollBadgeCanRoll(msg = currentState) {
-  if (!msg || msg.replay || msg.is_terminal || msg.is_chance) return false;
-  if (!hasLegalAction(msg, CATAN_ROLL_ACTION)) return false;
-  if (isPlayBotTurn(msg)) return false;
-  if (playMultiplayerActive()) {
-    if (playMode.pendingMultiplayerAction) return false;
-    if (multiplayerSpectatorActive()) return false;
-    if (multiplayerTimeoutWinner() != null) return false;
-    if (!multiplayerRoomFull()) return false;
-    if (msg.current_player !== playMode.humanPlayer) return false;
+function buyDevBadgeCanBuy(msg = currentState) {
+  return boardBadgeCanSend(msg, CATAN_BUY_DEV_ACTION);
+}
+
+function syncBuyDevBadgeActionState(msg = currentState) {
+  const badge = document.getElementById('buy-dev-badge');
+  if (!badge) return;
+  const canBuy = buyDevBadgeCanBuy(msg);
+  const buyDevTitle = 'Dev Card: Ore, Wool, Grain';
+  badge.classList.toggle('hidden', !canBuy);
+  badge.disabled = !canBuy;
+  badge.title = canBuy ? buyDevTitle : '';
+  badge.setAttribute('aria-label', canBuy ? 'Buy development card' : 'Buy development card unavailable');
+}
+
+function handleBuyDevBadgeClick() {
+  if (!buyDevBadgeCanBuy(currentState)) return;
+  sendPlayAction(CATAN_BUY_DEV_ACTION);
+}
+
+function devCardActionOptions(msg, config) {
+  if (!boardActionContextCanSend(msg) || !Array.isArray(msg?.legal_actions)) return [];
+  return msg.legal_actions
+    .map(entry => ({
+      action: Number(entry?.action),
+      label: String(entry?.label || ''),
+    }))
+    .filter(option => actionMatchesDevCardConfig(option.action, config))
+    .sort((a, b) => a.action - b.action);
+}
+
+function devCardMenuOptionText(kind, action, fallback = '') {
+  if (kind === 'yop') {
+    const decoded = decodeCatanYopAction(action);
+    if (decoded) {
+      const first = capitalizeResourceName(RESOURCE_NAMES[decoded.first]);
+      const second = capitalizeResourceName(RESOURCE_NAMES[decoded.second]);
+      return decoded.first === decoded.second ? `2 ${first}` : `${first} + ${second}`;
+    }
   }
-  return true;
+  if (kind === 'monopoly') {
+    const decoded = decodeCatanMonopolyAction(action);
+    if (decoded) return `All ${capitalizeResourceName(RESOURCE_NAMES[decoded.resource])}`;
+  }
+  return fallback.replace(/^\s*P[12]\s*:\s*/i, '') || String(action);
+}
+
+function syncDevCardActionMenu(kind, options) {
+  const config = devCardActionConfig(kind);
+  const menu = config?.menuId ? document.getElementById(config.menuId) : null;
+  if (!menu) return;
+
+  menu.innerHTML = '';
+  for (const option of options) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'dev-card-action-menu-option';
+    button.setAttribute('role', 'menuitem');
+    button.textContent = devCardMenuOptionText(kind, option.action, option.label);
+    button.title = option.label || button.textContent;
+    button.addEventListener('click', (event) => {
+      event.stopPropagation();
+      closeDevCardActionMenus();
+      sendPlayAction(option.action);
+    });
+    menu.appendChild(button);
+  }
+}
+
+function syncDevCardActionButtons(msg = currentState) {
+  const panel = document.getElementById('dev-card-action-panel');
+  if (!panel) return;
+
+  let anyVisible = false;
+  for (const config of DEV_CARD_ACTION_CONFIGS) {
+    const wrap = panel.querySelector(`.dev-card-action-wrap[data-dev-card-kind="${config.key}"]`);
+    const button = panel.querySelector(`.dev-card-action-button[data-dev-card-kind="${config.key}"]`);
+    if (!wrap || !button) continue;
+
+    const options = devCardActionOptions(msg, config);
+    const visible = options.length > 0;
+    wrap.classList.toggle('hidden', !visible);
+    button.disabled = !visible;
+    button.title = visible ? config.title : '';
+    button.setAttribute('aria-label', visible ? config.title : `${config.title} unavailable`);
+    if (config.menuId) {
+      button.setAttribute('aria-haspopup', options.length > 1 ? 'menu' : 'false');
+      button.setAttribute('aria-expanded', 'false');
+      syncDevCardActionMenu(config.key, options);
+      if (!visible) document.getElementById(config.menuId)?.classList.add('hidden');
+    }
+    anyVisible = anyVisible || visible;
+  }
+
+  panel.classList.toggle('hidden', !anyVisible);
+  if (!anyVisible) closeDevCardActionMenus();
+}
+
+function closeDevCardActionMenus(exceptKind = '') {
+  for (const config of DEV_CARD_ACTION_CONFIGS) {
+    if (!config.menuId || config.key === exceptKind) continue;
+    document.getElementById(config.menuId)?.classList.add('hidden');
+    document
+      .querySelector(`.dev-card-action-button[data-dev-card-kind="${config.key}"]`)
+      ?.setAttribute('aria-expanded', 'false');
+  }
+}
+
+function toggleDevCardActionMenu(kind) {
+  const config = devCardActionConfig(kind);
+  if (!config?.menuId) return;
+  const menu = document.getElementById(config.menuId);
+  const button = document.querySelector(`.dev-card-action-button[data-dev-card-kind="${kind}"]`);
+  if (!menu || !button) return;
+  const opening = menu.classList.contains('hidden');
+  closeDevCardActionMenus(kind);
+  menu.classList.toggle('hidden', !opening);
+  button.setAttribute('aria-expanded', opening ? 'true' : 'false');
+}
+
+function hideDevCardActionButtons() {
+  const panel = document.getElementById('dev-card-action-panel');
+  if (!panel) return;
+  closeDevCardActionMenus();
+  panel.classList.add('hidden');
+  for (const wrap of panel.querySelectorAll('.dev-card-action-wrap')) {
+    wrap.classList.add('hidden');
+  }
+  for (const button of panel.querySelectorAll('.dev-card-action-button')) {
+    button.disabled = true;
+  }
+}
+
+function handleDevCardActionButtonClick(event) {
+  event.stopPropagation();
+  const kind = event.currentTarget?.dataset?.devCardKind || '';
+  const config = devCardActionConfig(kind);
+  const options = devCardActionOptions(currentState, config);
+  if (options.length === 0) return;
+  if (options.length === 1) {
+    closeDevCardActionMenus();
+    sendPlayAction(options[0].action);
+    return;
+  }
+  toggleDevCardActionMenu(kind);
+}
+
+function rollBadgeCanRoll(msg = currentState) {
+  return boardBadgeCanSend(msg, CATAN_ROLL_ACTION);
 }
 
 function syncRollBadgeActionState(msg = currentState) {
@@ -3611,6 +3890,153 @@ function hideEndTurnBadge() {
   badge.disabled = true;
   badge.classList.remove('end-turn-forced');
   badge.classList.add('hidden');
+}
+
+function hideBuyDevBadge() {
+  const badge = document.getElementById('buy-dev-badge');
+  if (!badge) return;
+  badge.disabled = true;
+  badge.classList.add('hidden');
+}
+
+function normalizeAward(raw) {
+  if (!Array.isArray(raw) || raw.length < 2) return null;
+  const player = Number(raw[0]);
+  const value = Number(raw[1]);
+  if (!Number.isInteger(player) || player < 0 || player > 1 || !Number.isFinite(value)) return null;
+  return { player, value };
+}
+
+function awardSnapshot(frame) {
+  return {
+    longestRoad: normalizeAward(frame?.longest_road),
+    largestArmy: normalizeAward(frame?.largest_army),
+  };
+}
+
+function awardBannerMessage(label, previous, current) {
+  if (!current) return '';
+  const player = playerDisplayName(current.player);
+  const value = current.value;
+  if (previous && previous.player !== current.player) {
+    return `${player} takes ${label} (${value})`;
+  }
+  if (!previous) {
+    return `${player} claims ${label} (${value})`;
+  }
+  return '';
+}
+
+function updateAwardBanner(msg, state, viewKey) {
+  const frame = state?.frame;
+  if (!frame) return;
+
+  const currentLength = activeActionLogLength(msg);
+  const previousLength = lastAwardActionLogLength[viewKey];
+  const previous = lastAwardSnapshot[viewKey];
+  const current = awardSnapshot(frame);
+
+  if (previousLength == null || currentLength <= previousLength) {
+    if (previousLength != null && currentLength < previousLength) hideAwardBanner();
+    lastAwardActionLogLength[viewKey] = currentLength;
+    lastAwardSnapshot[viewKey] = current;
+    return;
+  }
+
+  const messages = [
+    awardBannerMessage('Longest Road', previous?.longestRoad, current.longestRoad),
+    awardBannerMessage('Largest Army', previous?.largestArmy, current.largestArmy),
+  ].filter(Boolean);
+
+  lastAwardActionLogLength[viewKey] = currentLength;
+  lastAwardSnapshot[viewKey] = current;
+
+  if (messages.length > 0) showAwardBanner(messages.join(' | '));
+}
+
+function showAwardBanner(message) {
+  const banner = document.getElementById('award-banner');
+  if (!banner) return;
+  if (awardBannerTimer) window.clearTimeout(awardBannerTimer);
+  banner.textContent = message;
+  banner.classList.remove('hidden');
+  awardBannerTimer = window.setTimeout(hideAwardBanner, AWARD_BANNER_MS);
+}
+
+function hideAwardBanner() {
+  const banner = document.getElementById('award-banner');
+  if (awardBannerTimer) {
+    window.clearTimeout(awardBannerTimer);
+    awardBannerTimer = null;
+  }
+  if (!banner) return;
+  banner.classList.add('hidden');
+  banner.textContent = '';
+}
+
+function syncDiscardModal(msg = currentState, state = msg?.state, canUseLegalActions = false) {
+  const modal = document.getElementById('discard-modal');
+  if (!modal) return;
+
+  const selection = currentDiscardSelection(msg);
+  const shouldShow = !!(
+    selection &&
+    state?.frame?.players &&
+    !msg?.replay &&
+    !msg?.is_terminal &&
+    !msg?.is_chance &&
+    (!playViewActive() || canUseLegalActions)
+  );
+
+  modal.classList.toggle('hidden', !shouldShow);
+  if (!shouldShow) return;
+
+  const playerName = playerDisplayName(selection.player);
+  const progress = document.getElementById('discard-modal-progress');
+  const copy = document.getElementById('discard-modal-copy');
+  if (progress) progress.textContent = `${selection.chosen} / ${selection.total}`;
+  if (copy) {
+    copy.textContent = `${playerName}: ${selection.chosen} chosen, ${selection.remaining} left`;
+  }
+
+  for (const chip of modal.querySelectorAll('[data-discard-resource-index]')) {
+    const resourceIndex = Number(chip.dataset.discardResourceIndex);
+    if (!Number.isInteger(resourceIndex)) continue;
+    const count = selection.counts[resourceIndex] || 0;
+    const name = capitalizeResourceName(RESOURCE_NAMES[resourceIndex] || '');
+    chip.textContent = `${name} ${count}`;
+    chip.classList.toggle('is-empty', count === 0);
+  }
+}
+
+function hideDiscardModal() {
+  document.getElementById('discard-modal')?.classList.add('hidden');
+}
+
+function discardModalAnimationTarget(resourceIndex) {
+  const resourceTarget = document.querySelector(`#discard-modal [data-discard-resource-index="${resourceIndex}"]`);
+  return visibleElementCenter(resourceTarget || document.getElementById('discard-modal'), 12);
+}
+
+function showResourceDiscardAnimation(resourceIndex, sourceElement = null) {
+  const layer = document.getElementById('resource-animation-layer');
+  if (!layer) return;
+  const source = sourceElement || document.querySelector(`#board-resource-legend [data-resource-index="${resourceIndex}"]`);
+  const from = source ? visibleElementCenter(source, 12) : null;
+  const to = discardModalAnimationTarget(resourceIndex);
+  if (!from || !to) return;
+
+  const chip = document.createElement('span');
+  chip.className = `resource-card resource-discard-chip ${RESOURCE_NAMES[resourceIndex] || ''}`;
+  chip.textContent = '-1';
+  chip.style.left = `${from.x}px`;
+  chip.style.top = `${from.y}px`;
+  chip.style.setProperty('--resource-dx', `${to.x - from.x}px`);
+  chip.style.setProperty('--resource-dy', `${to.y - from.y}px`);
+  layer.appendChild(chip);
+
+  chip.addEventListener('animationend', () => chip.remove(), { once: true });
+  window.setTimeout(() => chip.remove(), 1400);
 }
 
 function showResourceProductionAnimations(roll, beforeHands, afterHands, state) {
@@ -4244,6 +4670,10 @@ function setEditorChrome(enabled) {
   if (enabled) resetBoardPieceCounts();
   if (enabled) hideRollBadge();
   if (enabled) hideEndTurnBadge();
+  if (enabled) hideBuyDevBadge();
+  if (enabled) hideDevCardActionButtons();
+  if (enabled) hideAwardBanner();
+  if (enabled) hideDiscardModal();
   if (enabled) clearResourceProductionAnimations();
   document.getElementById('left-ad-panel')?.classList.toggle('hidden', enabled);
   document.getElementById('players-panel').classList.toggle('hidden', enabled);
@@ -4924,6 +5354,11 @@ document.getElementById('btn-resign-singleplayer')?.addEventListener('click', re
 document.getElementById('multiplayer-chat-form')?.addEventListener('submit', sendMultiplayerChat);
 document.getElementById('roll-badge')?.addEventListener('click', handleRollBadgeClick);
 document.getElementById('end-turn-badge')?.addEventListener('click', handleEndTurnBadgeClick);
+document.getElementById('buy-dev-badge')?.addEventListener('click', handleBuyDevBadgeClick);
+document.getElementById('dev-card-action-panel')?.addEventListener('click', (event) => event.stopPropagation());
+for (const btn of document.querySelectorAll('.dev-card-action-button')) {
+  btn.addEventListener('click', handleDevCardActionButtonClick);
+}
 document.getElementById('btn-add-opponent-time-0')?.addEventListener('click', addOpponentClockTime);
 document.getElementById('btn-add-opponent-time-1')?.addEventListener('click', addOpponentClockTime);
 document.getElementById('btn-close-replay-share-modal')?.addEventListener('click', hideReplayShareModal);
@@ -5288,6 +5723,7 @@ function updateBoardResourceLegend(msg, state, canUseLegalActions = false) {
   if (multiplayerSpectatorActive()) {
     legend.classList.add('hidden');
     legend.classList.remove('has-trades');
+    legend.classList.remove('has-discards');
     openTradeGiveResource = null;
     return;
   }
@@ -5296,11 +5732,14 @@ function updateBoardResourceLegend(msg, state, canUseLegalActions = false) {
   const playerIndex = playerIndexForResourceLegend(msg);
   const hand = state.frame.players[playerIndex]?.hand || [0, 0, 0, 0, 0];
   const tradeRatios = state.frame.players[playerIndex]?.trade_ratios || [];
-  const trades = legalMaritimeTradesByGive(msg, canUseLegalActions);
+  const discards = legalDiscardsByResource(msg, canUseLegalActions);
+  const discardMode = discards.size > 0;
+  const trades = discardMode ? new Map() : legalMaritimeTradesByGive(msg, canUseLegalActions);
   if (openTradeGiveResource != null && !trades.has(openTradeGiveResource)) {
     openTradeGiveResource = null;
   }
   legend.classList.toggle('has-trades', trades.size > 0);
+  legend.classList.toggle('has-discards', discardMode);
 
   for (const card of legend.querySelectorAll('[data-resource-index]')) {
     const resourceIndex = Number(card.dataset.resourceIndex);
@@ -5309,12 +5748,32 @@ function updateBoardResourceLegend(msg, state, canUseLegalActions = false) {
     const name = RESOURCE_NAMES[resourceIndex] || '';
     const displayName = capitalizeResourceName(name);
     const options = trades.get(resourceIndex) || [];
+    const discard = discards.get(resourceIndex) || null;
+    const canDiscard = discardMode && count > 0 && !!discard;
     const canTrade = options.length > 0;
     updateResourceCardLabel(card, `${count} ${displayName}`);
+    card.classList.toggle('can-discard', canDiscard);
     card.classList.toggle('can-trade', canTrade);
     card.classList.toggle('trade-menu-open', canTrade && openTradeGiveResource === resourceIndex);
     card.setAttribute('aria-expanded', canTrade && openTradeGiveResource === resourceIndex ? 'true' : 'false');
-    if (canTrade) {
+    if (canDiscard) {
+      removeResourceTradeMenu(card);
+      card.setAttribute('role', 'button');
+      card.tabIndex = 0;
+      card.title = `Discard ${displayName}`;
+      card.setAttribute('aria-label', `Discard ${displayName}`);
+      card.onclick = (event) => {
+        event.stopPropagation();
+        openTradeGiveResource = null;
+        showResourceDiscardAnimation(resourceIndex, card);
+        sendPlayAction(discard.action);
+      };
+      card.onkeydown = (event) => {
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        event.preventDefault();
+        card.click();
+      };
+    } else if (canTrade) {
       card.setAttribute('role', 'button');
       card.tabIndex = 0;
       card.title = `Trade ${displayName}`;
@@ -5557,6 +6016,7 @@ function updateDice(state) {
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
     closeResourceTradeMenu();
+    closeDevCardActionMenus();
     hideReplayShareModal();
     hideProfileModal();
     hideGuestSignInRequiredModal();
@@ -5586,6 +6046,7 @@ document.addEventListener('keydown', (e) => {
 });
 
 document.addEventListener('click', closeResourceTradeMenu);
+document.addEventListener('click', () => closeDevCardActionMenus());
 
 // ── Start ────────────────────────────────────────────────────────────
 

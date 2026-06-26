@@ -113,7 +113,7 @@ tailwind.config = {
       <button id="btn-topbar-brand" type="button" class="topbar-brand text-sm font-semibold text-gray-100" aria-label="HexFish home">
         <span class="topbar-mark" aria-hidden="true"></span>
         <span>HexFish</span>
-        <span id="app-version" class="topbar-version" aria-label="Version">V1.1.4</span>
+              <span id="app-version" class="topbar-version" aria-label="Version">V1.1.5</span>
       </button>
     </h1>
     <div class="flex items-center gap-1 text-xs" role="tablist" aria-label="Main views">
@@ -233,6 +233,22 @@ tailwind.config = {
           </div>
           <button id="btn-mirror-board" class="absolute top-0 left-1/2 -translate-x-1/2 z-10 w-8 h-8 flex items-center justify-center bg-bg-3/90 border border-gray-700 text-gray-100 rounded cursor-pointer hover:bg-accent transition-colors" title="Mirror board" aria-label="Mirror board">&#8644;</button>
           <button id="btn-rotate-right" class="absolute top-0 right-0 z-10 w-8 h-8 flex items-center justify-center bg-bg-3/90 border border-gray-700 text-gray-100 rounded cursor-pointer hover:bg-accent transition-colors" title="Rotate board clockwise" aria-label="Rotate board clockwise">&#8635;</button>
+          <div id="dev-card-action-panel" class="dev-card-action-panel hidden" aria-label="Development card actions">
+            <div class="dev-card-action-wrap hidden" data-dev-card-kind="knight">
+              <button id="btn-dev-knight" class="dev-card-action-button" type="button" data-dev-card-kind="knight" aria-label="Play Knight" disabled>Knight</button>
+            </div>
+            <div class="dev-card-action-wrap hidden" data-dev-card-kind="road-building">
+              <button id="btn-dev-road-building" class="dev-card-action-button" type="button" data-dev-card-kind="road-building" aria-label="Play Road Building" disabled>+2 Roads</button>
+            </div>
+            <div class="dev-card-action-wrap hidden" data-dev-card-kind="yop">
+              <button id="btn-dev-yop" class="dev-card-action-button" type="button" data-dev-card-kind="yop" aria-label="Play Year of Plenty" aria-expanded="false" aria-controls="dev-card-yop-menu" disabled>YOP</button>
+              <div id="dev-card-yop-menu" class="dev-card-action-menu hidden" role="menu"></div>
+            </div>
+            <div class="dev-card-action-wrap hidden" data-dev-card-kind="monopoly">
+              <button id="btn-dev-monopoly" class="dev-card-action-button" type="button" data-dev-card-kind="monopoly" aria-label="Play Monopoly" aria-expanded="false" aria-controls="dev-card-monopoly-menu" disabled>Monopoly</button>
+              <div id="dev-card-monopoly-menu" class="dev-card-action-menu hidden" role="menu"></div>
+            </div>
+          </div>
           <div id="board-history-controls" class="absolute z-10 flex flex-col items-start gap-1.5">
             <button id="btn-undo" class="py-1.5 px-3 text-xs bg-bg-3/90 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-default" disabled>Undo</button>
             <button id="btn-redo" class="py-1.5 px-3 text-xs bg-bg-3/90 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-default" disabled>Redo</button>
@@ -244,7 +260,23 @@ tailwind.config = {
             <span class="resource-card board-resource-card grain" data-resource-index="3">0 Grain</span>
             <span class="resource-card board-resource-card ore" data-resource-index="4">0 Ore</span>
           </div>
+          <div id="discard-modal" class="discard-modal hidden" role="dialog" aria-live="polite" aria-labelledby="discard-modal-title">
+            <div class="discard-modal-header">
+              <span id="discard-modal-title" class="discard-modal-title">Discard Resources</span>
+              <span id="discard-modal-progress" class="discard-modal-progress">0 / 0</span>
+            </div>
+            <div id="discard-modal-copy" class="discard-modal-copy">0 chosen, 0 left</div>
+            <div id="discard-modal-counts" class="discard-modal-counts" aria-label="Chosen discards">
+              <span class="resource-card discard-modal-resource lumber" data-discard-resource-index="0">Lumber 0</span>
+              <span class="resource-card discard-modal-resource brick" data-discard-resource-index="1">Brick 0</span>
+              <span class="resource-card discard-modal-resource wool" data-discard-resource-index="2">Wool 0</span>
+              <span class="resource-card discard-modal-resource grain" data-discard-resource-index="3">Grain 0</span>
+              <span class="resource-card discard-modal-resource ore" data-discard-resource-index="4">Ore 0</span>
+            </div>
+          </div>
           <div id="resource-animation-layer" class="resource-animation-layer" aria-hidden="true"></div>
+          <div id="award-banner" class="award-banner hidden" role="status" aria-live="polite"></div>
+          <button id="buy-dev-badge" type="button" class="buy-dev-badge hidden" title="Dev Card: Ore, Wool, Grain" aria-label="Buy development card" disabled>+1 Dev Card</button>
           <button id="end-turn-badge" type="button" class="end-turn-badge hidden" aria-label="End turn" disabled>End Turn</button>
           <button id="roll-badge" type="button" class="roll-badge hidden absolute right-0 bottom-0 z-10 flex w-[84px] h-[84px] items-center justify-center rounded-2xl border border-white/50 bg-bg-3/90 text-white text-[2.7rem] font-extrabold shadow-lg" aria-live="polite" aria-label="Roll" disabled></button>
           <svg id="board-svg" class="w-full h-full min-h-0" viewBox="-50 -50 500 500"></svg>
