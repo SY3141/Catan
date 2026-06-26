@@ -107,6 +107,7 @@ const MULTIPLAYER_TURN_TITLE_FLASH_MS = 900;
 const MULTIPLAYER_ROOM_SYNC_MS = 5000;
 const MULTIPLAYER_DISCONNECT_MODAL_GRACE_MS = 5000;
 const MULTIPLAYER_LOBBY_COUNTDOWN_MS = 1000;
+const MULTIPLAYER_PENDING_ACTION_STALE_MS = 10000;
 const MULTIPLAYER_ROOM_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const DEFAULT_MULTIPLAYER_TIME_MINUTES = 15;
 const DEFAULT_MULTIPLAYER_INCREMENT_SECONDS = 0;
@@ -202,6 +203,7 @@ let createRoomSettings = {
 let multiplayerClockSyncedAtMs = Date.now();
 let multiplayerClockTimer = null;
 let multiplayerLobbyCountdownTimer = null;
+let multiplayerPendingActionTimer = null;
 let playMode = {
   active: false,
   mode: 'bot',
@@ -217,6 +219,8 @@ let playMode = {
   forcedMoveKey: null,
   autoRollEndKey: null,
   pendingHumanMove: false,
+  pendingMultiplayerAction: null,
+  multiplayerActionError: '',
   singleplayerNeedsRecovery: false,
   singleplayerRecoveryGeneration: 0,
   multiplayerRoom: null,
@@ -664,6 +668,7 @@ controls.onNewGame = () => {
     playMode.singleplayerResigned = false;
     playMode.forcedMoveKey = null;
     playMode.autoRollEndKey = null;
+    clearPendingMultiplayerAction('new-game', { resetHumanMove: false, updateUi: false });
     playMode.pendingHumanMove = false;
     playMode.multiplayerRoom = null;
     playMode.multiplayerStatus = '';
@@ -1488,15 +1493,127 @@ function setAutoRollEndEnabled(enabled) {
   if (autoRollEndEnabled) maybeAutoRollEnd(currentState);
 }
 
+function multiplayerPendingStateKey(msg = currentState) {
+  const roomCode = normalizeRoomCode(playMode.multiplayerRoom?.code);
+  const cursor = logHistoryCursor(msg);
+  const phase = String(msg?.phase || '');
+  const player = Number.isFinite(msg?.current_player) ? msg.current_player : '';
+  return `${roomCode}:${cursor}:${phase}:${player}:${legalActionCount(msg)}`;
+}
+
+function pendingMultiplayerActionLabel(action) {
+  const actionNumber = Number(action);
+  const entry = Array.isArray(currentState?.legal_actions)
+    ? currentState.legal_actions.find((candidate) => Number(candidate?.action) === actionNumber)
+    : null;
+  return String(entry?.label || 'move').trim() || 'move';
+}
+
+function pendingMultiplayerActionStatusText() {
+  const pending = playMode.pendingMultiplayerAction;
+  if (!pending) return '';
+  const elapsed = Date.now() - Number(pending.sentAtMs || 0);
+  return elapsed >= MULTIPLAYER_PENDING_ACTION_STALE_MS
+    ? 'Still waiting for server...'
+    : 'Sending move...';
+}
+
+function clearMultiplayerPendingActionTimer() {
+  if (!multiplayerPendingActionTimer) return;
+  window.clearTimeout(multiplayerPendingActionTimer);
+  multiplayerPendingActionTimer = null;
+}
+
+function scheduleMultiplayerPendingActionStaleUpdate() {
+  clearMultiplayerPendingActionTimer();
+  multiplayerPendingActionTimer = window.setTimeout(() => {
+    multiplayerPendingActionTimer = null;
+    if (!playMode.pendingMultiplayerAction) return;
+    updateActionPanelStatus(currentState, false);
+    updateMultiplayerTurnAttention();
+  }, MULTIPLAYER_PENDING_ACTION_STALE_MS);
+}
+
+function disableVisibleMultiplayerActionsForPending() {
+  const actionList = document.getElementById('action-list');
+  if (actionList) {
+    for (const button of actionList.querySelectorAll('button')) {
+      button.disabled = true;
+      button.classList.add('opacity-60', 'cursor-wait');
+    }
+  }
+  if (currentBoard && currentState) {
+    board.showLegalActions([], currentBoard, currentState.current_player);
+  }
+}
+
+function renderPendingMultiplayerActionUi(options = {}) {
+  const pending = playMode.pendingMultiplayerAction;
+  if (!pending) return false;
+  disableVisibleMultiplayerActionsForPending();
+  if (currentBoard && currentState && Number.isInteger(Number(pending.action))) {
+    board.showActionPreview(Number(pending.action), currentBoard, currentState.current_player);
+  }
+  if (options.updateStatus !== false) {
+    updateActionPanelStatus(currentState, false);
+    updateMultiplayerTurnAttention();
+  }
+  return true;
+}
+
+function clearPendingMultiplayerAction(reason = '', options = {}) {
+  const hadPending = !!playMode.pendingMultiplayerAction;
+  clearMultiplayerPendingActionTimer();
+  playMode.pendingMultiplayerAction = null;
+  if (options.resetHumanMove) playMode.pendingHumanMove = false;
+  if (!options.preserveError) playMode.multiplayerActionError = '';
+  if (!options.keepPreview) board.clearActionPreview();
+  if (hadPending && options.updateUi) {
+    updateActionPanelStatus(currentState, false);
+    updateMultiplayerTurnAttention();
+  }
+  if (hadPending && reason) {
+    console.debug('HexFish multiplayer pending action cleared', { reason });
+  }
+  return hadPending;
+}
+
+function startPendingMultiplayerAction(action) {
+  if (!playMultiplayerActive() || !playViewActive()) return false;
+  const actionNumber = Number(action);
+  if (!Number.isInteger(actionNumber) || !hasLegalAction(currentState, actionNumber)) return false;
+  clearPendingMultiplayerAction('replace', { updateUi: false });
+  playMode.pendingMultiplayerAction = {
+    action: actionNumber,
+    label: pendingMultiplayerActionLabel(actionNumber),
+    stateKey: multiplayerPendingStateKey(currentState),
+    sentAtMs: Date.now(),
+  };
+  playMode.pendingHumanMove = true;
+  playMode.multiplayerActionError = '';
+  scheduleMultiplayerPendingActionStaleUpdate();
+  if (currentState && activeView === 'play') {
+    renderGameState(currentState);
+  } else {
+    renderPendingMultiplayerActionUi();
+  }
+  return true;
+}
+
 function sendPlayAction(action) {
   if (multiplayerSpectatorActive()) return;
   if (playMultiplayerActive() && multiplayerTimeoutWinner() != null) return;
-  const msg = playMultiplayerActive()
+  const multiplayerAction = playMultiplayerActive();
+  const msg = multiplayerAction
     ? { type: 'PlayMultiplayerAction', action }
     : { type: 'PlayAction', action };
   if (playViewActive()) {
     if (playMode.pendingHumanMove) return;
-    playMode.pendingHumanMove = true;
+    if (multiplayerAction) {
+      if (!startPendingMultiplayerAction(action)) return;
+    } else {
+      playMode.pendingHumanMove = true;
+    }
     updateMultiplayerTurnAttention();
     if (playBotActive() && controls.searchRunning && controls.interruptSearchForCommand(msg)) return;
   }
@@ -2338,6 +2455,7 @@ function updateSingleplayerResignButton() {
 function resetMultiplayerState(statusText = '') {
   clearSavedGameOverReplayLink();
   hideMultiplayerDisconnectModal();
+  clearPendingMultiplayerAction('reset', { resetHumanMove: true, updateUi: false });
   playMode.active = false;
   playMode.mode = 'multiplayer';
   playMode.viewerRole = 'player';
@@ -2823,6 +2941,7 @@ function handleMultiplayerRoomMessage(msg) {
   setPlayModeChoice('multiplayer');
 
   if (msg.status === 'left') {
+    clearPendingMultiplayerAction('left', { resetHumanMove: true, updateUi: false });
     setRoomCodeInUrl('');
     resetMultiplayerState('');
     resetMultiplayerChat('');
@@ -2835,6 +2954,7 @@ function handleMultiplayerRoomMessage(msg) {
   const viewerRole = msg.viewer_role === 'spectator' ? 'spectator' : 'player';
   const localPlayer = Number(msg.local_player);
   if (viewerRole === 'player' && localPlayer !== 0 && localPlayer !== 1) {
+    clearPendingMultiplayerAction('invalid-seat', { resetHumanMove: true, updateUi: false });
     resetMultiplayerState('Room joined, but no seat was assigned.');
     updateMultiplayerTurnAttention();
     return;
@@ -2849,7 +2969,9 @@ function handleMultiplayerRoomMessage(msg) {
   playMode.singleplayerResigned = false;
   playMode.forcedMoveKey = null;
   playMode.autoRollEndKey = null;
-  playMode.pendingHumanMove = false;
+  if (!playMode.pendingMultiplayerAction) {
+    playMode.pendingHumanMove = false;
+  }
   playMode.rejoiningRoom = false;
   pendingReconnectRoomCode = '';
   pendingPlayTabReconnectRoomCode = '';
@@ -2886,9 +3008,13 @@ function handleMultiplayerRoomMessage(msg) {
   if (activeView === 'play-setup' || activeView === 'play') {
     showPlayView();
   }
+  const roomFinished = multiplayerWinner() != null;
+  if (roomFinished) {
+    clearPendingMultiplayerAction('room-finished', { resetHumanMove: true, updateUi: false });
+  }
   updateActionPanelStatus(currentState, false);
   updateMultiplayerResultBanner();
-  if (multiplayerWinner() != null) {
+  if (roomFinished) {
     const actionList = document.getElementById('action-list');
     if (actionList) actionList.innerHTML = '';
     board.clearOverlays();
@@ -2973,9 +3099,14 @@ function runPendingNewGameSearch(msg) {
 }
 
 function renderGameState(msg, options = {}) {
+  if (options.serverFresh && playMode.mode === 'multiplayer') {
+    clearPendingMultiplayerAction('server-fresh', { updateUi: false });
+  }
   currentState = msg;
   if (playViewActive()) {
-    playMode.pendingHumanMove = false;
+    if (!playMode.pendingMultiplayerAction) {
+      playMode.pendingHumanMove = false;
+    }
     if (options.serverFresh && playMode.mode !== 'multiplayer' && !msg.replay) {
       clearSingleplayerRecovery('fresh-game-state');
     }
@@ -3025,6 +3156,7 @@ function renderGameState(msg, options = {}) {
   );
   const playMultiplayerBlocked = playMultiplayerActive() && (
     multiplayerSpectatorActive() ||
+    !!playMode.pendingMultiplayerAction ||
     multiplayerTimeoutWinner() != null ||
     !multiplayerRoomFull() ||
     msg.current_player !== playMode.humanPlayer
@@ -3055,6 +3187,9 @@ function renderGameState(msg, options = {}) {
       btn.addEventListener('blur', () => board.clearActionPreview());
       actionList.appendChild(btn);
     }
+  }
+  if (playMode.pendingMultiplayerAction) {
+    renderPendingMultiplayerActionUi({ updateStatus: false });
   }
 
   // Game log
@@ -3143,6 +3278,19 @@ function updateActionPanelStatus(msg, playBotTurn) {
       status.classList.add('hidden');
       return;
     }
+    const pendingText = pendingMultiplayerActionStatusText();
+    if (pendingText) {
+      status.textContent = pendingText;
+      status.title = playMode.pendingMultiplayerAction?.label || '';
+      status.classList.remove('hidden');
+      return;
+    }
+    if (playMode.multiplayerActionError) {
+      status.textContent = playMode.multiplayerActionError;
+      status.title = '';
+      status.classList.remove('hidden');
+      return;
+    }
     if (playMode.rejoiningRoom) {
       status.textContent = 'Reconnecting room';
     } else if (multiplayerSpectatorActive()) {
@@ -3188,6 +3336,7 @@ function showLegalActionPreview(action) {
   if (isPlayBotTurn()) return;
   if (playMultiplayerActive() && (
     multiplayerSpectatorActive() ||
+    !!playMode.pendingMultiplayerAction ||
     multiplayerTimeoutWinner() != null ||
     !multiplayerRoomFull() ||
     currentState.current_player !== playMode.humanPlayer
@@ -3243,6 +3392,7 @@ function endTurnBadgeCanEnd(msg = currentState) {
   if (!hasLegalAction(msg, CATAN_END_TURN_ACTION)) return false;
   if (isPlayBotTurn(msg)) return false;
   if (playMultiplayerActive()) {
+    if (playMode.pendingMultiplayerAction) return false;
     if (multiplayerSpectatorActive()) return false;
     if (multiplayerTimeoutWinner() != null) return false;
     if (!multiplayerRoomFull()) return false;
@@ -3272,6 +3422,7 @@ function rollBadgeCanRoll(msg = currentState) {
   if (!hasLegalAction(msg, CATAN_ROLL_ACTION)) return false;
   if (isPlayBotTurn(msg)) return false;
   if (playMultiplayerActive()) {
+    if (playMode.pendingMultiplayerAction) return false;
     if (multiplayerSpectatorActive()) return false;
     if (multiplayerTimeoutWinner() != null) return false;
     if (!multiplayerRoomFull()) return false;
@@ -3722,6 +3873,17 @@ session.on('Error', (msg) => {
     pendingEditorStart = false;
     setEditorStatus(msg.message);
   }
+  if (playMode.pendingMultiplayerAction) {
+    const message = String(msg.message || 'Move rejected by server.');
+    clearPendingMultiplayerAction('error', { resetHumanMove: true, updateUi: false });
+    playMode.multiplayerActionError = message;
+    if (currentState && activeView === 'play') {
+      renderGameState(currentState);
+    } else {
+      updateActionPanelStatus(currentState, false);
+      updateMultiplayerTurnAttention();
+    }
+  }
   if (pendingReconnectRoomCode) {
     const code = pendingReconnectRoomCode;
     pendingReconnectRoomCode = '';
@@ -3803,6 +3965,9 @@ session.on('Disconnected', (msg) => {
     last_message_age_ms: msg?.last_message_age_ms,
     will_reconnect: msg?.will_reconnect,
   });
+  if (playMode.pendingMultiplayerAction) {
+    clearPendingMultiplayerAction('disconnect', { resetHumanMove: true, updateUi: false });
+  }
   if (!singleplayerWasActive) {
     controls.onSearchError();
     clearPlayBotThinking();
@@ -4171,6 +4336,7 @@ function startPlayGame() {
   playMode.singleplayerResigned = false;
   playMode.forcedMoveKey = null;
   playMode.autoRollEndKey = null;
+  clearPendingMultiplayerAction('singleplayer-start', { resetHumanMove: false, updateUi: false });
   playMode.pendingHumanMove = false;
   playMode.multiplayerRoom = null;
   playMode.multiplayerStatus = '';
@@ -4725,6 +4891,7 @@ function startEditedGame() {
   playMode.singleplayerResigned = false;
   playMode.forcedMoveKey = null;
   playMode.autoRollEndKey = null;
+  clearPendingMultiplayerAction('editor-start', { resetHumanMove: false, updateUi: false });
   playMode.pendingHumanMove = false;
   setEditorStatus('Starting');
   session.send({
@@ -4867,6 +5034,7 @@ board.onActionClick = (action) => {
   if (currentState?.replay) return;
   if (isPlayBotTurn()) return;
   if (playMultiplayerActive() && (
+    !!playMode.pendingMultiplayerAction ||
     multiplayerTimeoutWinner() != null ||
     !multiplayerRoomFull() ||
     currentState?.current_player !== playMode.humanPlayer
