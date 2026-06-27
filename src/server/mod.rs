@@ -29,7 +29,7 @@ use axum::{
 };
 use futures_util::FutureExt;
 use tokio::sync::{Mutex, mpsc};
-use tokio_postgres::Row;
+use tokio_postgres::{Row, types::ToSql};
 use tower_http::services::ServeDir;
 
 use crate::eval::Evaluator;
@@ -499,11 +499,22 @@ impl FileReplayStore {
 
 #[derive(Clone)]
 struct PostgresReplayStore {
-    client: Arc<tokio_postgres::Client>,
+    database_url: Arc<str>,
+    client: Arc<Mutex<Option<Arc<tokio_postgres::Client>>>>,
 }
 
 impl PostgresReplayStore {
     async fn connect(database_url: &str) -> Result<Self, String> {
+        let store = Self {
+            database_url: Arc::<str>::from(database_url),
+            client: Arc::new(Mutex::new(None)),
+        };
+        store.reconnect("initialize replay store").await?;
+        store.init_schema().await?;
+        Ok(store)
+    }
+
+    async fn open_client(database_url: &str) -> Result<Arc<tokio_postgres::Client>, String> {
         let tls = native_tls::TlsConnector::builder()
             .build()
             .map_err(|e| format!("failed to configure Postgres TLS: {e}"))?;
@@ -518,17 +529,145 @@ impl PostgresReplayStore {
             }
         });
 
-        let store = Self {
-            client: Arc::new(client),
-        };
-        store.init_schema().await?;
-        Ok(store)
+        Ok(Arc::new(client))
+    }
+
+    async fn client(&self) -> Result<Arc<tokio_postgres::Client>, String> {
+        {
+            let client = self.client.lock().await;
+            if let Some(client) = client.as_ref() {
+                if !client.is_closed() {
+                    return Ok(Arc::clone(client));
+                }
+            }
+        }
+
+        self.reconnect("refresh closed replay store connection")
+            .await
+    }
+
+    async fn reconnect(&self, operation: &str) -> Result<Arc<tokio_postgres::Client>, String> {
+        let client = Self::open_client(&self.database_url).await?;
+        let mut current = self.client.lock().await;
+        if let Some(current) = current.as_ref() {
+            if !current.is_closed() {
+                return Ok(Arc::clone(current));
+            }
+        }
+        *current = Some(Arc::clone(&client));
+        tracing::info!(operation, "Postgres replay store connected");
+        Ok(client)
+    }
+
+    async fn clear_client_if_current(&self, failed: &Arc<tokio_postgres::Client>) {
+        let mut current = self.client.lock().await;
+        let should_clear = current
+            .as_ref()
+            .map_or(false, |current| Arc::ptr_eq(current, failed));
+        if should_clear {
+            *current = None;
+        }
+    }
+
+    async fn query_rows(
+        &self,
+        operation: &str,
+        statement: &str,
+        params: &[&(dyn ToSql + Sync)],
+    ) -> Result<Vec<Row>, String> {
+        let client = self.client().await?;
+        match client.query(statement, params).await {
+            Ok(rows) => Ok(rows),
+            Err(error) if error.is_closed() => {
+                tracing::warn!(%error, operation, "Postgres replay query lost connection; reconnecting");
+                self.clear_client_if_current(&client).await;
+                let client = self.reconnect(operation).await?;
+                client
+                    .query(statement, params)
+                    .await
+                    .map_err(|e| format!("{operation}: {e}"))
+            }
+            Err(error) => Err(format!("{operation}: {error}")),
+        }
+    }
+
+    async fn query_opt_row(
+        &self,
+        operation: &str,
+        statement: &str,
+        params: &[&(dyn ToSql + Sync)],
+    ) -> Result<Option<Row>, String> {
+        let client = self.client().await?;
+        match client.query_opt(statement, params).await {
+            Ok(row) => Ok(row),
+            Err(error) if error.is_closed() => {
+                tracing::warn!(%error, operation, "Postgres replay query lost connection; reconnecting");
+                self.clear_client_if_current(&client).await;
+                let client = self.reconnect(operation).await?;
+                client
+                    .query_opt(statement, params)
+                    .await
+                    .map_err(|e| format!("{operation}: {e}"))
+            }
+            Err(error) => Err(format!("{operation}: {error}")),
+        }
+    }
+
+    async fn query_opt_row_once(
+        &self,
+        operation: &str,
+        statement: &str,
+        params: &[&(dyn ToSql + Sync)],
+    ) -> Result<Option<Row>, String> {
+        let client = self.client().await?;
+        match client.query_opt(statement, params).await {
+            Ok(row) => Ok(row),
+            Err(error) if error.is_closed() => {
+                self.clear_client_if_current(&client).await;
+                Err(format!("{operation}: {error}"))
+            }
+            Err(error) => Err(format!("{operation}: {error}")),
+        }
+    }
+
+    async fn execute_once(
+        &self,
+        operation: &str,
+        statement: &str,
+        params: &[&(dyn ToSql + Sync)],
+    ) -> Result<u64, String> {
+        let client = self.client().await?;
+        match client.execute(statement, params).await {
+            Ok(updated) => Ok(updated),
+            Err(error) if error.is_closed() => {
+                self.clear_client_if_current(&client).await;
+                Err(format!("{operation}: {error}"))
+            }
+            Err(error) => Err(format!("{operation}: {error}")),
+        }
+    }
+
+    async fn batch_execute(&self, operation: &str, query: &str) -> Result<(), String> {
+        let client = self.client().await?;
+        match client.batch_execute(query).await {
+            Ok(()) => Ok(()),
+            Err(error) if error.is_closed() => {
+                tracing::warn!(%error, operation, "Postgres replay schema query lost connection; reconnecting");
+                self.clear_client_if_current(&client).await;
+                let client = self.reconnect(operation).await?;
+                client
+                    .batch_execute(query)
+                    .await
+                    .map_err(|e| format!("{operation}: {e}"))
+            }
+            Err(error) => Err(format!("{operation}: {error}")),
+        }
     }
 
     async fn init_schema(&self) -> Result<(), String> {
-        self.client
-            .batch_execute(
-                r#"
+        self.batch_execute(
+            "failed to initialize Postgres replay schema",
+            r#"
                 CREATE TABLE IF NOT EXISTS replay_logs (
                     id TEXT PRIMARY KEY,
                     account_key TEXT NOT NULL,
@@ -547,9 +686,8 @@ impl PostgresReplayStore {
                 CREATE INDEX IF NOT EXISTS replay_logs_share_slug_idx
                     ON replay_logs (share_slug);
                 "#,
-            )
-            .await
-            .map_err(|e| format!("failed to initialize Postgres replay schema: {e}"))
+        )
+        .await
     }
 
     async fn save_with_result(
@@ -569,8 +707,8 @@ impl PostgresReplayStore {
             let id = random_base62(24);
             let share_slug = random_base62(18);
             let row = self
-                .client
-                .query_opt(
+                .query_opt_row_once(
+                    "failed to save replay log",
                     r#"
                     INSERT INTO replay_logs (
                         id,
@@ -598,8 +736,7 @@ impl PostgresReplayStore {
                         &result,
                     ],
                 )
-                .await
-                .map_err(|e| format!("failed to save replay log: {e}"))?;
+                .await?;
 
             if let Some(row) = row {
                 return replay_entry_from_row(&row);
@@ -611,8 +748,8 @@ impl PostgresReplayStore {
 
     async fn list(&self, account_key: &str) -> Result<Vec<ReplayEntry>, String> {
         let rows = self
-            .client
-            .query(
+            .query_rows(
+                "failed to list replays",
                 r#"
                 SELECT id, saved_at_ms, action_count, result, favorite, share_slug
                 FROM replay_logs
@@ -621,8 +758,7 @@ impl PostgresReplayStore {
                 "#,
                 &[&account_key],
             )
-            .await
-            .map_err(|e| format!("failed to list replays: {e}"))?;
+            .await?;
 
         rows.iter().map(replay_entry_from_row).collect()
     }
@@ -631,8 +767,8 @@ impl PostgresReplayStore {
         let limit = i64::try_from(limit)
             .map_err(|_| "replay list limit does not fit in Postgres BIGINT".to_string())?;
         let rows = self
-            .client
-            .query(
+            .query_rows(
+                "failed to list all replays",
                 r#"
                 SELECT account_key, id, saved_at_ms, action_count, result, favorite, share_slug
                 FROM replay_logs
@@ -641,8 +777,7 @@ impl PostgresReplayStore {
                 "#,
                 &[&limit],
             )
-            .await
-            .map_err(|e| format!("failed to list all replays: {e}"))?;
+            .await?;
 
         rows.iter()
             .map(|row| {
@@ -659,13 +794,12 @@ impl PostgresReplayStore {
             return Err("invalid replay id".into());
         }
         let deleted = self
-            .client
-            .execute(
+            .execute_once(
+                "failed to delete replay log",
                 "DELETE FROM replay_logs WHERE account_key = $1 AND id = $2",
                 &[&account_key, &id],
             )
-            .await
-            .map_err(|e| format!("failed to delete replay log: {e}"))?;
+            .await?;
         if deleted == 0 {
             return Err("replay log not found".into());
         }
@@ -682,13 +816,12 @@ impl PostgresReplayStore {
             return Err("invalid replay id".into());
         }
         let updated = self
-            .client
-            .execute(
+            .execute_once(
+                "failed to save replay favourite",
                 "UPDATE replay_logs SET favorite = $3 WHERE account_key = $1 AND id = $2",
                 &[&account_key, &id, &favorite],
             )
-            .await
-            .map_err(|e| format!("failed to save replay favourite: {e}"))?;
+            .await?;
         if updated == 0 {
             return Err("replay log not found".into());
         }
@@ -700,13 +833,12 @@ impl PostgresReplayStore {
             return Err("invalid replay id".into());
         }
         let row = self
-            .client
-            .query_opt(
+            .query_opt_row(
+                "failed to read replay log",
                 "SELECT initial_state, actions FROM replay_logs WHERE account_key = $1 AND id = $2",
                 &[&account_key, &id],
             )
-            .await
-            .map_err(|e| format!("failed to read replay log: {e}"))?
+            .await?
             .ok_or_else(|| "replay log not found".to_string())?;
         game_log_from_row(&row)
     }
@@ -717,13 +849,12 @@ impl PostgresReplayStore {
         }
         tracing::info!(share_slug = %slug, "loading shared replay from Postgres");
         let row = self
-            .client
-            .query_opt(
+            .query_opt_row(
+                "failed to read shared replay",
                 "SELECT id, initial_state, actions FROM replay_logs WHERE share_slug = $1",
                 &[&slug],
             )
-            .await
-            .map_err(|e| format!("failed to read shared replay: {e}"))?
+            .await?
             .ok_or_else(|| "shared replay not found".to_string())?;
         Ok(LoadedReplay {
             id: row.get("id"),
@@ -1404,12 +1535,11 @@ impl<G: Game + 'static> MultiplayerRoom<G> {
             text,
         };
         let messages = {
-            let mut messages = self
-                .chat_messages
-                .lock()
-                .expect("room chat lock poisoned");
+            let mut messages = self.chat_messages.lock().expect("room chat lock poisoned");
             messages.push(message);
-            let overflow = messages.len().saturating_sub(MULTIPLAYER_CHAT_HISTORY_LIMIT);
+            let overflow = messages
+                .len()
+                .saturating_sub(MULTIPLAYER_CHAT_HISTORY_LIMIT);
             if overflow > 0 {
                 messages.drain(0..overflow);
             }
@@ -2502,10 +2632,7 @@ fn sanitize_multiplayer_chat_text(text: &str) -> Result<String, String> {
     if trimmed.is_empty() {
         return Err("Chat message cannot be empty".into());
     }
-    Ok(trimmed
-        .chars()
-        .take(MULTIPLAYER_CHAT_TEXT_LIMIT)
-        .collect())
+    Ok(trimmed.chars().take(MULTIPLAYER_CHAT_TEXT_LIMIT).collect())
 }
 
 async fn register_multiplayer_lobby_socket<G: Game + 'static>(
@@ -4331,10 +4458,10 @@ mod tests {
     use tokio::{sync::mpsc, time::timeout};
 
     use super::{
-        ActiveMultiplayerRoom, ClientMsg, FileReplayStore, GamePresenter, MultiplayerRoomStore,
-        MultiplayerViewer, ReplayStore, RoomClock, RoomOutcome, SearchBudget, ServerMsg,
-        SessionFactory, UserSessionStore, ViewTarget, MULTIPLAYER_CHAT_HISTORY_LIMIT,
-        anonymous_user_id_from_id, anonymous_user_id_from_token, client_msg_target,
+        ActiveMultiplayerRoom, ClientMsg, FileReplayStore, GamePresenter,
+        MULTIPLAYER_CHAT_HISTORY_LIMIT, MultiplayerRoomStore, MultiplayerViewer, ReplayStore,
+        RoomClock, RoomOutcome, SearchBudget, ServerMsg, SessionFactory, UserSessionStore,
+        ViewTarget, anonymous_user_id_from_id, anonymous_user_id_from_token, client_msg_target,
         current_unix_ms, detach_active_room, handle_multiplayer_message, handle_profile_message,
         list_replay_entries, parse_env_bool, redacted_account_key, replay_result_for_room_outcome,
         safe_replay_id, safe_share_slug, save_current_replay_once, should_send_search_progress,
@@ -4585,9 +4712,7 @@ mod tests {
         panic!("expected multiplayer analysis broadcast");
     }
 
-    async fn recv_multiplayer_chat(
-        rx: &mut mpsc::UnboundedReceiver<String>,
-    ) -> serde_json::Value {
+    async fn recv_multiplayer_chat(rx: &mut mpsc::UnboundedReceiver<String>) -> serde_json::Value {
         for _ in 0..4 {
             let raw = timeout(Duration::from_secs(2), rx.recv())
                 .await
@@ -4891,7 +5016,9 @@ mod tests {
                 "user_a",
                 &tx,
                 &mut active_room,
-                ClientMsg::SendMultiplayerChat { text: " \t ".into() },
+                ClientMsg::SendMultiplayerChat {
+                    text: " \t ".into(),
+                },
             )
             .await;
             assert!(matches!(
@@ -5727,9 +5854,14 @@ mod tests {
                 _ => false,
             }));
 
-            let undone =
-                handle_multiplayer_message(&rooms, "user_a", &tx, &mut active_room, ClientMsg::Undo)
-                    .await;
+            let undone = handle_multiplayer_message(
+                &rooms,
+                "user_a",
+                &tx,
+                &mut active_room,
+                ClientMsg::Undo,
+            )
+            .await;
             match undone.as_slice() {
                 [
                     ServerMsg::MultiplayerRoom { .. },
@@ -5749,9 +5881,14 @@ mod tests {
                 other => panic!("expected multiplayer undo state, got {other:?}"),
             }
 
-            let redone =
-                handle_multiplayer_message(&rooms, "user_a", &tx, &mut active_room, ClientMsg::Redo)
-                    .await;
+            let redone = handle_multiplayer_message(
+                &rooms,
+                "user_a",
+                &tx,
+                &mut active_room,
+                ClientMsg::Redo,
+            )
+            .await;
             match redone.as_slice() {
                 [
                     ServerMsg::MultiplayerRoom { .. },
@@ -6280,9 +6417,11 @@ mod tests {
             assert!(!entries[0].favorite);
 
             let all_entries = store.list_all(500).await.expect("list all replays");
-            assert!(all_entries.iter().any(|entry| {
-                entry.account_key == account && entry.entry.id == saved.id
-            }));
+            assert!(
+                all_entries
+                    .iter()
+                    .any(|entry| { entry.account_key == account && entry.entry.id == saved.id })
+            );
 
             let loaded = store
                 .load(&account, &saved.id)
