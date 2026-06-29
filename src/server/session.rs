@@ -572,7 +572,7 @@ impl<G: Game + 'static> GameSession<G> {
         }
         if self
             .presenter
-            .is_singleplayer_undo_barrier(&entry.state, entry.action)
+            .is_multiplayer_undo_barrier(&entry.state, entry.action)
         {
             return None;
         }
@@ -592,7 +592,7 @@ impl<G: Game + 'static> GameSession<G> {
             && action_player_idx(&entry.state) == Some(player)
             && !self
                 .presenter
-                .is_singleplayer_undo_barrier(&entry.state, entry.action)
+                .is_multiplayer_undo_barrier(&entry.state, entry.action)
     }
 
     pub fn multiplayer_can_undo(&self, player: usize) -> bool {
@@ -651,6 +651,7 @@ impl<G: Game + 'static> GameSession<G> {
         let state = self.search.state();
         let is_terminal = matches!(state.status(), Status::Terminal(_));
         let is_chance = self.is_chance();
+        let visibility_perspective = self.visibility_perspective(perspective);
 
         let legal = if is_terminal || is_chance {
             Vec::new()
@@ -694,10 +695,10 @@ impl<G: Game + 'static> GameSession<G> {
         };
 
         let (action_log, action_log_sound_kinds, action_log_cursors) =
-            self.action_log_entries(perspective);
+            self.action_log_entries(visibility_perspective);
 
         ServerMsg::GameState {
-            state: match perspective {
+            state: match visibility_perspective {
                 StatePerspective::Player(player) => {
                     self.presenter.serialize_state_for_player(state, player)
                 }
@@ -729,6 +730,17 @@ impl<G: Game + 'static> GameSession<G> {
                 cursor: self.cursor,
                 len: self.history.len(),
             }),
+        }
+    }
+
+    fn visibility_perspective(&self, perspective: StatePerspective) -> StatePerspective {
+        match (
+            perspective,
+            self.replay.is_none(),
+            self.singleplayer_human_player,
+        ) {
+            (StatePerspective::Full, true, Some(player)) => StatePerspective::Player(player),
+            _ => perspective,
         }
     }
 
@@ -1080,8 +1092,7 @@ impl<G: Game + 'static> GameSession<G> {
                 self.search.apply_action(entry.action);
             }
             self.cursor += 1;
-            let at_chance =
-                self.cursor < self.history.len() && self.history[self.cursor].is_chance;
+            let at_chance = self.cursor < self.history.len() && self.history[self.cursor].is_chance;
             if !at_chance {
                 break;
             }
@@ -2135,7 +2146,11 @@ mod tests {
             format!("Action {action}")
         }
 
-        fn is_singleplayer_undo_barrier(&self, _state: &TurnUndoGame, action: usize) -> bool {
+        fn is_singleplayer_undo_barrier(&self, _state: &TurnUndoGame, _action: usize) -> bool {
+            false
+        }
+
+        fn is_multiplayer_undo_barrier(&self, _state: &TurnUndoGame, action: usize) -> bool {
             action == 1
         }
 

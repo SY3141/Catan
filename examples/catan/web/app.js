@@ -75,6 +75,7 @@ const EDITOR_NUMBER_BAG = [2, 3, 3, 4, 4, 5, 5, 6, 6, 8, 8, 9, 9, 10, 10, 11, 11
 const EDITOR_PORT_BAG = ['lumber', 'brick', 'wool', 'grain', 'ore', 'generic', 'generic', 'generic', 'generic'];
 const LAST_MULTIPLAYER_ROOM_KEY = 'hexfish-last-multiplayer-room-code';
 const PENDING_SHARED_REPLAY_KEY = 'hexfish-pending-shared-replay-slug';
+const SINGLEPLAYER_PLAY_RELOAD_KEY = 'hexfish-singleplayer-play-reload-v1';
 const MOVE_SOUND_ENABLED_KEY = 'hexfish-sound-enabled';
 const MOVE_SOUND_ASSETS = {
   road: 'sounds/build.mp3',
@@ -238,6 +239,7 @@ let activeReplayShareSlug = '';
 let pendingAutoJoinRoomCode = pendingSharedReplaySlug ? '' : initialUrlRoomCode;
 let pendingReconnectRoomCode = '';
 let pendingPlayTabReconnectRoomCode = '';
+let pendingSingleplayerServerRestore = false;
 let multiplayerDisconnectModalTimer = null;
 let multiplayerDisconnectModalPending = null;
 if (pendingAutoJoinRoomCode) selectedPlayMode = 'multiplayer';
@@ -277,6 +279,7 @@ let playMode = {
   pendingHumanMove: false,
   pendingMultiplayerAction: null,
   multiplayerActionError: '',
+  awaitingRestoredPrivateState: false,
   singleplayerNeedsRecovery: false,
   singleplayerRecoveryGeneration: 0,
   multiplayerRoom: null,
@@ -713,6 +716,7 @@ controls.onNewGame = () => {
   hideGameOverModal();
   clearSavedGameOverReplayLink();
   if (activeView === 'play') {
+    clearSingleplayerPlayReloadState();
     if (playMultiplayerActive()) {
       leaveMultiplayerRoom(false, true);
     }
@@ -735,6 +739,7 @@ controls.onNewGame = () => {
     showPlaySetupView();
     return false;
   }
+  markNonPlayViewForReload();
   pendingNewGameSearch = true;
   playMode.active = false;
   playMode.mode = selectedPlayMode;
@@ -1245,6 +1250,11 @@ function playBotActive() {
 
 function singleplayerGameActive() {
   return playViewActive() && playMode.mode !== 'multiplayer';
+}
+
+function restoredSingleplayerPrivateStateMatches(msg) {
+  return msg?.state?.private_view === true &&
+    singleplayerPrivateStatePlayer(msg) === normalizePlayerIndex(playMode.humanPlayer);
 }
 
 function singleplayerRecoveryContext(extra = {}) {
@@ -1851,6 +1861,198 @@ function writePendingSharedReplaySlug(slug) {
   } catch (_error) {
     // Session storage may be unavailable in private or embedded contexts.
   }
+}
+
+function normalizePlayerIndex(player) {
+  return Number(player) === 1 ? 1 : 0;
+}
+
+function readSingleplayerPlayReloadState() {
+  let raw = '';
+  try {
+    raw = window.localStorage?.getItem(SINGLEPLAYER_PLAY_RELOAD_KEY) || '';
+  } catch (_error) {
+    raw = '';
+  }
+  if (!raw) {
+    try {
+      raw = window.sessionStorage?.getItem(SINGLEPLAYER_PLAY_RELOAD_KEY) || '';
+    } catch (_error) {
+      raw = '';
+    }
+  }
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed) return null;
+    if (parsed.view === 'setup') return { view: 'setup' };
+    if (parsed.view === 'other') return { view: 'other' };
+    if (parsed.view !== 'game' && parsed.mode !== 'bot') return null;
+    const difficulty = Number(parsed.difficulty);
+    const selectedSide = Object.prototype.hasOwnProperty.call(parsed, 'selectedSide')
+      ? parsed.selectedSide
+      : parsed.humanPlayer;
+    return {
+      view: 'game',
+      humanPlayer: normalizePlayerIndex(parsed.humanPlayer),
+      selectedSide: selectedSide === 'random' ? 'random' : normalizePlayerIndex(selectedSide),
+      difficulty: Number.isFinite(difficulty) ? difficulty : selectedPlayDifficulty,
+    };
+  } catch (_error) {
+    return null;
+  }
+}
+
+function writeSingleplayerPlayReloadState(state) {
+  const raw = state ? JSON.stringify(state) : '';
+  try {
+    if (state) {
+      window.localStorage?.setItem(SINGLEPLAYER_PLAY_RELOAD_KEY, raw);
+    } else {
+      window.localStorage?.removeItem(SINGLEPLAYER_PLAY_RELOAD_KEY);
+    }
+  } catch (_error) {
+    // Storage may be unavailable in private or embedded contexts.
+  }
+  try {
+    if (state) {
+      window.sessionStorage?.setItem(SINGLEPLAYER_PLAY_RELOAD_KEY, raw);
+    } else {
+      window.sessionStorage?.removeItem(SINGLEPLAYER_PLAY_RELOAD_KEY);
+    }
+  } catch (_error) {
+    // Session storage may be unavailable in private or embedded contexts.
+  }
+}
+
+function clearSingleplayerPlayReloadState() {
+  playMode.awaitingRestoredPrivateState = false;
+  writeSingleplayerPlayReloadState(null);
+}
+
+function markSingleplayerPlaySetupForReload() {
+  playMode.awaitingRestoredPrivateState = false;
+  writeSingleplayerPlayReloadState({ view: 'setup' });
+}
+
+function markNonPlayViewForReload() {
+  playMode.awaitingRestoredPrivateState = false;
+  writeSingleplayerPlayReloadState({ view: 'other' });
+}
+
+function singleplayerReloadBlocked() {
+  return !!(
+    guestMultiplayerMode() ||
+    guestSharedReplayMode() ||
+    pendingAutoJoinRoomCode ||
+    pendingSharedReplaySlug ||
+    initialSharedReplaySlug ||
+    initialUrlRoomCode
+  );
+}
+
+function snapshotSingleplayerPlayForReload() {
+  if (
+    activeView !== 'play' ||
+    !playMode.active ||
+    playMode.mode === 'multiplayer'
+  ) {
+    if (activeView === 'play-setup') {
+      markSingleplayerPlaySetupForReload();
+      return;
+    }
+    markNonPlayViewForReload();
+    return;
+  }
+  writeSingleplayerPlayReloadState({
+    view: 'game',
+    mode: 'bot',
+    humanPlayer: normalizePlayerIndex(playMode.humanPlayer),
+    selectedSide: selectedSingleplayerHumanPlayer,
+    difficulty: playDifficultyConfig().level,
+  });
+}
+
+function restoreSingleplayerPlayState(options) {
+  const {
+    humanPlayer,
+    selectedSide,
+    difficulty = selectedPlayDifficulty,
+    awaitingPrivateState = true,
+    requestState = true,
+    reason = 'singleplayer-reload',
+  } = options;
+  const player = normalizePlayerIndex(humanPlayer);
+  setPlayModeChoice('bot');
+  setPlaySide(selectedSide ?? player, 'singleplayer');
+  setPlayDifficulty(difficulty);
+  playMode.active = true;
+  playMode.mode = 'bot';
+  playMode.humanPlayer = player;
+  playMode.viewerRole = 'player';
+  clearPlayBotThinking();
+  playMode.pendingBotMoveAfterSearch = false;
+  playMode.singleplayerResigned = false;
+  playMode.forcedMoveKey = null;
+  playMode.autoRollEndKey = null;
+  playMode.awaitingRestoredPrivateState = awaitingPrivateState;
+  clearPendingMultiplayerAction(reason, { resetHumanMove: false, updateUi: false });
+  playMode.pendingHumanMove = false;
+  playMode.multiplayerRoom = null;
+  playMode.multiplayerStatus = '';
+  playMode.rejoiningRoom = false;
+  resetMultiplayerChat('');
+  resetSingleplayerRecoveryState();
+  pendingNewGameSearch = false;
+  showPlayView();
+  if (requestState) {
+    session.send({ type: 'GetState' });
+  }
+  return true;
+}
+
+function restoreSingleplayerPlayFromReload(saved = readSingleplayerPlayReloadState()) {
+  if (!saved || saved.view !== 'game') return false;
+  if (singleplayerReloadBlocked()) {
+    clearSingleplayerPlayReloadState();
+    return false;
+  }
+  return restoreSingleplayerPlayState(saved);
+}
+
+function singleplayerPrivateStatePlayer(msg) {
+  const localPlayer = Number(msg?.state?.local_player);
+  if (localPlayer === 0 || localPlayer === 1) return localPlayer;
+  const viewer = Number(msg?.state?.viewer);
+  if (viewer === 0 || viewer === 1) return viewer;
+  return null;
+}
+
+function singleplayerServerRestoreHumanPlayer(msg) {
+  const player = singleplayerPrivateStatePlayer(msg);
+  if (msg?.state?.private_view === true && player != null) return player;
+  return selectedSingleplayerHumanPlayer === 'random' ? 0 : normalizePlayerIndex(selectedSingleplayerHumanPlayer);
+}
+
+function canRestoreSingleplayerPlayFromServerState(msg) {
+  if (singleplayerReloadBlocked() || msg?.replay || msg?.is_terminal) return false;
+  if (msg?.state?.private_view === true && singleplayerPrivateStatePlayer(msg) != null) return true;
+  const cursor = Number(msg?.history_cursor);
+  return Number.isFinite(cursor) && cursor > 0;
+}
+
+function restoreSingleplayerPlayFromServerState(msg) {
+  const humanPlayer = singleplayerServerRestoreHumanPlayer(msg);
+  return restoreSingleplayerPlayState({
+    humanPlayer,
+    selectedSide: humanPlayer,
+    difficulty: selectedPlayDifficulty,
+    awaitingPrivateState: !(
+      msg?.state?.private_view === true &&
+      singleplayerPrivateStatePlayer(msg) === humanPlayer
+    ),
+    reason: 'singleplayer-server-restore',
+  });
 }
 
 function readLastMultiplayerRoomCode() {
@@ -3115,8 +3317,23 @@ session.on('GameState', (msg) => {
     editorBaseBoard = msg.state.board;
     if (activeView !== 'editor') resetEditorPortsFromBaseBoard();
   }
+  if (!msg.replay && pendingSingleplayerServerRestore && activeView === 'play-setup') {
+    pendingSingleplayerServerRestore = false;
+    if (canRestoreSingleplayerPlayFromServerState(msg)) {
+      restoreSingleplayerPlayFromServerState(msg);
+      if (!restoredSingleplayerPrivateStateMatches(msg)) return;
+    }
+  }
   if (!msg.replay && playMultiplayerActive() && !msg.state?.private_view) {
     analysisState = msg;
+    return;
+  }
+  if (
+    !msg.replay &&
+    playBotActive() &&
+    playMode.awaitingRestoredPrivateState &&
+    !restoredSingleplayerPrivateStateMatches(msg)
+  ) {
     return;
   }
   if (msg.replay) {
@@ -3140,6 +3357,9 @@ session.on('GameState', (msg) => {
     updateReplayShareButton();
   } else {
     analysisState = msg;
+    if (playMode.awaitingRestoredPrivateState && restoredSingleplayerPrivateStateMatches(msg)) {
+      playMode.awaitingRestoredPrivateState = false;
+    }
     maybePlayMoveSoundForGameState(msg);
     if (pendingSharedReplaySlug && !loadingSharedReplaySlug) {
       maybeLoadSharedReplayFromUrl();
@@ -4477,6 +4697,7 @@ function showPlayView() {
   }
   activeView = 'play';
   setTabState('play');
+  snapshotSingleplayerPlayForReload();
   setEditorChrome(false);
   setGameHeaderLabelsVisible(true);
   document.getElementById('main-layout').classList.remove('hidden');
@@ -4500,6 +4721,7 @@ function showPlayView() {
 function showPlaySetupView() {
   hideMultiplayerAnalysisGuard();
   hideGameOverModal();
+  markSingleplayerPlaySetupForReload();
   activeView = 'play-setup';
   setServerSingleplayerHumanPlayer(null);
   setTabState('play');
@@ -4527,6 +4749,7 @@ function showAnalysisView() {
     return;
   }
   hideMultiplayerAnalysisGuard();
+  markNonPlayViewForReload();
   activeView = 'analysis';
   setServerSingleplayerHumanPlayer(null);
   setTabState('analysis');
@@ -4547,6 +4770,7 @@ function showAnalysisView() {
 
 function showReplayView() {
   hideGameOverModal();
+  markNonPlayViewForReload();
   if (guestSharedReplayMode()) {
     if (replayState || currentState?.replay) {
       showReplayBoardView();
@@ -4588,6 +4812,7 @@ function showReplayView() {
 function showReplayBoardView() {
   hideMultiplayerAnalysisGuard();
   hideGameOverModal();
+  markNonPlayViewForReload();
   activeView = 'replay-board';
   updateReplayShareButton();
   setServerSingleplayerHumanPlayer(null);
@@ -4612,6 +4837,7 @@ function showEditorView() {
   if (showUsernameRequired('Editor')) return;
   hideMultiplayerAnalysisGuard();
   hideGameOverModal();
+  markNonPlayViewForReload();
   if (multiplayerGameOpen()) {
     rememberMultiplayerRoomForPlayTabReconnect();
     leaveMultiplayerRoom(false, true);
@@ -4791,6 +5017,7 @@ function startPlayGame() {
   document.getElementById('replay-view').classList.add('hidden');
   document.getElementById('controls').classList.remove('hidden');
   updateViewChrome(analysisState);
+  snapshotSingleplayerPlayForReload();
   setServerSingleplayerHumanPlayer(playMode.humanPlayer);
   session.send({ type: 'NewGame', seed: null });
 }
@@ -5451,7 +5678,14 @@ updateMoveSoundToggle();
 updateAutoRollEndToggle();
 initEditorControls();
 initCatanRulesPopover();
-showPlaySetupView();
+const startupSingleplayerReloadState = readSingleplayerPlayReloadState();
+if (!restoreSingleplayerPlayFromReload(startupSingleplayerReloadState)) {
+  pendingSingleplayerServerRestore = (
+    !startupSingleplayerReloadState ||
+    startupSingleplayerReloadState.view === 'setup'
+  ) && !singleplayerReloadBlocked();
+  showPlaySetupView();
+}
 
 for (const eventName of ['pointerdown', 'keydown', 'touchstart']) {
   document.addEventListener(eventName, unlockMoveSounds, { capture: true, once: true });
@@ -5462,6 +5696,7 @@ if (boardShellEl && window.ResizeObserver) {
   new ResizeObserver(updateBoardChromePlacement).observe(boardShellEl);
 }
 window.addEventListener('resize', scheduleBoardChromePlacement);
+window.addEventListener('pagehide', snapshotSingleplayerPlayForReload);
 scheduleBoardChromePlacement();
 
 board.onActionClick = (action) => {

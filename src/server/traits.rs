@@ -54,6 +54,11 @@ pub trait GamePresenter<G: Game>: Send + Sync {
         false
     }
 
+    /// Game-specific actions that should not be undone in multiplayer.
+    fn is_multiplayer_undo_barrier(&self, state: &G, action: usize) -> bool {
+        self.is_singleplayer_undo_barrier(state, action)
+    }
+
     /// Resign a singleplayer game for the given player index.
     ///
     /// Games that support singleplayer resignation should mutate `state` to a

@@ -438,6 +438,19 @@ impl GamePresenter<GameState> for CatanPresenter {
         action == ROLL as usize
     }
 
+    fn is_multiplayer_undo_barrier(&self, state: &GameState, action: usize) -> bool {
+        if self.is_singleplayer_undo_barrier(state, action) {
+            return true;
+        }
+        match u8::try_from(action) {
+            Ok(action) => {
+                (MONOPOLY_START..MONOPOLY_END).contains(&action)
+                    || (ROBBER_START..ROBBER_END).contains(&action)
+            }
+            Err(_) => false,
+        }
+    }
+
     fn resign(&self, state: &mut GameState, player: usize) -> Result<(), String> {
         let resigned = match player {
             0 => Player::One,
@@ -687,7 +700,10 @@ mod tests {
     use super::*;
     use crate::game::dev_card::DevCardArray;
     use crate::game::resource::ResourceArray;
+    use hexfish::eval::RandomEvaluator;
     use hexfish::game::{Game, Status};
+    use hexfish::mcts::Config;
+    use hexfish::server::{ClientMsg, GameSession, ServerMsg};
 
     fn presenter() -> CatanPresenter {
         CatanPresenter::new(PathBuf::new(), Dice::default())
@@ -1005,6 +1021,75 @@ mod tests {
             presenter.action_log_label_for_spectator(&state, 0, true, "Stole ore"),
             "Stole resource"
         );
+    }
+
+    #[test]
+    fn catan_undo_barriers_split_singleplayer_and_multiplayer() {
+        let presenter = presenter();
+        let state = presenter.new_game(42);
+
+        assert!(presenter.is_singleplayer_undo_barrier(&state, ROLL as usize));
+        assert!(!presenter.is_singleplayer_undo_barrier(&state, MONOPOLY_START as usize));
+        assert!(!presenter.is_singleplayer_undo_barrier(&state, ROBBER_START as usize));
+        assert!(!presenter.is_singleplayer_undo_barrier(&state, END_TURN as usize));
+
+        assert!(presenter.is_multiplayer_undo_barrier(&state, ROLL as usize));
+        assert!(presenter.is_multiplayer_undo_barrier(&state, MONOPOLY_START as usize));
+        assert!(presenter.is_multiplayer_undo_barrier(&state, MONOPOLY_END as usize - 1));
+        assert!(presenter.is_multiplayer_undo_barrier(&state, ROBBER_START as usize));
+        assert!(presenter.is_multiplayer_undo_barrier(&state, ROBBER_END as usize - 1));
+        assert!(!presenter.is_multiplayer_undo_barrier(&state, END_TURN as usize));
+    }
+
+    #[test]
+    fn singleplayer_state_redacts_bot_dev_card_draws() {
+        let presenter = Arc::new(presenter());
+        let mut state = presenter.new_game(42);
+        state.current_player = Player::Two;
+        state.phase = Phase::DevCardDraw;
+
+        let mut session = GameSession::with_state(
+            state,
+            Arc::new(RandomEvaluator),
+            "catan-redaction-test",
+            presenter,
+            [true, true],
+            Config::default(),
+        );
+        session.handle(ClientMsg::SetSingleplayer {
+            human_player: Some(0),
+        });
+
+        match session.handle(ClientMsg::GetState).as_slice() {
+            [
+                ServerMsg::GameState {
+                    state,
+                    action_log,
+                    history_cursor,
+                    ..
+                },
+            ] => {
+                assert_eq!(action_log, &vec!["Drew dev".to_string()]);
+                assert_eq!(*history_cursor, 1);
+                assert_eq!(state["private_view"], serde_json::json!(true));
+                assert_eq!(state["local_player"], serde_json::json!(0));
+                assert_eq!(
+                    state["frame"]["dev_pool"],
+                    serde_json::json!([0, 0, 0, 0, 0])
+                );
+
+                let players = state["frame"]["players"]
+                    .as_array()
+                    .expect("private players");
+                assert_eq!(players[1]["dev_cards"], serde_json::json!([0, 0, 0, 0, 0]));
+                assert_eq!(
+                    players[1]["dev_cards_bought_this_turn"],
+                    serde_json::json!([0, 0, 0, 0, 0])
+                );
+                assert_eq!(players[1]["hidden_dev_cards"], serde_json::json!(1));
+            }
+            other => panic!("expected singleplayer GameState, got {other:?}"),
+        }
     }
 
     #[test]
