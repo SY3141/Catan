@@ -20,13 +20,12 @@ use crate::{game::Game, game_log::GameLog};
 
 use super::{
     GameSession, MANAGED_BOT_LOBBY_REFRESH_MS, MULTIPLAYER_ANALYSIS_SIMS,
-    MULTIPLAYER_CHAT_HISTORY_LIMIT, MULTIPLAYER_EMPTY_ROOM_GRACE_MS, ManagedBotLobbySlot,
-    MultiplayerChatMessage, MultiplayerLobbyRoom, MultiplayerPlayer, MultiplayerSpectator,
-    ReplayParticipant, ReplayStore, RoomOutcome, SearchBudget, SeatOwnerKind, ServerMsg,
-    SessionFactory, current_unix_ms, managed_bot_display_name, managed_bot_search_budget,
-    managed_bot_user_id, new_room_code, normalize_room_code, normalize_room_increment_seconds,
-    normalize_room_time_minutes, replay_result_for_room_outcome, sanitize_multiplayer_chat_text,
-    winner_from_reward,
+    MULTIPLAYER_CHAT_HISTORY_LIMIT, ManagedBotLobbySlot, MultiplayerChatMessage,
+    MultiplayerLobbyRoom, MultiplayerPlayer, MultiplayerSpectator, ReplayParticipant, ReplayStore,
+    RoomOutcome, SearchBudget, SeatOwnerKind, ServerMsg, SessionFactory, current_unix_ms,
+    managed_bot_display_name, managed_bot_search_budget, managed_bot_user_id, new_room_code,
+    normalize_room_code, normalize_room_increment_seconds, normalize_room_time_minutes,
+    replay_result_for_room_outcome, sanitize_multiplayer_chat_text, winner_from_reward,
 };
 
 const DEFAULT_REDIS_PORT: u16 = 6379;
@@ -480,6 +479,8 @@ struct RedisRoomSnapshot {
     managed_bot_player: Option<usize>,
     #[serde(default)]
     managed_human_ever_joined: bool,
+    #[serde(default)]
+    closed: bool,
 }
 
 impl RedisRoomSnapshot {
@@ -518,6 +519,7 @@ impl RedisRoomSnapshot {
             managed_bot_slot: None,
             managed_bot_player: None,
             managed_human_ever_joined: false,
+            closed: false,
         }
     }
 
@@ -615,12 +617,29 @@ impl RedisRoomSnapshot {
             || now_ms.saturating_sub(self.last_activity_ms) >= MANAGED_BOT_LOBBY_REFRESH_MS
     }
 
+    fn has_active_player_connection(&self) -> bool {
+        (0..2).any(|player| {
+            self.seats[player]
+                .as_ref()
+                .is_some_and(|seat| seat.is_managed_bot())
+                || self.active_connections[player].is_some()
+        })
+    }
+
+    fn close_if_no_active_players(&mut self) -> bool {
+        if self.managed_bot_slot.is_some() || self.closed || self.has_active_player_connection() {
+            return false;
+        }
+        self.closed = true;
+        true
+    }
+
     fn remove_spectator_connection(&mut self, connection_id: &str) {
         let before = self.spectators.len();
         self.spectators
             .retain(|spectator| spectator.connection_id != connection_id);
         if self.spectators.len() != before {
-            self.touch();
+            // Spectators do not keep lobby rooms alive.
         }
     }
 
@@ -635,7 +654,7 @@ impl RedisRoomSnapshot {
             !remove
         });
         if self.spectators.len() != before {
-            self.touch();
+            // Spectators do not keep lobby rooms alive.
         }
         old_connection
     }
@@ -783,7 +802,7 @@ impl<G: Game + 'static> RedisMultiplayerRoomStore<G> {
         let code = active.code.clone();
         let connection_id = active.connection_id.clone();
         let mut vacated_managed_seat = false;
-        let _ = self
+        let updated = self
             .update_room(&code, |room| {
                 if let Some(player) = active.player {
                     if room.active_connections[player].as_deref() == Some(&connection_id) {
@@ -797,9 +816,11 @@ impl<G: Game + 'static> RedisMultiplayerRoomStore<G> {
                 } else {
                     room.remove_spectator_connection(&connection_id);
                 }
+                room.close_if_no_active_players();
                 Ok(())
             })
             .await;
+        let updated_room = updated.ok().map(|(_, room)| room);
         let _ = self
             .publish_event(RedisMultiplayerEvent::RoomChanged {
                 code: code.clone(),
@@ -809,6 +830,11 @@ impl<G: Game + 'static> RedisMultiplayerRoomStore<G> {
         let _ = self
             .publish_event(RedisMultiplayerEvent::LobbyChanged)
             .await;
+        if let Some(room) = updated_room.as_ref() {
+            if room.closed && self.connected_viewers(room).await == 0 {
+                self.delete_room_keys(&code).await;
+            }
+        }
         if vacated_managed_seat && self.ensure_managed_bot_lobbies().await {
             let _ = self
                 .publish_event(RedisMultiplayerEvent::LobbyChanged)
@@ -1050,10 +1076,14 @@ impl<G: Game + 'static> RedisMultiplayerRoomStore<G> {
         let owner = self.seat_owner(user_id, display_name);
         let activated = self
             .update_room(code, |room| {
+                if room.closed {
+                    return Err("Room not found".into());
+                }
                 let player = room.assign_or_find_viewer(owner.clone());
                 if let Some(player) = player {
                     old_connection = room.active_connections[player].clone();
                     room.active_connections[player] = Some(connection_id.clone());
+                    room.touch();
                 } else {
                     old_connection = room.remove_spectator_user(user_id);
                     room.spectators.push(RedisSpectator {
@@ -1065,7 +1095,6 @@ impl<G: Game + 'static> RedisMultiplayerRoomStore<G> {
                 if room.is_full() && room.clock.active_player.is_none() && !room.is_finished() {
                     room.clock.mark_active(0);
                 }
-                room.touch();
                 Ok(player)
             })
             .await;
@@ -1534,13 +1563,13 @@ impl<G: Game + 'static> RedisMultiplayerRoomStore<G> {
             .map_err(|e| format!("invalid Redis room: {e}"))
     }
 
-    async fn lobby_msg(&self) -> ServerMsg {
+    pub(super) async fn lobby_rooms(&self) -> Vec<MultiplayerLobbyRoom> {
         self.ensure_managed_bot_lobbies().await;
         let mut entries = Vec::new();
         if let Ok(Some(codes)) = self.room_codes().await {
             for code in codes {
                 if let Ok(Some(room)) = self.load_room(&code).await {
-                    if room.is_public {
+                    if room.is_public && !room.closed {
                         entries.push(self.lobby_entry(&room).await);
                     }
                 }
@@ -1551,6 +1580,11 @@ impl<G: Game + 'static> RedisMultiplayerRoomStore<G> {
                 .cmp(&a.last_activity_ms)
                 .then_with(|| a.code.cmp(&b.code))
         });
+        entries
+    }
+
+    async fn lobby_msg(&self) -> ServerMsg {
+        let entries = self.lobby_rooms().await;
         ServerMsg::MultiplayerLobby { rooms: entries }
     }
 
@@ -1716,7 +1750,6 @@ impl<G: Game + 'static> RedisMultiplayerRoomStore<G> {
         let occupied = room.seats.iter().filter(|seat| seat.is_some()).count() as u8;
         let connected = self.connected_players(room).await as u8;
         let spectator_count = self.connected_spectators(room).await.len() as u8;
-        let total_connected = usize::from(connected) + usize::from(spectator_count);
         let status = self.room_status(room);
         MultiplayerLobbyRoom {
             code: room.code.clone(),
@@ -1728,10 +1761,7 @@ impl<G: Game + 'static> RedisMultiplayerRoomStore<G> {
             time_minutes: room.time_minutes,
             increment_seconds: room.increment_seconds,
             last_activity_ms: room.last_activity_ms,
-            empty_room_closes_at_ms: (total_connected == 0).then_some(
-                room.last_activity_ms
-                    .saturating_add(MULTIPLAYER_EMPTY_ROOM_GRACE_MS),
-            ),
+            empty_room_closes_at_ms: None,
         }
     }
 
@@ -2147,36 +2177,58 @@ impl<G: Game + 'static> RedisMultiplayerRoomStore<G> {
         let Ok(Some(codes)) = self.room_codes().await else {
             return;
         };
+        let mut lobby_changed = false;
         for code in codes {
             let Ok(Some(room)) = self.load_room(&code).await else {
                 let _ = self
                     .client
                     .command_owned(vec!["SREM".into(), self.rooms_key(), code])
                     .await;
+                lobby_changed = true;
                 continue;
             };
             if room.managed_bot_slot.is_some() {
                 continue;
             }
-            let idle_ms = current_unix_ms().saturating_sub(room.last_activity_ms);
-            if idle_ms < MULTIPLAYER_EMPTY_ROOM_GRACE_MS {
-                continue;
+            let mut stale_player_connections = Vec::new();
+            for player in 0..2 {
+                if room.seats[player]
+                    .as_ref()
+                    .is_some_and(|seat| seat.is_managed_bot())
+                {
+                    continue;
+                }
+                if let Some(connection_id) = room.active_connections[player].clone() {
+                    if !self.presence_exists(&connection_id).await {
+                        stale_player_connections.push((player, connection_id));
+                    }
+                }
             }
-            if self.connected_viewers(&room).await > 0 {
-                continue;
+            let mut room = room;
+            if !room.closed || !stale_player_connections.is_empty() {
+                if let Ok((closed_now, updated_room)) = self
+                    .update_room(&code, |room| {
+                        for (player, connection_id) in &stale_player_connections {
+                            if room.active_connections[*player].as_deref()
+                                == Some(connection_id.as_str())
+                            {
+                                room.active_connections[*player] = None;
+                            }
+                        }
+                        Ok(room.close_if_no_active_players())
+                    })
+                    .await
+                {
+                    room = updated_room;
+                    lobby_changed |= closed_now;
+                }
             }
-            let _ = self
-                .client
-                .command_owned(vec!["DEL".into(), self.room_key(&room.code)])
-                .await;
-            let _ = self
-                .client
-                .command_owned(vec!["SREM".into(), self.rooms_key(), room.code.clone()])
-                .await;
-            let _ = self
-                .client
-                .command_owned(vec!["ZREM".into(), self.deadlines_key(), room.code.clone()])
-                .await;
+            if room.closed && self.connected_viewers(&room).await == 0 {
+                self.delete_room_keys(&room.code).await;
+                lobby_changed = true;
+            }
+        }
+        if lobby_changed {
             let _ = self
                 .publish_event(RedisMultiplayerEvent::LobbyChanged)
                 .await;
@@ -2755,6 +2807,45 @@ mod tests {
     }
 
     #[test]
+    fn redis_spectator_changes_do_not_touch_last_activity() {
+        let mut room = RedisRoomSnapshot::new(
+            "ABCD".into(),
+            1,
+            "0".into(),
+            RedisSeatOwner {
+                user_id: "user_a".into(),
+                account_key: "a".into(),
+                display_name: Some("A".into()),
+                kind: SeatOwnerKind::Human,
+            },
+            0,
+            true,
+            None,
+            None,
+        );
+        room.last_activity_ms = 123;
+        room.spectators.push(RedisSpectator {
+            user_id: "user_s".into(),
+            display_name: Some("Spec".into()),
+            connection_id: "spec-1".into(),
+        });
+
+        room.remove_spectator_connection("spec-1");
+        assert_eq!(room.last_activity_ms, 123);
+        room.spectators.push(RedisSpectator {
+            user_id: "user_s".into(),
+            display_name: Some("Spec".into()),
+            connection_id: "spec-2".into(),
+        });
+
+        assert_eq!(
+            room.remove_spectator_user("user_s").as_deref(),
+            Some("spec-2")
+        );
+        assert_eq!(room.last_activity_ms, 123);
+    }
+
+    #[test]
     fn redis_multiplayer_integration_create_join_across_stores() {
         let Ok(redis_url) = std::env::var("HEXFISH_TEST_REDIS_URL") else {
             return;
@@ -2776,11 +2867,17 @@ mod tests {
                 RedisMultiplayerRoomStore::connect(&redis_url, Arc::clone(&factory), None)
                     .await
                     .unwrap();
+            let store_c =
+                RedisMultiplayerRoomStore::connect(&redis_url, Arc::clone(&factory), None)
+                    .await
+                    .unwrap();
             let code = format!("T{:05}", fastrand::u32(0..100_000));
             let (tx_a, _rx_a) = mpsc::unbounded_channel();
             let (tx_b, mut rx_b) = mpsc::unbounded_channel();
+            let (tx_c, _rx_c) = mpsc::unbounded_channel();
             let mut active_a = None;
             let mut active_b = None;
+            let mut active_c = None;
 
             let created = store_a
                 .handle_message_for_user(
@@ -2900,14 +2997,87 @@ mod tests {
                 other => panic!("expected caught-up Redis rejoin response, got {other:?}"),
             }
 
-            let _ = store_a
-                .client
-                .command_owned(vec!["DEL".into(), store_a.room_key(&code)])
+            let spectator_joined = store_c
+                .handle_message_for_user(
+                    "user_c",
+                    Some("Casey"),
+                    &tx_c,
+                    &mut active_c,
+                    super::super::ClientMsg::JoinMultiplayerRoom { code: code.clone() },
+                )
                 .await;
-            let _ = store_a
-                .client
-                .command_owned(vec!["SREM".into(), store_a.rooms_key(), code])
+            assert!(spectator_joined.iter().any(|msg| {
+                matches!(
+                    msg,
+                    ServerMsg::MultiplayerRoom { viewer_role, .. }
+                        if viewer_role == "spectator"
+                )
+            }));
+
+            assert!(store_a.detach_active_room(&mut active_a).await);
+            match store_a.lobby_msg().await {
+                ServerMsg::MultiplayerLobby { rooms } => {
+                    let room = rooms
+                        .iter()
+                        .find(|room| room.code == code)
+                        .expect("room should remain listed while one player is connected");
+                    assert_eq!(room.connected, 1);
+                    assert_eq!(room.spectator_count, 1);
+                    assert!(room.empty_room_closes_at_ms.is_none());
+                }
+                other => panic!("expected Redis lobby response, got {other:?}"),
+            }
+
+            assert!(store_b.detach_active_room(&mut active_b).await);
+            match store_a.lobby_msg().await {
+                ServerMsg::MultiplayerLobby { rooms } => {
+                    assert!(rooms.iter().all(|room| room.code != code));
+                }
+                other => panic!("expected Redis lobby response, got {other:?}"),
+            }
+
+            let refreshed = store_c
+                .handle_message_for_user(
+                    "user_c",
+                    Some("Casey"),
+                    &tx_c,
+                    &mut active_c,
+                    super::super::ClientMsg::GetMultiplayerRoom,
+                )
                 .await;
+            assert!(refreshed.iter().any(|msg| {
+                matches!(
+                    msg,
+                    ServerMsg::MultiplayerRoom {
+                        code: refreshed_code,
+                        viewer_role,
+                        ..
+                    } if refreshed_code == &code && viewer_role == "spectator"
+                )
+            }));
+
+            let store_d =
+                RedisMultiplayerRoomStore::connect(&redis_url, Arc::clone(&factory), None)
+                    .await
+                    .unwrap();
+            let (tx_d, _rx_d) = mpsc::unbounded_channel();
+            let mut active_d = None;
+            let rejected = store_d
+                .handle_message_for_user(
+                    "user_d",
+                    Some("Drew"),
+                    &tx_d,
+                    &mut active_d,
+                    super::super::ClientMsg::JoinMultiplayerRoom { code: code.clone() },
+                )
+                .await;
+            match rejected.as_slice() {
+                [ServerMsg::Error { message }] => assert!(message.contains("not found")),
+                other => panic!("expected closed Redis room to reject join, got {other:?}"),
+            }
+
+            assert!(store_c.detach_active_room(&mut active_c).await);
+            store_a.delete_room_keys(&code).await;
         });
     }
 }

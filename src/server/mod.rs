@@ -47,7 +47,6 @@ const PROGRESS_INTERVAL: u32 = 100;
 const SEARCH_PROGRESS_KEEPALIVE_MS: u64 = 5_000;
 const SEARCH_INTERRUPT_INTERVAL: u32 = 8;
 const MULTIPLAYER_ANALYSIS_SIMS: u32 = 200;
-const MULTIPLAYER_EMPTY_ROOM_GRACE_MS: u64 = 5 * 60_000;
 const MANAGED_BOT_LOBBY_REFRESH_MS: u64 = 15 * 60_000;
 const MANAGED_BOT_SEARCH_DEPTH: u32 = 9;
 const MANAGED_BOT_SEARCH_SIMULATIONS: u32 = 550;
@@ -1858,7 +1857,9 @@ impl<G: Game + 'static> MultiplayerRoom<G> {
             },
         );
         drop(sockets);
-        self.touch();
+        if viewer.player().is_some() {
+            self.touch();
+        }
         Ok(socket_id)
     }
 
@@ -1869,20 +1870,45 @@ impl<G: Game + 'static> MultiplayerRoom<G> {
             .contains_key(&socket_id)
     }
 
-    fn unregister_socket(&self, socket_id: u64) {
-        self.sockets
-            .lock()
-            .expect("room sockets lock poisoned")
-            .remove(&socket_id);
-        self.touch();
-    }
-
-    fn has_registered_sockets(&self) -> bool {
-        !self
+    fn unregister_socket(&self, socket_id: u64) -> Option<MultiplayerViewer> {
+        let removed = self
             .sockets
             .lock()
             .expect("room sockets lock poisoned")
-            .is_empty()
+            .remove(&socket_id)
+            .map(|socket| socket.viewer);
+        if removed
+            .as_ref()
+            .is_some_and(|viewer| viewer.player().is_some())
+        {
+            self.touch();
+        }
+        removed
+    }
+
+    fn connected_player_count_from_sockets(
+        seats: &[Option<SeatOwner>; 2],
+        sockets: &HashMap<u64, MultiplayerSocket>,
+    ) -> usize {
+        seats
+            .iter()
+            .enumerate()
+            .filter(|(player, seat)| {
+                seat.as_ref().is_some_and(|seat| {
+                    seat.is_managed_bot()
+                        || sockets.values().any(|socket| {
+                            socket.user_id == seat.user_id
+                                && socket.viewer == MultiplayerViewer::Player(*player)
+                        })
+                })
+            })
+            .count()
+    }
+
+    fn connected_player_count(&self) -> usize {
+        let seats = self.seats.lock().expect("room seats lock poisoned");
+        let sockets = self.sockets.lock().expect("room sockets lock poisoned");
+        Self::connected_player_count_from_sockets(&seats, &sockets)
     }
 
     fn seat_for_user(&self, user_id: &str) -> Option<usize> {
@@ -2039,20 +2065,7 @@ impl<G: Game + 'static> MultiplayerRoom<G> {
         let seats = self.seats.lock().expect("room seats lock poisoned");
         let sockets = self.sockets.lock().expect("room sockets lock poisoned");
         let occupied_count = seats.iter().filter(|seat| seat.is_some()).count() as u8;
-        let mut connected_count = 0;
-        for (player, seat) in seats.iter().enumerate() {
-            let Some(seat) = seat else {
-                continue;
-            };
-            if seat.is_managed_bot()
-                || sockets.values().any(|socket| {
-                    socket.user_id == seat.user_id
-                        && socket.viewer == MultiplayerViewer::Player(player)
-                })
-            {
-                connected_count += 1;
-            }
-        }
+        let connected_count = Self::connected_player_count_from_sockets(&seats, &sockets) as u8;
         let spectator_count = sockets
             .values()
             .filter(|socket| socket.viewer == MultiplayerViewer::Spectator)
@@ -2075,8 +2088,7 @@ impl<G: Game + 'static> MultiplayerRoom<G> {
             time_minutes: self.time_minutes,
             increment_seconds: self.increment_seconds,
             last_activity_ms,
-            empty_room_closes_at_ms: (sockets.is_empty() && self.managed_bot_slot.is_none())
-                .then_some(last_activity_ms.saturating_add(MULTIPLAYER_EMPTY_ROOM_GRACE_MS)),
+            empty_room_closes_at_ms: None,
         }
     }
 
@@ -2486,7 +2498,7 @@ impl<G: Game + 'static> MultiplayerRoomStore<G> {
             .remove(&id);
     }
 
-    fn lobby_msg(&self) -> ServerMsg {
+    fn lobby_rooms(&self) -> Vec<MultiplayerLobbyRoom> {
         self.ensure_managed_bot_lobbies();
         let mut rooms = self
             .rooms
@@ -2501,6 +2513,11 @@ impl<G: Game + 'static> MultiplayerRoomStore<G> {
                 .cmp(&a.last_activity_ms)
                 .then_with(|| a.code.cmp(&b.code))
         });
+        rooms
+    }
+
+    fn lobby_msg(&self) -> ServerMsg {
+        let rooms = self.lobby_rooms();
         ServerMsg::MultiplayerLobby { rooms }
     }
 
@@ -2697,40 +2714,11 @@ impl<G: Game + 'static> MultiplayerRoomStore<G> {
         Ok((room, viewer))
     }
 
-    fn schedule_room_cleanup_if_empty(self: &Arc<Self>, room: Arc<MultiplayerRoom<G>>) -> bool {
+    fn close_room_if_no_connected_players(&self, room: &Arc<MultiplayerRoom<G>>) -> bool {
         if room.managed_bot_slot.is_some() {
             return false;
         }
-        if room.has_registered_sockets() {
-            return false;
-        }
-        let rooms = Arc::clone(self);
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(
-                MULTIPLAYER_EMPTY_ROOM_GRACE_MS,
-            ))
-            .await;
-            if rooms.close_room_if_still_empty_after_grace(&room) {
-                rooms.broadcast_lobby();
-            }
-        });
-        true
-    }
-
-    fn close_room_if_still_empty_after_grace(&self, room: &Arc<MultiplayerRoom<G>>) -> bool {
-        let idle_ms =
-            current_unix_ms().saturating_sub(room.last_activity_ms.load(Ordering::Relaxed));
-        if idle_ms < MULTIPLAYER_EMPTY_ROOM_GRACE_MS {
-            return false;
-        }
-        self.close_room_if_still_empty(room)
-    }
-
-    fn close_room_if_still_empty(&self, room: &Arc<MultiplayerRoom<G>>) -> bool {
-        if room.managed_bot_slot.is_some() {
-            return false;
-        }
-        if room.has_registered_sockets() {
+        if room.connected_player_count() > 0 {
             return false;
         }
         let mut rooms = self.rooms.lock().expect("room store lock poisoned");
@@ -3332,7 +3320,19 @@ async fn replay_link_redirect(Path(slug): Path<String>) -> Redirect {
     }
 }
 
-async fn all_replays_page(replay_store: Option<Arc<ReplayStore>>) -> Html<String> {
+async fn multiplayer_lobby_rooms<G: Game + 'static>(
+    runtime: &Arc<MultiplayerRuntime<G>>,
+) -> Vec<MultiplayerLobbyRoom> {
+    match runtime.as_ref() {
+        MultiplayerRuntime::Memory(rooms) => rooms.lobby_rooms(),
+        MultiplayerRuntime::Redis(rooms) => rooms.lobby_rooms().await,
+    }
+}
+
+async fn all_page<G: Game + 'static>(
+    replay_store: Option<Arc<ReplayStore>>,
+    multiplayer: Arc<MultiplayerRuntime<G>>,
+) -> Html<String> {
     let (rows, error) = match replay_store {
         Some(store) => match store.list_all(ALL_REPLAYS_PAGE_LIMIT).await {
             Ok(rows) => (rows, None),
@@ -3343,26 +3343,37 @@ async fn all_replays_page(replay_store: Option<Arc<ReplayStore>>) -> Html<String
             Some("Replay storage is not configured".to_string()),
         ),
     };
-    Html(render_all_replays_page(&rows, error.as_deref()))
+    let lobbies = multiplayer_lobby_rooms(&multiplayer).await;
+    Html(render_all_page(&rows, &lobbies, error.as_deref()))
 }
 
-fn render_all_replays_page(rows: &[ReplayEntryWithAccount], error: Option<&str>) -> String {
+fn render_all_page(
+    rows: &[ReplayEntryWithAccount],
+    lobbies: &[MultiplayerLobbyRoom],
+    error: Option<&str>,
+) -> String {
     let mut html = String::from(
         r#"<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>All Replay Logs</title>
+<title>Replay Logs</title>
 <style>
 :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #111827; color: #e5e7eb; }
 body { margin: 0; padding: 24px; background: #111827; }
 main { max-width: 1180px; margin: 0 auto; }
-header { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
+header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
 h1 { margin: 0; font-size: 22px; font-weight: 800; }
+h2 { margin: 0 0 12px; font-size: 16px; font-weight: 800; }
 .meta { color: #9ca3af; font-size: 13px; }
+.header-copy { display: flex; flex-direction: column; gap: 4px; }
+.view-toggle { border: 1px solid #374151; border-radius: 6px; background: #1f2937; color: #e5e7eb; cursor: pointer; font: inherit; font-size: 13px; font-weight: 700; padding: 8px 12px; }
+.view-toggle:hover { background: #374151; }
+.panel[hidden] { display: none; }
 .error { margin-bottom: 16px; border: 1px solid #7f1d1d; border-radius: 6px; background: #3f1218; color: #fecaca; padding: 10px 12px; }
 table { width: 100%; border-collapse: collapse; overflow: hidden; border: 1px solid #374151; border-radius: 6px; background: #16213e; }
+.summary-table { max-width: 360px; margin-bottom: 16px; }
 th, td { padding: 8px 10px; border-bottom: 1px solid #283247; text-align: left; font-size: 13px; vertical-align: top; }
 th { position: sticky; top: 0; background: #0f172a; color: #cbd5e1; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
 tr:last-child td { border-bottom: 0; }
@@ -3371,16 +3382,19 @@ td.number { text-align: right; }
 a { color: #93c5fd; text-decoration: none; font-weight: 700; }
 a:hover { color: #bfdbfe; text-decoration: underline; }
 .empty { border: 1px dashed #374151; border-radius: 6px; color: #9ca3af; padding: 18px; background: #16213e; }
-@media (max-width: 760px) { body { padding: 12px; } table { display: block; overflow-x: auto; } header { display: block; } .meta { margin-top: 6px; } }
+@media (max-width: 760px) { body { padding: 12px; } table { display: block; overflow-x: auto; } header { align-items: flex-start; flex-direction: column; } .meta { margin-top: 6px; } }
 </style>
 </head>
 <body>
 <main>
 "#,
     );
-    html.push_str("<header><h1>All Replay Logs</h1><div class=\"meta\">Latest ");
+    html.push_str(
+        "<header><div class=\"header-copy\"><h1>Replay Logs</h1><div class=\"meta\">Latest ",
+    );
     html.push_str(&ALL_REPLAYS_PAGE_LIMIT.to_string());
-    html.push_str(" saved games</div></header>\n");
+    html.push_str(" saved games</div></div><button id=\"all-view-toggle\" class=\"view-toggle\" type=\"button\" aria-controls=\"replay-logs-section lobbies-section\" aria-pressed=\"false\">Show Lobbies</button></header>\n");
+    html.push_str("<section id=\"replay-logs-section\" class=\"panel\">\n");
     if let Some(error) = error {
         html.push_str("<div class=\"error\">");
         html.push_str(&escape_html(error));
@@ -3420,8 +3434,69 @@ a:hover { color: #bfdbfe; text-decoration: underline; }
         );
     }
     html.push_str(
+        "</section>\n<section id=\"lobbies-section\" class=\"panel\" hidden>\n<h2>Lobbies</h2>\n",
+    );
+    html.push_str(
+        r#"<table class="summary-table">
+<thead><tr><th>Metric</th><th>Count</th></tr></thead>
+<tbody><tr><td>Open lobbies</td><td class="number">"#,
+    );
+    html.push_str(&lobbies.len().to_string());
+    html.push_str(
+        r#"</td></tr></tbody>
+</table>
+"#,
+    );
+    if lobbies.is_empty() {
+        html.push_str("<div class=\"empty\">No open lobbies found.</div>\n");
+    } else {
+        html.push_str(
+            r#"<table>
+<thead><tr><th>Code</th><th>Status</th><th>Occupied</th><th>Connected</th><th>Spectators</th><th>Time Control</th><th>Last Activity</th><th>Open</th></tr></thead>
+<tbody>
+"#,
+        );
+        for lobby in lobbies {
+            html.push_str("<tr><td class=\"mono\">");
+            html.push_str(&escape_html(&lobby.code));
+            html.push_str("</td><td>");
+            html.push_str(&escape_html(&lobby.status));
+            html.push_str("</td><td class=\"number\">");
+            html.push_str(&lobby.occupied.to_string());
+            html.push_str("</td><td class=\"number\">");
+            html.push_str(&lobby.connected.to_string());
+            html.push_str("</td><td class=\"number\">");
+            html.push_str(&lobby.spectator_count.to_string());
+            html.push_str("</td><td>");
+            html.push_str(&escape_html(&lobby_time_control_label(lobby)));
+            html.push_str("</td><td><time data-ms=\"");
+            html.push_str(&lobby.last_activity_ms.to_string());
+            html.push_str("\">");
+            html.push_str(&lobby.last_activity_ms.to_string());
+            html.push_str("</time></td><td><a href=\"/?room=");
+            html.push_str(&escape_html(&lobby.code));
+            html.push_str("\">Open</a></td></tr>\n");
+        }
+        html.push_str(
+            r#"</tbody>
+</table>
+"#,
+        );
+    }
+    html.push_str("</section>\n");
+    html.push_str(
         r#"</main>
 <script>
+const toggle = document.getElementById('all-view-toggle');
+const replaySection = document.getElementById('replay-logs-section');
+const lobbiesSection = document.getElementById('lobbies-section');
+function setAllView(showLobbies) {
+  replaySection.hidden = showLobbies;
+  lobbiesSection.hidden = !showLobbies;
+  toggle.textContent = showLobbies ? 'Show Replay Logs' : 'Show Lobbies';
+  toggle.setAttribute('aria-pressed', showLobbies ? 'true' : 'false');
+}
+toggle?.addEventListener('click', () => setAllView(lobbiesSection.hidden));
 for (const el of document.querySelectorAll('time[data-ms]')) {
   const ms = Number(el.dataset.ms);
   if (Number.isFinite(ms)) {
@@ -3435,6 +3510,15 @@ for (const el of document.querySelectorAll('time[data-ms]')) {
 "#,
     );
     html
+}
+
+fn lobby_time_control_label(lobby: &MultiplayerLobbyRoom) -> String {
+    match (lobby.time_minutes, lobby.increment_seconds) {
+        (Some(minutes), Some(increment)) => format!("{minutes}+{increment}"),
+        (Some(minutes), None) => format!("{minutes} min"),
+        (None, Some(increment)) => format!("+{increment}s"),
+        (None, None) => "Untimed".into(),
+    }
 }
 
 fn escape_html(value: &str) -> String {
@@ -3483,6 +3567,7 @@ pub async fn serve<G: Game + 'static>(
                 "/ws",
                 axum::routing::get({
                     let store = Arc::clone(&store);
+                    let multiplayer = Arc::clone(&multiplayer);
                     move |ws: WebSocketUpgrade| {
                         let store = Arc::clone(&store);
                         let multiplayer = Arc::clone(&multiplayer);
@@ -3496,9 +3581,11 @@ pub async fn serve<G: Game + 'static>(
                 "/all",
                 axum::routing::get({
                     let replay_store = replay_store.clone();
+                    let multiplayer = Arc::clone(&multiplayer);
                     move || {
                         let replay_store = replay_store.clone();
-                        async move { all_replays_page(replay_store).await }
+                        let multiplayer = Arc::clone(&multiplayer);
+                        async move { all_page(replay_store, multiplayer).await }
                     }
                 }),
             )
@@ -4859,12 +4946,15 @@ fn detach_active_room_and_maybe_vacate<G: Game + 'static>(
         let vacated_managed_seat = active.viewer.player().is_some_and(|player| {
             vacate_managed_human_seat && active.room.vacate_human_player(player)
         });
-        active.room.unregister_socket(active.socket_id);
-        if !rooms.schedule_room_cleanup_if_empty(Arc::clone(&active.room)) {
-            active
-                .room
-                .broadcast_room_info_except(Some(active.socket_id));
-            schedule_room_info_broadcast(Arc::clone(&active.room), 300);
+        let removed_viewer = active.room.unregister_socket(active.socket_id);
+        let closed_room = removed_viewer.is_some_and(|viewer| viewer.player().is_some())
+            && rooms.close_room_if_no_connected_players(&active.room);
+        active
+            .room
+            .broadcast_room_info_except(Some(active.socket_id));
+        schedule_room_info_broadcast(Arc::clone(&active.room), 300);
+        if closed_room {
+            rooms.broadcast_lobby();
         }
         if vacated_managed_seat {
             rooms.ensure_managed_bot_lobbies();
@@ -5195,14 +5285,14 @@ mod tests {
     use super::{
         ActiveMultiplayerRoom, ClientMsg, FileReplayStore, GamePresenter,
         MANAGED_BOT_LOBBY_REFRESH_MS, MULTIPLAYER_CHAT_HISTORY_LIMIT, ManagedBotLobbySlot,
-        MultiplayerRoom, MultiplayerRoomStore, MultiplayerViewer, ReplayParticipant, ReplayStore,
-        RoomClock, RoomOutcome, SearchBudget, SeatOwner, ServerMsg, SessionFactory,
-        UserSessionStore, ViewTarget, anonymous_user_id_from_id, anonymous_user_id_from_token,
-        client_msg_target, current_unix_ms, detach_active_room, handle_multiplayer_message,
-        handle_profile_message, list_replay_entries, maybe_schedule_managed_bot_move,
-        parse_env_bool, redacted_account_key, replay_result_for_room_outcome, safe_replay_id,
-        safe_share_slug, save_current_replay_once, should_send_search_progress,
-        socket_session_key_from_auth,
+        MultiplayerLobbyRoom, MultiplayerRoom, MultiplayerRoomStore, MultiplayerViewer,
+        ReplayEntry, ReplayEntryWithAccount, ReplayParticipant, ReplayStore, RoomClock,
+        RoomOutcome, SearchBudget, SeatOwner, ServerMsg, SessionFactory, UserSessionStore,
+        ViewTarget, anonymous_user_id_from_id, anonymous_user_id_from_token, client_msg_target,
+        current_unix_ms, detach_active_room, handle_multiplayer_message, handle_profile_message,
+        list_replay_entries, maybe_schedule_managed_bot_move, parse_env_bool, redacted_account_key,
+        render_all_page, replay_result_for_room_outcome, safe_replay_id, safe_share_slug,
+        save_current_replay_once, should_send_search_progress, socket_session_key_from_auth,
     };
 
     #[derive(Clone)]
@@ -5526,6 +5616,35 @@ mod tests {
         ))
     }
 
+    fn sample_all_page_replay_row() -> ReplayEntryWithAccount {
+        ReplayEntryWithAccount {
+            account_key: "account:test".into(),
+            entry: ReplayEntry {
+                id: "replay-1".into(),
+                saved_at_ms: 1_700_000_000_000,
+                action_count: 42,
+                result: "win".into(),
+                favorite: false,
+                share_slug: "share-1".into(),
+            },
+        }
+    }
+
+    fn sample_all_page_lobby(code: &str) -> MultiplayerLobbyRoom {
+        MultiplayerLobbyRoom {
+            code: code.into(),
+            status: "waiting".into(),
+            occupied: 1,
+            connected: 1,
+            spectator_count: 0,
+            is_public: true,
+            time_minutes: Some(15),
+            increment_seconds: Some(1),
+            last_activity_ms: 1_700_000_001_000,
+            empty_room_closes_at_ms: None,
+        }
+    }
+
     async fn recv_multiplayer_analysis(
         rx: &mut mpsc::UnboundedReceiver<String>,
     ) -> serde_json::Value {
@@ -5554,6 +5673,93 @@ mod tests {
             }
         }
         panic!("expected multiplayer chat broadcast");
+    }
+
+    #[test]
+    fn all_page_renderer_labels_replay_logs_and_includes_toggle() {
+        let replay_rows = [sample_all_page_replay_row()];
+        let lobbies = [sample_all_page_lobby("LOBBY1")];
+        let html = render_all_page(&replay_rows, &lobbies, None);
+
+        assert!(html.contains("<title>Replay Logs</title>"));
+        assert!(html.contains("<h1>Replay Logs</h1>"));
+        assert!(!html.contains("All Replay Logs"));
+        assert!(html.contains("id=\"all-view-toggle\""));
+        assert!(html.contains(">Show Lobbies</button>"));
+        assert!(html.contains("Show Replay Logs"));
+        assert!(html.contains("id=\"replay-logs-section\""));
+        assert!(html.contains("id=\"lobbies-section\" class=\"panel\" hidden"));
+    }
+
+    #[test]
+    fn all_page_renderer_shows_lobby_count_and_details_table() {
+        let lobbies = [
+            sample_all_page_lobby("LOBBY1"),
+            MultiplayerLobbyRoom {
+                code: "LOBBY2".into(),
+                status: "active".into(),
+                occupied: 2,
+                connected: 2,
+                spectator_count: 3,
+                is_public: true,
+                time_minutes: None,
+                increment_seconds: None,
+                last_activity_ms: 1_700_000_002_000,
+                empty_room_closes_at_ms: None,
+            },
+        ];
+        let html = render_all_page(&[], &lobbies, None);
+
+        assert!(html.contains("<td>Open lobbies</td><td class=\"number\">2</td>"));
+        assert!(html.contains("<th>Code</th><th>Status</th><th>Occupied</th><th>Connected</th><th>Spectators</th><th>Time Control</th><th>Last Activity</th><th>Open</th>"));
+        assert!(html.contains("<td class=\"mono\">LOBBY1</td>"));
+        assert!(html.contains("<td>15+1</td>"));
+        assert!(html.contains("<td><a href=\"/?room=LOBBY2\">Open</a></td>"));
+    }
+
+    #[test]
+    fn all_page_renderer_empty_states_are_clear() {
+        let html = render_all_page(&[], &[], None);
+
+        assert!(html.contains("No replay logs found."));
+        assert!(html.contains("<td>Open lobbies</td><td class=\"number\">0</td>"));
+        assert!(html.contains("No open lobbies found."));
+    }
+
+    #[test]
+    fn all_page_lobby_snapshot_matches_public_lobby_list() {
+        let (rooms, _) = test_room_store();
+        rooms
+            .create_room(
+                "user_a",
+                Some(0),
+                Some("PUB123".into()),
+                Some(true),
+                None,
+                None,
+            )
+            .unwrap();
+        rooms
+            .create_room(
+                "user_b",
+                Some(0),
+                Some("PRIV12".into()),
+                Some(false),
+                None,
+                None,
+            )
+            .unwrap();
+
+        let snapshot = rooms.lobby_rooms();
+        match rooms.lobby_msg() {
+            ServerMsg::MultiplayerLobby { rooms: lobby } => {
+                assert_eq!(snapshot.len(), 1);
+                assert_eq!(lobby.len(), snapshot.len());
+                assert_eq!(snapshot[0].code, "PUB123");
+                assert_eq!(lobby[0].code, snapshot[0].code);
+            }
+            other => panic!("expected lobby message, got {other:?}"),
+        }
     }
 
     #[test]
@@ -6140,36 +6346,69 @@ mod tests {
     }
 
     #[test]
-    fn multiplayer_room_stays_rejoinable_after_all_players_disconnect() {
+    fn multiplayer_full_room_closes_when_last_player_disconnects_and_spectator_can_refresh() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
             let (rooms, _) = test_room_store();
             let rooms = Arc::new(rooms);
-            let (room, player_a) = rooms
-                .create_room("user_a", Some(0), None, None, None, None)
-                .unwrap();
-            let cleanup_room = Arc::clone(&room);
-            let code = room.code.clone();
-            let (_, player_b) = rooms.join_room("user_b", &code).unwrap();
+            let code = "CLOSE1".to_string();
             let (tx_a, _rx_a) = mpsc::unbounded_channel();
             let (tx_b, _rx_b) = mpsc::unbounded_channel();
-            let socket_a = room
-                .register_socket("user_a", None, MultiplayerViewer::Player(player_a), tx_a)
-                .unwrap();
-            let socket_b = room
-                .register_socket("user_b", None, MultiplayerViewer::Player(player_b), tx_b)
-                .unwrap();
+            let (tx_c, _rx_c) = mpsc::unbounded_channel();
+            let (tx_d, _rx_d) = mpsc::unbounded_channel();
+            let mut active_a = None;
+            let mut active_b = None;
+            let mut active_c = None;
 
-            let mut active_a = Some(ActiveMultiplayerRoom {
-                room: Arc::clone(&room),
-                socket_id: socket_a,
-                viewer: MultiplayerViewer::Player(player_a),
-            });
-            let mut active_b = Some(ActiveMultiplayerRoom {
-                room: Arc::clone(&room),
-                socket_id: socket_b,
-                viewer: MultiplayerViewer::Player(player_b),
-            });
+            let created = handle_multiplayer_message(
+                &rooms,
+                "user_a",
+                &tx_a,
+                &mut active_a,
+                ClientMsg::CreateMultiplayerRoom {
+                    preferred_player: Some(0),
+                    code: Some(code.clone()),
+                    is_public: Some(true),
+                    time_minutes: None,
+                    increment_seconds: None,
+                },
+            )
+            .await;
+            assert!(
+                created
+                    .iter()
+                    .any(|msg| matches!(msg, ServerMsg::MultiplayerRoom { .. }))
+            );
+
+            let joined = handle_multiplayer_message(
+                &rooms,
+                "user_b",
+                &tx_b,
+                &mut active_b,
+                ClientMsg::JoinMultiplayerRoom { code: code.clone() },
+            )
+            .await;
+            assert!(
+                joined
+                    .iter()
+                    .any(|msg| matches!(msg, ServerMsg::MultiplayerRoom { .. }))
+            );
+
+            let spectator_joined = handle_multiplayer_message(
+                &rooms,
+                "user_c",
+                &tx_c,
+                &mut active_c,
+                ClientMsg::JoinMultiplayerRoom { code: code.clone() },
+            )
+            .await;
+            assert!(spectator_joined.iter().any(|msg| {
+                matches!(
+                    msg,
+                    ServerMsg::MultiplayerRoom { viewer_role, .. }
+                        if viewer_role == "spectator"
+                )
+            }));
 
             assert!(detach_active_room(&rooms, &mut active_a));
             match rooms.lobby_msg() {
@@ -6177,31 +6416,100 @@ mod tests {
                     assert_eq!(rooms.len(), 1);
                     assert_eq!(rooms[0].code, code);
                     assert_eq!(rooms[0].connected, 1);
+                    assert_eq!(rooms[0].spectator_count, 1);
+                    assert!(rooms[0].empty_room_closes_at_ms.is_none());
                 }
                 other => panic!("expected lobby message, got {other:?}"),
             }
 
             assert!(detach_active_room(&rooms, &mut active_b));
             match rooms.lobby_msg() {
+                ServerMsg::MultiplayerLobby { rooms } => assert!(rooms.is_empty()),
+                other => panic!("expected lobby message, got {other:?}"),
+            }
+
+            let mut active_d = None;
+            let rejected = handle_multiplayer_message(
+                &rooms,
+                "user_d",
+                &tx_d,
+                &mut active_d,
+                ClientMsg::JoinMultiplayerRoom { code: code.clone() },
+            )
+            .await;
+            match rejected.as_slice() {
+                [ServerMsg::Error { message }] => assert!(message.contains("not found")),
+                other => panic!("expected closed room to reject join, got {other:?}"),
+            }
+
+            let refreshed = handle_multiplayer_message(
+                &rooms,
+                "user_c",
+                &tx_c,
+                &mut active_c,
+                ClientMsg::GetMultiplayerRoom,
+            )
+            .await;
+            assert!(refreshed.iter().any(|msg| {
+                matches!(
+                    msg,
+                    ServerMsg::MultiplayerRoom {
+                        code: refreshed_code,
+                        viewer_role,
+                        ..
+                    } if refreshed_code == &code && viewer_role == "spectator"
+                )
+            }));
+        });
+    }
+
+    #[test]
+    fn multiplayer_waiting_room_closes_when_only_player_disconnects() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let (rooms, _) = test_room_store();
+            let rooms = Arc::new(rooms);
+            let code = "EMPTY1".to_string();
+            let (tx_a, _rx_a) = mpsc::unbounded_channel();
+            let mut active_a = None;
+
+            let created = handle_multiplayer_message(
+                &rooms,
+                "user_a",
+                &tx_a,
+                &mut active_a,
+                ClientMsg::CreateMultiplayerRoom {
+                    preferred_player: Some(0),
+                    code: Some(code.clone()),
+                    is_public: Some(true),
+                    time_minutes: None,
+                    increment_seconds: None,
+                },
+            )
+            .await;
+            assert!(
+                created
+                    .iter()
+                    .any(|msg| matches!(msg, ServerMsg::MultiplayerRoom { .. }))
+            );
+
+            match rooms.lobby_msg() {
                 ServerMsg::MultiplayerLobby { rooms } => {
                     assert_eq!(rooms.len(), 1);
                     assert_eq!(rooms[0].code, code);
-                    assert_eq!(rooms[0].connected, 0);
+                    assert_eq!(rooms[0].connected, 1);
+                    assert_eq!(rooms[0].spectator_count, 0);
+                    assert!(rooms[0].empty_room_closes_at_ms.is_none());
                 }
                 other => panic!("expected lobby message, got {other:?}"),
             }
-            let (rejoined_room, rejoined_player) = rooms.join_room("user_a", &code).unwrap();
-            assert!(Arc::ptr_eq(&room, &rejoined_room));
-            assert_eq!(rejoined_player, player_a);
 
-            let (tx_c, _rx_c) = mpsc::unbounded_channel();
-            let socket_c = rejoined_room
-                .register_socket("user_a", None, MultiplayerViewer::Player(player_a), tx_c)
-                .unwrap();
-            assert!(!rooms.close_room_if_still_empty(&cleanup_room));
-            rejoined_room.unregister_socket(socket_c);
-            assert!(rooms.close_room_if_still_empty(&cleanup_room));
-            match rooms.join_room("user_a", &code) {
+            assert!(detach_active_room(&rooms, &mut active_a));
+            match rooms.lobby_msg() {
+                ServerMsg::MultiplayerLobby { rooms } => assert!(rooms.is_empty()),
+                other => panic!("expected lobby message, got {other:?}"),
+            }
+            match rooms.join_room("user_b", &code) {
                 Ok(_) => panic!("expected closed room to reject join"),
                 Err(err) => assert!(err.contains("not found")),
             }
@@ -6495,45 +6803,6 @@ mod tests {
             assert_eq!(state["state"]["viewer"], serde_json::json!("spectator"));
             assert_eq!(state["legal_actions"], serde_json::json!([]));
         });
-    }
-
-    #[test]
-    fn multiplayer_lobby_empty_deadline_requires_zero_connected_viewers() {
-        let (rooms, _) = test_room_store();
-        let (room, _) = rooms
-            .create_room(
-                "user_a",
-                Some(0),
-                Some("EMPTY1".into()),
-                Some(true),
-                None,
-                None,
-            )
-            .unwrap();
-        rooms.join_room("user_b", &room.code).unwrap();
-
-        match rooms.lobby_msg() {
-            ServerMsg::MultiplayerLobby { rooms } => {
-                assert_eq!(rooms.len(), 1);
-                assert_eq!(rooms[0].connected, 0);
-                assert_eq!(rooms[0].spectator_count, 0);
-                assert!(rooms[0].empty_room_closes_at_ms.is_some());
-            }
-            other => panic!("expected lobby message, got {other:?}"),
-        }
-
-        let (tx, _rx) = mpsc::unbounded_channel();
-        room.register_socket("user_c", Some("Spec"), MultiplayerViewer::Spectator, tx)
-            .unwrap();
-        match rooms.lobby_msg() {
-            ServerMsg::MultiplayerLobby { rooms } => {
-                assert_eq!(rooms.len(), 1);
-                assert_eq!(rooms[0].connected, 0);
-                assert_eq!(rooms[0].spectator_count, 1);
-                assert!(rooms[0].empty_room_closes_at_ms.is_none());
-            }
-            other => panic!("expected lobby message, got {other:?}"),
-        }
     }
 
     #[test]
