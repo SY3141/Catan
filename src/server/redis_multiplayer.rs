@@ -19,12 +19,14 @@ use tokio::{
 use crate::{game::Game, game_log::GameLog};
 
 use super::{
-    GameSession, MULTIPLAYER_ANALYSIS_SIMS, MULTIPLAYER_CHAT_HISTORY_LIMIT,
-    MULTIPLAYER_EMPTY_ROOM_GRACE_MS, MultiplayerChatMessage, MultiplayerLobbyRoom,
-    MultiplayerPlayer, MultiplayerSpectator, ReplayStore, RoomOutcome, SearchBudget, ServerMsg,
-    SessionFactory, current_unix_ms, new_room_code, normalize_room_code,
-    normalize_room_increment_seconds, normalize_room_time_minutes, replay_result_for_room_outcome,
-    sanitize_multiplayer_chat_text, winner_from_reward,
+    GameSession, MANAGED_BOT_LOBBY_REFRESH_MS, MULTIPLAYER_ANALYSIS_SIMS,
+    MULTIPLAYER_CHAT_HISTORY_LIMIT, MULTIPLAYER_EMPTY_ROOM_GRACE_MS, ManagedBotLobbySlot,
+    MultiplayerChatMessage, MultiplayerLobbyRoom, MultiplayerPlayer, MultiplayerSpectator,
+    ReplayStore, RoomOutcome, SearchBudget, SeatOwnerKind, ServerMsg, SessionFactory,
+    current_unix_ms, managed_bot_display_name, managed_bot_search_budget, managed_bot_user_id,
+    new_room_code, normalize_room_code, normalize_room_increment_seconds,
+    normalize_room_time_minutes, replay_result_for_room_outcome, sanitize_multiplayer_chat_text,
+    winner_from_reward,
 };
 
 const DEFAULT_REDIS_PORT: u16 = 6379;
@@ -280,6 +282,33 @@ struct RedisSeatOwner {
     user_id: String,
     account_key: String,
     display_name: Option<String>,
+    #[serde(default)]
+    kind: SeatOwnerKind,
+}
+
+impl RedisSeatOwner {
+    fn human(user_id: &str, display_name: Option<&str>) -> Self {
+        Self {
+            user_id: user_id.to_string(),
+            account_key: super::redacted_account_key(user_id),
+            display_name: display_name.map(str::to_string),
+            kind: SeatOwnerKind::Human,
+        }
+    }
+
+    fn managed_bot(slot: ManagedBotLobbySlot, code: &str) -> Self {
+        let user_id = managed_bot_user_id(slot, code);
+        Self {
+            account_key: super::redacted_account_key(&user_id),
+            user_id,
+            display_name: Some(managed_bot_display_name()),
+            kind: SeatOwnerKind::ManagedBot,
+        }
+    }
+
+    fn is_managed_bot(&self) -> bool {
+        self.kind == SeatOwnerKind::ManagedBot
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -445,6 +474,12 @@ struct RedisRoomSnapshot {
     is_public: bool,
     time_minutes: Option<u32>,
     increment_seconds: Option<u32>,
+    #[serde(default)]
+    managed_bot_slot: Option<ManagedBotLobbySlot>,
+    #[serde(default)]
+    managed_bot_player: Option<usize>,
+    #[serde(default)]
+    managed_human_ever_joined: bool,
 }
 
 impl RedisRoomSnapshot {
@@ -480,7 +515,33 @@ impl RedisRoomSnapshot {
             is_public,
             time_minutes,
             increment_seconds,
+            managed_bot_slot: None,
+            managed_bot_player: None,
+            managed_human_ever_joined: false,
         }
+    }
+
+    fn new_managed_bot(
+        code: String,
+        room_id: u64,
+        initial_state: String,
+        slot: ManagedBotLobbySlot,
+        bot_player: usize,
+    ) -> Self {
+        let (time_minutes, increment_seconds) = slot.time_control();
+        let mut room = Self::new(
+            code.clone(),
+            room_id,
+            initial_state,
+            RedisSeatOwner::managed_bot(slot, &code),
+            bot_player,
+            true,
+            Some(time_minutes),
+            Some(increment_seconds),
+        );
+        room.managed_bot_slot = Some(slot);
+        room.managed_bot_player = Some(bot_player);
+        room
     }
 
     fn touch(&mut self) {
@@ -513,11 +574,45 @@ impl RedisRoomSnapshot {
         }
         if let Some(player) = self.seats.iter().position(Option::is_none) {
             self.remove_spectator_user(&owner_user_id);
+            if self.managed_bot_slot.is_some() && !owner.is_managed_bot() {
+                self.managed_human_ever_joined = true;
+            }
             self.seats[player] = Some(owner);
             self.touch();
             return Some(player);
         }
         None
+    }
+
+    fn has_human_player_occupant(&self) -> bool {
+        self.seats
+            .iter()
+            .flatten()
+            .any(|seat| !seat.is_managed_bot())
+    }
+
+    fn vacate_human_player(&mut self, player: usize) -> bool {
+        if self.managed_bot_slot.is_none() {
+            return false;
+        }
+        let Some(seat) = self.seats.get(player).and_then(Option::as_ref) else {
+            return false;
+        };
+        if seat.is_managed_bot() {
+            return false;
+        }
+        self.seats[player] = None;
+        self.active_connections[player] = None;
+        self.touch();
+        true
+    }
+
+    fn managed_bot_should_refresh(&self, now_ms: u64) -> bool {
+        if self.managed_bot_slot.is_none() || self.has_human_player_occupant() {
+            return false;
+        }
+        self.managed_human_ever_joined
+            || now_ms.saturating_sub(self.last_activity_ms) >= MANAGED_BOT_LOBBY_REFRESH_MS
     }
 
     fn remove_spectator_connection(&mut self, connection_id: &str) {
@@ -596,6 +691,7 @@ pub(super) struct RedisMultiplayerRoomStore<G: Game + 'static> {
     local_sockets: StdMutex<HashMap<String, RedisLocalSocket>>,
     lobby_sockets: StdMutex<HashMap<u64, mpsc::UnboundedSender<String>>>,
     next_lobby_socket_id: AtomicU64,
+    managed_bot_lobbies_enabled: bool,
 }
 
 impl<G: Game + 'static> RedisMultiplayerRoomStore<G> {
@@ -616,10 +712,13 @@ impl<G: Game + 'static> RedisMultiplayerRoomStore<G> {
             local_sockets: StdMutex::new(HashMap::new()),
             lobby_sockets: StdMutex::new(HashMap::new()),
             next_lobby_socket_id: AtomicU64::new(1),
+            managed_bot_lobbies_enabled: true,
         });
         Self::start_subscriber(Arc::clone(&store));
         Self::start_clock_worker(Arc::clone(&store));
         Self::start_cleanup_worker(Arc::clone(&store));
+        Self::start_managed_bot_lobby_worker(Arc::clone(&store));
+        store.ensure_managed_bot_lobbies().await;
         Ok(store)
     }
 
@@ -640,12 +739,14 @@ impl<G: Game + 'static> RedisMultiplayerRoomStore<G> {
     }
 
     pub(super) async fn send_lobby_to(&self, tx: &mpsc::UnboundedSender<String>) {
+        self.ensure_managed_bot_lobbies().await;
         if let Ok(json) = serde_json::to_string(&self.lobby_msg().await) {
             let _ = tx.send(json);
         }
     }
 
     pub(super) async fn publish_lobby_changed(&self) {
+        self.ensure_managed_bot_lobbies().await;
         let _ = self
             .publish_event(RedisMultiplayerEvent::LobbyChanged)
             .await;
@@ -658,6 +759,15 @@ impl<G: Game + 'static> RedisMultiplayerRoomStore<G> {
     pub(super) async fn detach_active_room(
         &self,
         active_room: &mut Option<ActiveRedisMultiplayerRoom>,
+    ) -> bool {
+        self.detach_active_room_and_maybe_vacate(active_room, false)
+            .await
+    }
+
+    async fn detach_active_room_and_maybe_vacate(
+        &self,
+        active_room: &mut Option<ActiveRedisMultiplayerRoom>,
+        vacate_managed_human_seat: bool,
     ) -> bool {
         let Some(active) = active_room.take() else {
             return false;
@@ -672,12 +782,17 @@ impl<G: Game + 'static> RedisMultiplayerRoomStore<G> {
             .await;
         let code = active.code.clone();
         let connection_id = active.connection_id.clone();
+        let mut vacated_managed_seat = false;
         let _ = self
             .update_room(&code, |room| {
                 if let Some(player) = active.player {
                     if room.active_connections[player].as_deref() == Some(&connection_id) {
-                        room.active_connections[player] = None;
-                        room.touch();
+                        if vacate_managed_human_seat {
+                            vacated_managed_seat = room.vacate_human_player(player);
+                        } else {
+                            room.active_connections[player] = None;
+                            room.touch();
+                        }
                     }
                 } else {
                     room.remove_spectator_connection(&connection_id);
@@ -694,11 +809,16 @@ impl<G: Game + 'static> RedisMultiplayerRoomStore<G> {
         let _ = self
             .publish_event(RedisMultiplayerEvent::LobbyChanged)
             .await;
+        if vacated_managed_seat && self.ensure_managed_bot_lobbies().await {
+            let _ = self
+                .publish_event(RedisMultiplayerEvent::LobbyChanged)
+                .await;
+        }
         true
     }
 
     pub(super) async fn handle_message_for_user(
-        &self,
+        self: &Arc<Self>,
         user_id: &str,
         display_name: Option<&str>,
         outbound_tx: &mpsc::UnboundedSender<String>,
@@ -746,7 +866,8 @@ impl<G: Game + 'static> RedisMultiplayerRoomStore<G> {
                 time_minutes,
                 increment_seconds,
             } => {
-                self.detach_active_room(active_room).await;
+                self.detach_active_room_and_maybe_vacate(active_room, true)
+                    .await;
                 self.create_room(
                     user_id,
                     display_name,
@@ -761,22 +882,45 @@ impl<G: Game + 'static> RedisMultiplayerRoomStore<G> {
                 .await
             }
             super::ClientMsg::JoinMultiplayerRoom { code } => {
-                self.detach_active_room(active_room).await;
-                self.join_room(user_id, display_name, &code, outbound_tx, active_room)
-                    .await
+                self.detach_active_room_and_maybe_vacate(active_room, true)
+                    .await;
+                let responses = self
+                    .join_room(user_id, display_name, &code, outbound_tx, active_room)
+                    .await;
+                if let Some(active) = active_room.as_ref() {
+                    self.maybe_schedule_managed_bot_move(active.code.clone());
+                }
+                responses
             }
             super::ClientMsg::LeaveMultiplayerRoom => {
-                self.detach_active_room(active_room).await;
+                self.detach_active_room_and_maybe_vacate(active_room, true)
+                    .await;
                 vec![super::MultiplayerRoom::<G>::left_room_msg()]
             }
             super::ClientMsg::PlayMultiplayerAction { action } => {
-                self.play_action(active_room.as_ref(), action).await
+                let responses = self.play_action(active_room.as_ref(), action).await;
+                if let Some(active) = active_room.as_ref() {
+                    self.maybe_schedule_managed_bot_move(active.code.clone());
+                }
+                responses
             }
             super::ClientMsg::SendMultiplayerChat { text } => {
                 self.send_chat(active_room.as_ref(), text).await
             }
-            super::ClientMsg::Undo => self.history_action(active_room.as_ref(), true).await,
-            super::ClientMsg::Redo => self.history_action(active_room.as_ref(), false).await,
+            super::ClientMsg::Undo => {
+                let responses = self.history_action(active_room.as_ref(), true).await;
+                if let Some(active) = active_room.as_ref() {
+                    self.maybe_schedule_managed_bot_move(active.code.clone());
+                }
+                responses
+            }
+            super::ClientMsg::Redo => {
+                let responses = self.history_action(active_room.as_ref(), false).await;
+                if let Some(active) = active_room.as_ref() {
+                    self.maybe_schedule_managed_bot_move(active.code.clone());
+                }
+                responses
+            }
             super::ClientMsg::ResignMultiplayerGame => self.resign_game(active_room.as_ref()).await,
             super::ClientMsg::AddMultiplayerOpponentTime => {
                 self.add_opponent_time(active_room.as_ref()).await
@@ -1391,6 +1535,7 @@ impl<G: Game + 'static> RedisMultiplayerRoomStore<G> {
     }
 
     async fn lobby_msg(&self) -> ServerMsg {
+        self.ensure_managed_bot_lobbies().await;
         let mut entries = Vec::new();
         if let Ok(Some(codes)) = self.room_codes().await {
             for code in codes {
@@ -1423,6 +1568,148 @@ impl<G: Game + 'static> RedisMultiplayerRoomStore<G> {
             .map(|value| value.string())
             .collect::<Result<Vec<_>, _>>()
             .map(Some)
+    }
+
+    async fn ensure_managed_bot_lobbies(&self) -> bool {
+        if !self.managed_bot_lobbies_enabled {
+            return false;
+        }
+        let mut changed = false;
+        for slot in ManagedBotLobbySlot::ALL {
+            match self.ensure_managed_bot_lobby_slot(slot).await {
+                Ok(slot_changed) => changed |= slot_changed,
+                Err(message) => {
+                    tracing::warn!(
+                        slot = slot.key(),
+                        error = %message,
+                        "failed to ensure managed bot lobby"
+                    );
+                }
+            }
+        }
+        changed
+    }
+
+    async fn ensure_managed_bot_lobby_slot(
+        &self,
+        slot: ManagedBotLobbySlot,
+    ) -> Result<bool, String> {
+        let lock_key = self.managed_bot_slot_lock_key(slot);
+        let lock_value = self.next_connection_id();
+        let locked = self
+            .client
+            .command_owned(vec![
+                "SET".into(),
+                lock_key.clone(),
+                lock_value,
+                "NX".into(),
+                "PX".into(),
+                "10000".into(),
+            ])
+            .await?;
+        match locked {
+            RedisValue::Simple(ok) if ok == "OK" => {}
+            RedisValue::Bulk(None) => return Ok(false),
+            other => return Err(format!("unexpected Redis slot lock response: {other:?}")),
+        }
+
+        let result = self.ensure_managed_bot_lobby_slot_locked(slot).await;
+        let _ = self
+            .client
+            .command_owned(vec!["DEL".into(), lock_key])
+            .await;
+        result
+    }
+
+    async fn ensure_managed_bot_lobby_slot_locked(
+        &self,
+        slot: ManagedBotLobbySlot,
+    ) -> Result<bool, String> {
+        let slot_key = self.managed_bot_slot_key(slot);
+        let existing_code = self
+            .client
+            .command_owned(vec!["GET".into(), slot_key.clone()])
+            .await?
+            .bulk_string()?;
+        let now_ms = current_unix_ms();
+        let mut changed = false;
+
+        if let Some(code) = existing_code {
+            match self.load_room(&code).await? {
+                Some(room)
+                    if room.managed_bot_slot == Some(slot)
+                        && !room.managed_bot_should_refresh(now_ms) =>
+                {
+                    return Ok(false);
+                }
+                Some(room) if room.managed_bot_slot == Some(slot) => {
+                    self.delete_room_keys(&room.code).await;
+                    changed = true;
+                }
+                _ => {
+                    let _ = self
+                        .client
+                        .command_owned(vec!["DEL".into(), slot_key.clone()])
+                        .await;
+                    changed = true;
+                }
+            }
+        }
+
+        let initial_state = self.initial_log_state()?;
+        for _ in 0..64 {
+            let code = new_room_code();
+            let room_id = current_unix_ms().saturating_mul(1000) ^ fastrand::u64(..);
+            let bot_player = usize::from(fastrand::bool());
+            let room = RedisRoomSnapshot::new_managed_bot(
+                code.clone(),
+                room_id,
+                initial_state.clone(),
+                slot,
+                bot_player,
+            );
+            let json = serde_json::to_string(&room)
+                .map_err(|e| format!("failed to serialize Redis managed room: {e}"))?;
+            let set = self
+                .client
+                .command_owned(vec!["SET".into(), self.room_key(&code), json, "NX".into()])
+                .await?;
+            match set {
+                RedisValue::Simple(ok) if ok == "OK" => {
+                    let _ = self
+                        .client
+                        .command_owned(vec!["SADD".into(), self.rooms_key(), code.clone()])
+                        .await;
+                    let _ = self
+                        .client
+                        .command_owned(vec!["SET".into(), slot_key, code])
+                        .await;
+                    return Ok(true);
+                }
+                RedisValue::Bulk(None) => continue,
+                other => {
+                    return Err(format!(
+                        "unexpected Redis managed room create response: {other:?}"
+                    ));
+                }
+            }
+        }
+        Ok(changed)
+    }
+
+    async fn delete_room_keys(&self, code: &str) {
+        let _ = self
+            .client
+            .command_owned(vec!["DEL".into(), self.room_key(code)])
+            .await;
+        let _ = self
+            .client
+            .command_owned(vec!["SREM".into(), self.rooms_key(), code.to_string()])
+            .await;
+        let _ = self
+            .client
+            .command_owned(vec!["ZREM".into(), self.deadlines_key(), code.to_string()])
+            .await;
     }
 
     async fn lobby_entry(&self, room: &RedisRoomSnapshot) -> MultiplayerLobbyRoom {
@@ -1462,10 +1749,13 @@ impl<G: Game + 'static> RedisMultiplayerRoomStore<G> {
             .or(clock.winner);
         let mut players = Vec::new();
         for player in 0..2 {
-            let connected = match room.active_connections[player].as_deref() {
-                Some(connection_id) => self.presence_exists(connection_id).await,
-                None => false,
-            };
+            let connected = room.seats[player]
+                .as_ref()
+                .is_some_and(|seat| seat.is_managed_bot())
+                || match room.active_connections[player].as_deref() {
+                    Some(connection_id) => self.presence_exists(connection_id).await,
+                    None => false,
+                };
             players.push(MultiplayerPlayer {
                 occupied: room.seats[player].is_some(),
                 connected,
@@ -1546,9 +1836,18 @@ impl<G: Game + 'static> RedisMultiplayerRoomStore<G> {
 
     async fn connected_players(&self, room: &RedisRoomSnapshot) -> usize {
         let mut connected = 0;
-        for connection_id in room.active_connections.iter().flatten() {
-            if self.presence_exists(connection_id).await {
+        for player in 0..2 {
+            if room.seats[player]
+                .as_ref()
+                .is_some_and(|seat| seat.is_managed_bot())
+            {
                 connected += 1;
+                continue;
+            }
+            if let Some(connection_id) = room.active_connections[player].as_deref() {
+                if self.presence_exists(connection_id).await {
+                    connected += 1;
+                }
             }
         }
         connected
@@ -1619,11 +1918,7 @@ impl<G: Game + 'static> RedisMultiplayerRoomStore<G> {
     }
 
     fn seat_owner(&self, user_id: &str, display_name: Option<&str>) -> RedisSeatOwner {
-        RedisSeatOwner {
-            user_id: user_id.to_string(),
-            account_key: super::redacted_account_key(user_id),
-            display_name: display_name.map(str::to_string),
-        }
+        RedisSeatOwner::human(user_id, display_name)
     }
 
     async fn save_finished_room_replay_once(
@@ -1822,6 +2117,19 @@ impl<G: Game + 'static> RedisMultiplayerRoomStore<G> {
         });
     }
 
+    fn start_managed_bot_lobby_worker(store: Arc<Self>) {
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(60_000)).await;
+                if store.ensure_managed_bot_lobbies().await {
+                    let _ = store
+                        .publish_event(RedisMultiplayerEvent::LobbyChanged)
+                        .await;
+                }
+            }
+        });
+    }
+
     async fn cleanup_empty_rooms(&self) {
         let Ok(Some(codes)) = self.room_codes().await else {
             return;
@@ -1834,6 +2142,9 @@ impl<G: Game + 'static> RedisMultiplayerRoomStore<G> {
                     .await;
                 continue;
             };
+            if room.managed_bot_slot.is_some() {
+                continue;
+            }
             let idle_ms = current_unix_ms().saturating_sub(room.last_activity_ms);
             if idle_ms < MULTIPLAYER_EMPTY_ROOM_GRACE_MS {
                 continue;
@@ -1884,6 +2195,173 @@ impl<G: Game + 'static> RedisMultiplayerRoomStore<G> {
                     .await;
             }
         });
+    }
+
+    fn maybe_schedule_managed_bot_move(self: &Arc<Self>, code: String) {
+        if !self.managed_bot_lobbies_enabled {
+            return;
+        }
+        let store = Arc::clone(self);
+        tokio::spawn(async move {
+            store.run_managed_bot_move_if_needed(code).await;
+        });
+    }
+
+    async fn run_managed_bot_move_if_needed(self: Arc<Self>, code: String) {
+        let lock_key = self.managed_bot_move_lock_key(&code);
+        let lock_value = self.next_connection_id();
+        let locked = self
+            .client
+            .command_owned(vec![
+                "SET".into(),
+                lock_key.clone(),
+                lock_value,
+                "NX".into(),
+                "PX".into(),
+                "60000".into(),
+            ])
+            .await;
+        match locked {
+            Ok(RedisValue::Simple(ok)) if ok == "OK" => {}
+            Ok(RedisValue::Bulk(None)) => return,
+            Ok(other) => {
+                tracing::warn!(
+                    code = %code,
+                    response = ?other,
+                    "unexpected Redis managed bot move lock response"
+                );
+                return;
+            }
+            Err(message) => {
+                tracing::warn!(code = %code, error = %message, "managed bot move lock failed");
+                return;
+            }
+        }
+
+        let mut schedule_again = false;
+        let run_result = self
+            .run_managed_bot_move_locked(&code, &mut schedule_again)
+            .await;
+        let _ = self
+            .client
+            .command_owned(vec!["DEL".into(), lock_key])
+            .await;
+        if let Err(message) = run_result {
+            tracing::warn!(code = %code, error = %message, "managed bot move failed");
+        }
+        if schedule_again {
+            self.maybe_schedule_managed_bot_move(code);
+        }
+    }
+
+    async fn run_managed_bot_move_locked(
+        &self,
+        code: &str,
+        schedule_again: &mut bool,
+    ) -> Result<(), String> {
+        let Some(room) = self.load_room(code).await? else {
+            return Ok(());
+        };
+        let Some(bot_player) = room.managed_bot_player else {
+            return Ok(());
+        };
+        if !room.is_full() || room.is_finished() {
+            return Ok(());
+        }
+
+        let loaded_version = room.version;
+        let mut session = self.session_from_snapshot(&room)?;
+        if session.current_player_idx() != bot_player {
+            return Ok(());
+        }
+
+        let bot_msg = super::ClientMsg::BotMove {
+            simulations: None,
+            budget: Some(managed_bot_search_budget()),
+        };
+        if let Err(messages) = session.begin_search(&bot_msg) {
+            return Err(format!("could not start managed bot search: {messages:?}"));
+        }
+        let mut ticks_since_yield = 0;
+        let result = loop {
+            if let Some(result) = session.search_tick() {
+                break result;
+            }
+            ticks_since_yield += 1;
+            if ticks_since_yield >= super::SEARCH_INTERRUPT_INTERVAL {
+                ticks_since_yield = 0;
+                tokio::task::yield_now().await;
+            }
+        };
+        let messages = session.finish_search(&bot_msg, result);
+        if messages
+            .iter()
+            .any(|msg| matches!(msg, ServerMsg::Error { .. }))
+        {
+            return Err(format!(
+                "managed bot search did not finish cleanly: {messages:?}"
+            ));
+        }
+
+        let game_over = session.current_game_ended();
+        let winner = game_over.then(|| winner_from_reward(session.current_result_reward()));
+        let next_player = session.current_player_idx();
+        let log = session
+            .export_full_history_log_allow_empty()
+            .ok_or_else(|| "Could not export managed bot game log".to_string())?;
+        let actions = log.actions;
+        let cursor = session.cursor();
+        let analysis_session = (!game_over).then(|| session.fork_analysis_session());
+        let updated = self
+            .update_room(code, |room| {
+                if room.version != loaded_version
+                    || room.managed_bot_player != Some(bot_player)
+                    || !room.is_full()
+                    || room.is_finished()
+                {
+                    return Ok(false);
+                }
+                room.actions = actions.clone();
+                room.history_cursor = Some(cursor);
+                if game_over {
+                    room.outcome = Some(RedisRoomOutcome {
+                        winner: winner.flatten(),
+                        reason: "game".into(),
+                        replay_share_slug: room
+                            .outcome
+                            .as_ref()
+                            .and_then(|outcome| outcome.replay_share_slug.clone()),
+                    });
+                }
+                room.clock
+                    .finish_turn(bot_player, next_player, game_over, room.increment_seconds);
+                room.touch();
+                Ok(true)
+            })
+            .await?;
+        let (applied, room) = updated;
+        if !applied {
+            return Ok(());
+        }
+
+        let _ = self.schedule_clock_deadline(&room).await;
+        if let Some(analysis_session) = analysis_session {
+            self.schedule_analysis(room.code.clone(), room.version, analysis_session);
+        }
+        let _ = self
+            .publish_event(RedisMultiplayerEvent::GameChanged {
+                code: room.code.clone(),
+                excluded_connection_id: None,
+            })
+            .await;
+        let _ = self
+            .publish_event(RedisMultiplayerEvent::LobbyChanged)
+            .await;
+        if game_over {
+            let _ = self.save_finished_room_replay_once(&room.code, false).await;
+        }
+        *schedule_again = !game_over && next_player == bot_player && room.is_full();
+        Ok(())
     }
 
     fn start_subscriber(store: Arc<Self>) {
@@ -2090,6 +2568,18 @@ impl<G: Game + 'static> RedisMultiplayerRoomStore<G> {
         format!("{}:clock_deadlines", self.key_prefix)
     }
 
+    fn managed_bot_slot_key(&self, slot: ManagedBotLobbySlot) -> String {
+        format!("{}:managed_bot_slot:{}", self.key_prefix, slot.key())
+    }
+
+    fn managed_bot_slot_lock_key(&self, slot: ManagedBotLobbySlot) -> String {
+        format!("{}:managed_bot_slot_lock:{}", self.key_prefix, slot.key())
+    }
+
+    fn managed_bot_move_lock_key(&self, code: &str) -> String {
+        format!("{}:managed_bot_move:{code}", self.key_prefix)
+    }
+
     fn presence_key(&self, connection_id: &str) -> String {
         format!("{}:presence:{connection_id}", self.key_prefix)
     }
@@ -2206,6 +2696,7 @@ mod tests {
             local_sockets: StdMutex::new(HashMap::new()),
             lobby_sockets: StdMutex::new(HashMap::new()),
             next_lobby_socket_id: AtomicU64::new(1),
+            managed_bot_lobbies_enabled: false,
         };
         let room = RedisRoomSnapshot::new(
             "ABCD".into(),
@@ -2215,6 +2706,7 @@ mod tests {
                 user_id: "user_a".into(),
                 account_key: "a".into(),
                 display_name: Some("A".into()),
+                kind: SeatOwnerKind::Human,
             },
             0,
             true,

@@ -2448,7 +2448,6 @@ function updateMultiplayerLobbyCountdownTimer() {
 }
 
 function requestMultiplayerLobby() {
-  if (showUsernameRequired('Multiplayer')) return;
   session.send({ type: 'ListMultiplayerRooms' });
 }
 
@@ -4649,7 +4648,7 @@ session.on('Connected', () => {
     return;
   }
   requestActiveMultiplayerRoomSync();
-  if (selectedPlayMode === 'multiplayer' && activeView === 'play-setup') {
+  if (activeView === 'play-setup') {
     requestMultiplayerLobby();
   }
   if (!guestMultiplayerMode() && (pendingSharedReplaySlug || currentSharedReplaySlugFromUrl() || readPendingSharedReplaySlug())) {

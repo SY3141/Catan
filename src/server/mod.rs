@@ -28,6 +28,7 @@ use axum::{
     response::{Html, Redirect},
 };
 use futures_util::FutureExt;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, mpsc};
 use tokio_postgres::{Row, types::ToSql};
 use tower_http::services::ServeDir;
@@ -47,6 +48,9 @@ const SEARCH_PROGRESS_KEEPALIVE_MS: u64 = 5_000;
 const SEARCH_INTERRUPT_INTERVAL: u32 = 8;
 const MULTIPLAYER_ANALYSIS_SIMS: u32 = 200;
 const MULTIPLAYER_EMPTY_ROOM_GRACE_MS: u64 = 5 * 60_000;
+const MANAGED_BOT_LOBBY_REFRESH_MS: u64 = 15 * 60_000;
+const MANAGED_BOT_SEARCH_DEPTH: u32 = 9;
+const MANAGED_BOT_SEARCH_SIMULATIONS: u32 = 550;
 const MULTIPLAYER_CHAT_HISTORY_LIMIT: usize = 100;
 const MULTIPLAYER_CHAT_TEXT_LIMIT: usize = 280;
 const ALL_REPLAYS_PAGE_LIMIT: usize = 500;
@@ -57,6 +61,55 @@ const REPLAY_STORE_REQUIRED_ENV: &str = "HEXFISH_REPLAY_STORE_REQUIRED";
 const MULTIPLAYER_BACKEND_ENV: &str = "HEXFISH_MULTIPLAYER_BACKEND";
 const MULTIPLAYER_REQUIRED_ENV: &str = "HEXFISH_MULTIPLAYER_REQUIRED";
 const REDIS_URL_ENV: &str = "REDIS_URL";
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+enum ManagedBotLobbySlot {
+    FiveThree,
+    FifteenOne,
+    ThirtyZero,
+}
+
+impl ManagedBotLobbySlot {
+    const ALL: [Self; 3] = [Self::FiveThree, Self::FifteenOne, Self::ThirtyZero];
+
+    fn time_control(self) -> (u32, u32) {
+        match self {
+            Self::FiveThree => (5, 3),
+            Self::FifteenOne => (15, 1),
+            Self::ThirtyZero => (30, 0),
+        }
+    }
+
+    fn key(self) -> &'static str {
+        match self {
+            Self::FiveThree => "5+3",
+            Self::FifteenOne => "15+1",
+            Self::ThirtyZero => "30+0",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Default, Eq, PartialEq, Serialize)]
+enum SeatOwnerKind {
+    #[default]
+    Human,
+    ManagedBot,
+}
+
+fn managed_bot_search_budget() -> SearchBudget {
+    SearchBudget::pv_depth_with_simulations(
+        MANAGED_BOT_SEARCH_DEPTH,
+        MANAGED_BOT_SEARCH_SIMULATIONS,
+    )
+}
+
+fn managed_bot_user_id(slot: ManagedBotLobbySlot, code: &str) -> String {
+    format!("managed-bot:{}:{code}", slot.key())
+}
+
+fn managed_bot_display_name() -> String {
+    format!("User{:08x}", fastrand::u32(..))
+}
 
 #[derive(Clone, Copy)]
 struct CpuTimes {
@@ -1165,6 +1218,32 @@ struct SeatOwner {
     user_id: String,
     account_key: String,
     display_name: Option<String>,
+    kind: SeatOwnerKind,
+}
+
+impl SeatOwner {
+    fn human(user_id: &str, display_name: Option<&str>) -> Self {
+        Self {
+            user_id: user_id.to_string(),
+            account_key: redacted_account_key(user_id),
+            display_name: display_name.map(str::to_string),
+            kind: SeatOwnerKind::Human,
+        }
+    }
+
+    fn managed_bot(slot: ManagedBotLobbySlot, code: &str) -> Self {
+        let user_id = managed_bot_user_id(slot, code);
+        Self {
+            account_key: redacted_account_key(&user_id),
+            user_id,
+            display_name: Some(managed_bot_display_name()),
+            kind: SeatOwnerKind::ManagedBot,
+        }
+    }
+
+    fn is_managed_bot(&self) -> bool {
+        self.kind == SeatOwnerKind::ManagedBot
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1299,6 +1378,10 @@ struct MultiplayerRoom<G: Game + 'static> {
     is_public: bool,
     time_minutes: Option<u32>,
     increment_seconds: Option<u32>,
+    managed_bot_slot: Option<ManagedBotLobbySlot>,
+    managed_bot_player: Option<usize>,
+    managed_human_ever_joined: AtomicBool,
+    bot_move_running: AtomicBool,
 }
 
 impl<G: Game + 'static> MultiplayerRoom<G> {
@@ -1335,7 +1418,36 @@ impl<G: Game + 'static> MultiplayerRoom<G> {
             is_public,
             time_minutes,
             increment_seconds,
+            managed_bot_slot: None,
+            managed_bot_player: None,
+            managed_human_ever_joined: AtomicBool::new(false),
+            bot_move_running: AtomicBool::new(false),
         }
+    }
+
+    fn new_managed_bot(
+        code: String,
+        room_id: u64,
+        session: GameSession<G>,
+        slot: ManagedBotLobbySlot,
+        bot_player: usize,
+        replay_store: Option<Arc<ReplayStore>>,
+    ) -> Self {
+        let (time_minutes, increment_seconds) = slot.time_control();
+        let mut room = Self::new(
+            code.clone(),
+            room_id,
+            session,
+            SeatOwner::managed_bot(slot, &code),
+            bot_player,
+            replay_store,
+            true,
+            Some(time_minutes),
+            Some(increment_seconds),
+        );
+        room.managed_bot_slot = Some(slot);
+        room.managed_bot_player = Some(bot_player);
+        room
     }
 
     fn assign_or_find_viewer(&self, owner: SeatOwner) -> MultiplayerViewer {
@@ -1351,6 +1463,10 @@ impl<G: Game + 'static> MultiplayerRoom<G> {
             return MultiplayerViewer::Player(player);
         }
         if let Some(player) = seats.iter().position(Option::is_none) {
+            if self.managed_bot_slot.is_some() && !owner.is_managed_bot() {
+                self.managed_human_ever_joined
+                    .store(true, Ordering::Relaxed);
+            }
             seats[player] = Some(owner);
             self.touch();
             return MultiplayerViewer::Player(player);
@@ -1445,11 +1561,12 @@ impl<G: Game + 'static> MultiplayerRoom<G> {
         ];
         let players = (0..2)
             .map(|player| {
-                let connected = occupied[player].map_or(false, |user_id| {
-                    sockets.values().any(|socket| {
-                        socket.user_id == user_id
-                            && socket.viewer == MultiplayerViewer::Player(player)
-                    })
+                let connected = seats[player].as_ref().map_or(false, |seat| {
+                    seat.is_managed_bot()
+                        || sockets.values().any(|socket| {
+                            socket.user_id == seat.user_id
+                                && socket.viewer == MultiplayerViewer::Player(player)
+                        })
                 });
                 MultiplayerPlayer {
                     occupied: occupied[player].is_some(),
@@ -1562,19 +1679,18 @@ impl<G: Game + 'static> MultiplayerRoom<G> {
     fn lobby_entry(&self) -> MultiplayerLobbyRoom {
         let seats = self.seats.lock().expect("room seats lock poisoned");
         let sockets = self.sockets.lock().expect("room sockets lock poisoned");
-        let occupied = [
-            seats[0].as_ref().map(|seat| seat.user_id.as_str()),
-            seats[1].as_ref().map(|seat| seat.user_id.as_str()),
-        ];
-        let occupied_count = occupied.iter().filter(|seat| seat.is_some()).count() as u8;
+        let occupied_count = seats.iter().filter(|seat| seat.is_some()).count() as u8;
         let mut connected_count = 0;
-        for (player, user_id) in occupied.iter().enumerate() {
-            let Some(user_id) = user_id else {
+        for (player, seat) in seats.iter().enumerate() {
+            let Some(seat) = seat else {
                 continue;
             };
-            if sockets.values().any(|socket| {
-                socket.user_id == *user_id && socket.viewer == MultiplayerViewer::Player(player)
-            }) {
+            if seat.is_managed_bot()
+                || sockets.values().any(|socket| {
+                    socket.user_id == seat.user_id
+                        && socket.viewer == MultiplayerViewer::Player(player)
+                })
+            {
                 connected_count += 1;
             }
         }
@@ -1600,10 +1716,48 @@ impl<G: Game + 'static> MultiplayerRoom<G> {
             time_minutes: self.time_minutes,
             increment_seconds: self.increment_seconds,
             last_activity_ms,
-            empty_room_closes_at_ms: sockets
-                .is_empty()
+            empty_room_closes_at_ms: (sockets.is_empty() && self.managed_bot_slot.is_none())
                 .then_some(last_activity_ms.saturating_add(MULTIPLAYER_EMPTY_ROOM_GRACE_MS)),
         }
+    }
+
+    fn managed_bot_player(&self) -> Option<usize> {
+        self.managed_bot_player
+    }
+
+    fn has_human_player_occupant(&self) -> bool {
+        self.seats
+            .lock()
+            .expect("room seats lock poisoned")
+            .iter()
+            .flatten()
+            .any(|seat| !seat.is_managed_bot())
+    }
+
+    fn vacate_human_player(&self, player: usize) -> bool {
+        if self.managed_bot_slot.is_none() {
+            return false;
+        }
+        let mut seats = self.seats.lock().expect("room seats lock poisoned");
+        let Some(seat) = seats.get(player).and_then(Option::as_ref) else {
+            return false;
+        };
+        if seat.is_managed_bot() {
+            return false;
+        }
+        seats[player] = None;
+        drop(seats);
+        self.touch();
+        true
+    }
+
+    fn managed_bot_should_refresh(&self, now_ms: u64) -> bool {
+        if self.managed_bot_slot.is_none() || self.has_human_player_occupant() {
+            return false;
+        }
+        self.managed_human_ever_joined.load(Ordering::Relaxed)
+            || now_ms.saturating_sub(self.last_activity_ms.load(Ordering::Relaxed))
+                >= MANAGED_BOT_LOBBY_REFRESH_MS
     }
 
     fn left_room_msg() -> ServerMsg {
@@ -1930,10 +2084,20 @@ struct MultiplayerRoomStore<G: Game + 'static> {
     next_room_id: AtomicU64,
     next_lobby_socket_id: AtomicU64,
     replay_store: Option<Arc<ReplayStore>>,
+    managed_bot_lobbies_enabled: bool,
 }
 
 impl<G: Game + 'static> MultiplayerRoomStore<G> {
+    #[cfg(test)]
     fn new(factory: Arc<SessionFactory<G>>, replay_store: Option<Arc<ReplayStore>>) -> Self {
+        Self::new_with_managed_bot_lobbies(factory, replay_store, false)
+    }
+
+    fn new_with_managed_bot_lobbies(
+        factory: Arc<SessionFactory<G>>,
+        replay_store: Option<Arc<ReplayStore>>,
+        managed_bot_lobbies_enabled: bool,
+    ) -> Self {
         Self {
             factory,
             rooms: StdMutex::new(HashMap::new()),
@@ -1941,6 +2105,7 @@ impl<G: Game + 'static> MultiplayerRoomStore<G> {
             next_room_id: AtomicU64::new(1),
             next_lobby_socket_id: AtomicU64::new(1),
             replay_store,
+            managed_bot_lobbies_enabled,
         }
     }
 
@@ -1961,6 +2126,7 @@ impl<G: Game + 'static> MultiplayerRoomStore<G> {
     }
 
     fn lobby_msg(&self) -> ServerMsg {
+        self.ensure_managed_bot_lobbies();
         let mut rooms = self
             .rooms
             .lock()
@@ -1977,6 +2143,51 @@ impl<G: Game + 'static> MultiplayerRoomStore<G> {
         ServerMsg::MultiplayerLobby { rooms }
     }
 
+    fn ensure_managed_bot_lobbies(&self) -> bool {
+        if !self.managed_bot_lobbies_enabled {
+            return false;
+        }
+        let now_ms = current_unix_ms();
+        let mut rooms = self.rooms.lock().expect("room store lock poisoned");
+        let mut changed = false;
+        for slot in ManagedBotLobbySlot::ALL {
+            let existing_code = rooms.iter().find_map(|(code, room)| {
+                (room.managed_bot_slot == Some(slot)).then(|| code.clone())
+            });
+            if let Some(code) = existing_code {
+                let refresh = rooms
+                    .get(&code)
+                    .is_some_and(|room| room.managed_bot_should_refresh(now_ms));
+                if !refresh {
+                    continue;
+                }
+                rooms.remove(&code);
+                changed = true;
+            }
+
+            for _ in 0..64 {
+                let code = new_room_code();
+                if rooms.contains_key(&code) {
+                    continue;
+                }
+                let room_id = self.next_room_id.fetch_add(1, Ordering::Relaxed);
+                let bot_player = usize::from(fastrand::bool());
+                let room = Arc::new(MultiplayerRoom::new_managed_bot(
+                    code.clone(),
+                    room_id,
+                    self.factory.create_multiplayer_session(),
+                    slot,
+                    bot_player,
+                    self.replay_store.clone(),
+                ));
+                rooms.insert(code, room);
+                changed = true;
+                break;
+            }
+        }
+        changed
+    }
+
     fn send_lobby_to(&self, tx: &mpsc::UnboundedSender<String>) {
         if let Ok(json) = serde_json::to_string(&self.lobby_msg()) {
             let _ = tx.send(json);
@@ -1984,6 +2195,7 @@ impl<G: Game + 'static> MultiplayerRoomStore<G> {
     }
 
     fn broadcast_lobby(&self) {
+        self.ensure_managed_bot_lobbies();
         let Ok(json) = serde_json::to_string(&self.lobby_msg()) else {
             return;
         };
@@ -1992,6 +2204,21 @@ impl<G: Game + 'static> MultiplayerRoomStore<G> {
             .lock()
             .expect("lobby socket registry lock poisoned");
         sockets.retain(|_, tx| tx.send(json.clone()).is_ok());
+    }
+
+    fn start_managed_bot_lobby_worker(self: &Arc<Self>) {
+        if !self.managed_bot_lobbies_enabled {
+            return;
+        }
+        let rooms = Arc::clone(self);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(60_000)).await;
+                if rooms.ensure_managed_bot_lobbies() {
+                    rooms.broadcast_lobby();
+                }
+            }
+        });
     }
 
     #[cfg(test)]
@@ -2030,11 +2257,7 @@ impl<G: Game + 'static> MultiplayerRoomStore<G> {
             Some(1) => 1,
             _ => 0,
         };
-        let owner = SeatOwner {
-            user_id: user_id.to_string(),
-            account_key: redacted_account_key(user_id),
-            display_name: display_name.map(str::to_string),
-        };
+        let owner = SeatOwner::human(user_id, display_name);
         let room_id = self.next_room_id.fetch_add(1, Ordering::Relaxed);
         let mut rooms = self.rooms.lock().expect("room store lock poisoned");
         let is_public = is_public.unwrap_or(true);
@@ -2108,16 +2331,15 @@ impl<G: Game + 'static> MultiplayerRoomStore<G> {
             .get(&code)
             .cloned()
             .ok_or_else(|| "Room not found".to_string())?;
-        let owner = SeatOwner {
-            user_id: user_id.to_string(),
-            account_key: redacted_account_key(user_id),
-            display_name: display_name.map(str::to_string),
-        };
+        let owner = SeatOwner::human(user_id, display_name);
         let viewer = room.assign_or_find_viewer(owner);
         Ok((room, viewer))
     }
 
     fn schedule_room_cleanup_if_empty(self: &Arc<Self>, room: Arc<MultiplayerRoom<G>>) -> bool {
+        if room.managed_bot_slot.is_some() {
+            return false;
+        }
         if room.has_registered_sockets() {
             return false;
         }
@@ -2144,6 +2366,9 @@ impl<G: Game + 'static> MultiplayerRoomStore<G> {
     }
 
     fn close_room_if_still_empty(&self, room: &Arc<MultiplayerRoom<G>>) -> bool {
+        if room.managed_bot_slot.is_some() {
+            return false;
+        }
         if room.has_registered_sockets() {
             return false;
         }
@@ -2578,9 +2803,7 @@ async fn multiplayer_runtime_from_config<G: Game + 'static>(
                     "{MULTIPLAYER_BACKEND_ENV}=redis requires {REDIS_URL_ENV} to be set for multiplayer"
                 );
             }
-            return Arc::new(MultiplayerRuntime::Memory(Arc::new(
-                MultiplayerRoomStore::new(factory, replay_store),
-            )));
+            return managed_memory_multiplayer_runtime(factory, replay_store);
         };
         println!("Multiplayer rooms: Redis {REDIS_URL_ENV}");
         match RedisMultiplayerRoomStore::connect(
@@ -2605,9 +2828,21 @@ async fn multiplayer_runtime_from_config<G: Game + 'static>(
     }
 
     println!("Multiplayer rooms: in-memory");
-    Arc::new(MultiplayerRuntime::Memory(Arc::new(
-        MultiplayerRoomStore::new(factory, replay_store),
-    )))
+    managed_memory_multiplayer_runtime(factory, replay_store)
+}
+
+fn managed_memory_multiplayer_runtime<G: Game + 'static>(
+    factory: Arc<SessionFactory<G>>,
+    replay_store: Option<Arc<ReplayStore>>,
+) -> Arc<MultiplayerRuntime<G>> {
+    let rooms = Arc::new(MultiplayerRoomStore::new_with_managed_bot_lobbies(
+        factory,
+        replay_store,
+        true,
+    ));
+    rooms.ensure_managed_bot_lobbies();
+    rooms.start_managed_bot_lobby_worker();
+    Arc::new(MultiplayerRuntime::Memory(rooms))
 }
 
 fn env_flag(name: &str) -> bool {
@@ -2929,9 +3164,7 @@ pub async fn serve_with_state<G: Game + 'static>(
         SessionFactory::with_state(state, evaluator, eval_name, presenter, human_players),
         None,
     ));
-    let multiplayer = Arc::new(MultiplayerRuntime::Memory(Arc::new(
-        MultiplayerRoomStore::new(Arc::clone(&store.factory), None),
-    )));
+    let multiplayer = managed_memory_multiplayer_runtime(Arc::clone(&store.factory), None);
 
     let app =
         Router::new()
@@ -2970,9 +3203,7 @@ pub async fn serve_with_timeline<G: Game + 'static>(
         SessionFactory::with_timeline(timeline, evaluator, presenter, human_players),
         None,
     ));
-    let multiplayer = Arc::new(MultiplayerRuntime::Memory(Arc::new(
-        MultiplayerRoomStore::new(Arc::clone(&store.factory), None),
-    )));
+    let multiplayer = managed_memory_multiplayer_runtime(Arc::clone(&store.factory), None);
 
     let app =
         Router::new()
@@ -3963,7 +4194,7 @@ async fn handle_multiplayer_message_for_user<G: Game + 'static>(
             time_minutes,
             increment_seconds,
         } => {
-            if detach_active_room(rooms, active_room) {
+            if detach_active_room_and_maybe_vacate(rooms, active_room, true) {
                 rooms.broadcast_lobby();
             }
             let (room, player) = match rooms.create_room_with_display_name(
@@ -3991,7 +4222,7 @@ async fn handle_multiplayer_message_for_user<G: Game + 'static>(
             responses
         }
         ClientMsg::JoinMultiplayerRoom { code } => {
-            if detach_active_room(rooms, active_room) {
+            if detach_active_room_and_maybe_vacate(rooms, active_room, true) {
                 rooms.broadcast_lobby();
             }
             let (room, viewer) =
@@ -4000,7 +4231,7 @@ async fn handle_multiplayer_message_for_user<G: Game + 'static>(
                     Err(message) => return vec![ServerMsg::Error { message }],
                 };
             let responses = activate_multiplayer_room(
-                room,
+                Arc::clone(&room),
                 user_id,
                 display_name,
                 viewer,
@@ -4009,10 +4240,11 @@ async fn handle_multiplayer_message_for_user<G: Game + 'static>(
             )
             .await;
             rooms.broadcast_lobby();
+            maybe_schedule_managed_bot_move(Arc::clone(rooms), room);
             responses
         }
         ClientMsg::LeaveMultiplayerRoom => {
-            if detach_active_room(rooms, active_room) {
+            if detach_active_room_and_maybe_vacate(rooms, active_room, true) {
                 rooms.broadcast_lobby();
             }
             vec![MultiplayerRoom::<G>::left_room_msg()]
@@ -4069,6 +4301,9 @@ async fn handle_multiplayer_message_for_user<G: Game + 'static>(
             schedule_lobby_broadcast(Arc::clone(rooms));
             schedule_multiplayer_clock_timeout(Arc::clone(&room));
             schedule_multiplayer_analysis(room, analysis_generation, analysis_session);
+            if let Some(active) = active_room.as_ref() {
+                maybe_schedule_managed_bot_move(Arc::clone(rooms), Arc::clone(&active.room));
+            }
             responses
         }
         ClientMsg::SendMultiplayerChat { text } => {
@@ -4135,6 +4370,9 @@ async fn handle_multiplayer_message_for_user<G: Game + 'static>(
                 )
             };
             schedule_multiplayer_analysis(room, analysis_generation, analysis_session);
+            if let Some(active) = active_room.as_ref() {
+                maybe_schedule_managed_bot_move(Arc::clone(rooms), Arc::clone(&active.room));
+            }
             responses
         }
         ClientMsg::ResignMultiplayerGame => {
@@ -4248,13 +4486,27 @@ fn detach_active_room<G: Game + 'static>(
     rooms: &Arc<MultiplayerRoomStore<G>>,
     active_room: &mut Option<ActiveMultiplayerRoom<G>>,
 ) -> bool {
+    detach_active_room_and_maybe_vacate(rooms, active_room, false)
+}
+
+fn detach_active_room_and_maybe_vacate<G: Game + 'static>(
+    rooms: &Arc<MultiplayerRoomStore<G>>,
+    active_room: &mut Option<ActiveMultiplayerRoom<G>>,
+    vacate_managed_human_seat: bool,
+) -> bool {
     if let Some(active) = active_room.take() {
+        let vacated_managed_seat = active.viewer.player().is_some_and(|player| {
+            vacate_managed_human_seat && active.room.vacate_human_player(player)
+        });
         active.room.unregister_socket(active.socket_id);
         if !rooms.schedule_room_cleanup_if_empty(Arc::clone(&active.room)) {
             active
                 .room
                 .broadcast_room_info_except(Some(active.socket_id));
             schedule_room_info_broadcast(Arc::clone(&active.room), 300);
+        }
+        if vacated_managed_seat {
+            rooms.ensure_managed_bot_lobbies();
         }
         true
     } else {
@@ -4285,6 +4537,120 @@ fn schedule_multiplayer_clock_timeout<G: Game + 'static>(room: Arc<MultiplayerRo
         if room.mark_clock_timeout_if_current(generation) {
             let _ = save_finished_multiplayer_replay(Arc::clone(&room)).await;
             room.broadcast_room_info_except(None);
+        }
+    });
+}
+
+fn maybe_schedule_managed_bot_move<G: Game + 'static>(
+    rooms: Arc<MultiplayerRoomStore<G>>,
+    room: Arc<MultiplayerRoom<G>>,
+) {
+    let Some(bot_player) = room.managed_bot_player() else {
+        return;
+    };
+    if !room.is_full() || room.is_finished() {
+        return;
+    }
+    if room
+        .bot_move_running
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+
+    tokio::spawn(async move {
+        let mut schedule_again = false;
+        'run: {
+            if !room.is_full() || room.is_finished() {
+                break 'run;
+            }
+
+            let (analysis_generation, analysis_session, game_over) = {
+                let mut session = room.session.lock().await;
+                if session.current_player_idx() != bot_player {
+                    break 'run;
+                }
+
+                let bot_msg = ClientMsg::BotMove {
+                    simulations: None,
+                    budget: Some(managed_bot_search_budget()),
+                };
+                if let Err(messages) = session.begin_search(&bot_msg) {
+                    tracing::warn!(
+                        code = %room.code,
+                        messages = ?messages,
+                        "managed bot move could not start"
+                    );
+                    break 'run;
+                }
+
+                let mut ticks_since_yield = 0;
+                let result = loop {
+                    if let Some(result) = session.search_tick() {
+                        break result;
+                    }
+                    ticks_since_yield += 1;
+                    if ticks_since_yield >= SEARCH_INTERRUPT_INTERVAL {
+                        ticks_since_yield = 0;
+                        tokio::task::yield_now().await;
+                    }
+                };
+                let messages = session.finish_search(&bot_msg, result);
+                if messages
+                    .iter()
+                    .any(|msg| matches!(msg, ServerMsg::Error { .. }))
+                {
+                    tracing::warn!(
+                        code = %room.code,
+                        messages = ?messages,
+                        "managed bot move failed"
+                    );
+                    break 'run;
+                }
+
+                let game_over = session.current_game_ended();
+                if game_over {
+                    room.mark_finished(winner_from_reward(session.current_result_reward()), "game");
+                }
+                let next_player = session.current_player_idx();
+                room.finish_clock_turn(bot_player, next_player, game_over);
+                room.touch();
+                let save_errors = room.save_completed_replay_once(&session).await;
+                if !save_errors.is_empty() {
+                    tracing::warn!(
+                        code = %room.code,
+                        errors = ?save_errors,
+                        "managed bot replay save failed"
+                    );
+                }
+                room.broadcast_state_except(&session, None);
+                room.broadcast_room_info_except(None);
+                schedule_again = !game_over && next_player == bot_player && room.is_full();
+                (
+                    room.next_analysis_generation(),
+                    (!game_over).then(|| session.fork_analysis_session()),
+                    game_over,
+                )
+            };
+
+            schedule_lobby_broadcast(Arc::clone(&rooms));
+            schedule_multiplayer_clock_timeout(Arc::clone(&room));
+            if let Some(analysis_session) = analysis_session {
+                schedule_multiplayer_analysis(
+                    Arc::clone(&room),
+                    analysis_generation,
+                    analysis_session,
+                );
+            }
+            if game_over {
+                let _ = save_finished_multiplayer_replay(Arc::clone(&room)).await;
+            }
+        }
+
+        room.bot_move_running.store(false, Ordering::Release);
+        if schedule_again {
+            maybe_schedule_managed_bot_move(rooms, room);
         }
     });
 }
@@ -4459,13 +4825,14 @@ mod tests {
 
     use super::{
         ActiveMultiplayerRoom, ClientMsg, FileReplayStore, GamePresenter,
-        MULTIPLAYER_CHAT_HISTORY_LIMIT, MultiplayerRoomStore, MultiplayerViewer, ReplayStore,
-        RoomClock, RoomOutcome, SearchBudget, ServerMsg, SessionFactory, UserSessionStore,
+        MANAGED_BOT_LOBBY_REFRESH_MS, MULTIPLAYER_CHAT_HISTORY_LIMIT, ManagedBotLobbySlot,
+        MultiplayerRoom, MultiplayerRoomStore, MultiplayerViewer, ReplayStore, RoomClock,
+        RoomOutcome, SearchBudget, SeatOwner, ServerMsg, SessionFactory, UserSessionStore,
         ViewTarget, anonymous_user_id_from_id, anonymous_user_id_from_token, client_msg_target,
         current_unix_ms, detach_active_room, handle_multiplayer_message, handle_profile_message,
-        list_replay_entries, parse_env_bool, redacted_account_key, replay_result_for_room_outcome,
-        safe_replay_id, safe_share_slug, save_current_replay_once, should_send_search_progress,
-        socket_session_key_from_auth,
+        list_replay_entries, maybe_schedule_managed_bot_move, parse_env_bool, redacted_account_key,
+        replay_result_for_room_outcome, safe_replay_id, safe_share_slug, save_current_replay_once,
+        should_send_search_progress, socket_session_key_from_auth,
     };
 
     #[derive(Clone)]
@@ -4499,6 +4866,87 @@ mod tests {
     impl Evaluator<TestGame> for TestEvaluator {
         fn evaluate(&self, _state: &TestGame, _rng: &mut fastrand::Rng) -> Evaluation {
             Evaluation::uniform(TestGame::NUM_ACTIONS, 0.0)
+        }
+    }
+
+    #[derive(Clone)]
+    struct AlternatingGame {
+        moves: u8,
+    }
+
+    impl Game for AlternatingGame {
+        const NUM_ACTIONS: usize = 1;
+
+        fn status(&self) -> Status {
+            if self.moves >= 2 {
+                Status::Terminal(1.0)
+            } else if self.moves % 2 == 0 {
+                Status::Decision(1.0)
+            } else {
+                Status::Decision(-1.0)
+            }
+        }
+
+        fn legal_actions(&self, buf: &mut Vec<usize>) {
+            buf.push(0);
+        }
+
+        fn apply_action(&mut self, _action: usize) {
+            self.moves = self.moves.saturating_add(1);
+        }
+    }
+
+    struct AlternatingEvaluator;
+
+    impl Evaluator<AlternatingGame> for AlternatingEvaluator {
+        fn evaluate(&self, _state: &AlternatingGame, _rng: &mut fastrand::Rng) -> Evaluation {
+            Evaluation::uniform(AlternatingGame::NUM_ACTIONS, 0.0)
+        }
+    }
+
+    struct AlternatingPresenter;
+
+    impl GamePresenter<AlternatingGame> for AlternatingPresenter {
+        fn serialize_state(&self, state: &AlternatingGame) -> serde_json::Value {
+            serde_json::json!({ "moves": state.moves })
+        }
+
+        fn serialize_state_for_player(
+            &self,
+            state: &AlternatingGame,
+            player: usize,
+        ) -> serde_json::Value {
+            serde_json::json!({ "moves": state.moves, "viewer": player })
+        }
+
+        fn serialize_state_for_spectator(&self, state: &AlternatingGame) -> serde_json::Value {
+            serde_json::json!({ "moves": state.moves, "viewer": "spectator" })
+        }
+
+        fn action_label(&self, _state: &AlternatingGame, action: usize) -> String {
+            format!("Action {action}")
+        }
+
+        fn phase_label(&self, _state: &AlternatingGame) -> String {
+            "alternating".into()
+        }
+
+        fn serialize_log_state(&self, state: &AlternatingGame) -> Option<String> {
+            Some(state.moves.to_string())
+        }
+
+        fn deserialize_log_state(&self, text: &str) -> Result<AlternatingGame, String> {
+            Ok(AlternatingGame {
+                moves: text.parse().map_err(|e| format!("bad moves: {e}"))?,
+            })
+        }
+
+        fn static_dir(&self) -> &Path {
+            Path::new(".")
+        }
+
+        fn new_game(&self, _seed: u64) -> AlternatingGame {
+            AlternatingGame { moves: 0 }
         }
     }
 
@@ -4688,6 +5136,18 @@ mod tests {
         )
     }
 
+    fn test_managed_room_store() -> (MultiplayerRoomStore<TestGame>, Arc<CountingPresenter>) {
+        let (store, presenter) = test_store();
+        (
+            MultiplayerRoomStore::new_with_managed_bot_lobbies(
+                Arc::clone(&store.factory),
+                None,
+                true,
+            ),
+            presenter,
+        )
+    }
+
     fn temp_replay_dir(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
             "hexfish-{name}-{}-{}",
@@ -4861,6 +5321,210 @@ mod tests {
             Err(err) => err,
         };
         assert!(err.contains("full"));
+    }
+
+    #[test]
+    fn managed_bot_lobbies_expose_three_guest_like_public_rooms() {
+        let (rooms, _) = test_managed_room_store();
+
+        match rooms.lobby_msg() {
+            ServerMsg::MultiplayerLobby { rooms: lobby } => {
+                assert_eq!(lobby.len(), 3);
+                let mut controls = lobby
+                    .iter()
+                    .map(|room| (room.time_minutes, room.increment_seconds))
+                    .collect::<Vec<_>>();
+                controls.sort();
+                assert_eq!(
+                    controls,
+                    vec![(Some(5), Some(3)), (Some(15), Some(1)), (Some(30), Some(0))]
+                );
+                for room in &lobby {
+                    assert_eq!(room.status, "waiting");
+                    assert_eq!(room.occupied, 1);
+                    assert_eq!(room.connected, 1);
+                    assert_eq!(room.spectator_count, 0);
+                    assert!(room.is_public);
+                    assert!(room.empty_room_closes_at_ms.is_none());
+                }
+            }
+            other => panic!("expected lobby message, got {other:?}"),
+        }
+
+        let stored = rooms.rooms.lock().expect("room store lock poisoned");
+        assert_eq!(stored.len(), 3);
+        for room in stored.values() {
+            let bot_player = room.managed_bot_player().expect("managed bot player");
+            match room.room_msg_for_player(None) {
+                ServerMsg::MultiplayerRoom { players, .. } => {
+                    assert!(players[bot_player].occupied);
+                    assert!(players[bot_player].connected);
+                    assert!(
+                        players[bot_player]
+                            .name
+                            .as_deref()
+                            .is_some_and(|name| name.starts_with("User") && name.len() == 12)
+                    );
+                    assert!(!players[1 - bot_player].occupied);
+                }
+                other => panic!("expected room message, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn managed_bot_lobby_refresh_respects_human_occupancy() {
+        let (rooms, _) = test_managed_room_store();
+        rooms.ensure_managed_bot_lobbies();
+        let (slot, code, room) = {
+            let stored = rooms.rooms.lock().expect("room store lock poisoned");
+            let room = stored.values().next().expect("managed room").clone();
+            (
+                room.managed_bot_slot.expect("managed slot"),
+                room.code.clone(),
+                room,
+            )
+        };
+        room.last_activity_ms.store(
+            current_unix_ms().saturating_sub(MANAGED_BOT_LOBBY_REFRESH_MS + 1),
+            Ordering::Relaxed,
+        );
+
+        assert!(rooms.ensure_managed_bot_lobbies());
+        let refreshed_code = {
+            let stored = rooms.rooms.lock().expect("room store lock poisoned");
+            assert!(!stored.contains_key(&code));
+            stored
+                .values()
+                .find(|room| room.managed_bot_slot == Some(slot))
+                .expect("refreshed slot")
+                .code
+                .clone()
+        };
+        assert_ne!(refreshed_code, code);
+
+        let (room, human_player) = rooms
+            .join_room("user_human", &refreshed_code)
+            .expect("human joins managed room");
+        room.last_activity_ms.store(
+            current_unix_ms().saturating_sub(MANAGED_BOT_LOBBY_REFRESH_MS + 1),
+            Ordering::Relaxed,
+        );
+        assert!(!rooms.ensure_managed_bot_lobbies());
+        assert!(
+            rooms
+                .rooms
+                .lock()
+                .expect("room store lock poisoned")
+                .contains_key(&refreshed_code)
+        );
+
+        assert!(room.vacate_human_player(human_player));
+        assert!(rooms.ensure_managed_bot_lobbies());
+        let stored = rooms.rooms.lock().expect("room store lock poisoned");
+        assert!(!stored.contains_key(&refreshed_code));
+        assert!(
+            stored
+                .values()
+                .any(|room| room.managed_bot_slot == Some(slot))
+        );
+    }
+
+    #[test]
+    fn managed_bot_move_is_applied_once_after_human_action() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let factory = Arc::new(SessionFactory::new_game(
+                Arc::new(AlternatingEvaluator),
+                "alternating",
+                Arc::new(AlternatingPresenter),
+                [true, true],
+                None,
+            ));
+            let rooms = Arc::new(MultiplayerRoomStore::new_with_managed_bot_lobbies(
+                Arc::clone(&factory),
+                None,
+                false,
+            ));
+            let room = Arc::new(MultiplayerRoom::new_managed_bot(
+                "BOT123".into(),
+                1,
+                factory.create_multiplayer_session(),
+                ManagedBotLobbySlot::FiveThree,
+                1,
+                None,
+            ));
+            rooms
+                .rooms
+                .lock()
+                .expect("room store lock poisoned")
+                .insert(room.code.clone(), Arc::clone(&room));
+            assert_eq!(
+                room.assign_or_find_viewer(SeatOwner::human("user_human", Some("Human"))),
+                MultiplayerViewer::Player(0)
+            );
+
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let socket_id = room
+                .register_socket(
+                    "user_human",
+                    Some("Human"),
+                    MultiplayerViewer::Player(0),
+                    tx,
+                )
+                .unwrap();
+            let mut active = Some(ActiveMultiplayerRoom {
+                room: Arc::clone(&room),
+                socket_id,
+                viewer: MultiplayerViewer::Player(0),
+            });
+
+            let (reply_tx, _reply_rx) = mpsc::unbounded_channel();
+            let responses = handle_multiplayer_message(
+                &rooms,
+                "user_human",
+                &reply_tx,
+                &mut active,
+                ClientMsg::PlayMultiplayerAction { action: 0 },
+            )
+            .await;
+            assert!(responses.iter().any(|msg| {
+                matches!(
+                    msg,
+                    ServerMsg::GameState {
+                        current_player: 1,
+                        ..
+                    }
+                )
+            }));
+
+            maybe_schedule_managed_bot_move(Arc::clone(&rooms), Arc::clone(&room));
+            let mut saw_terminal_bot_state = false;
+            for _ in 0..8 {
+                let raw = timeout(Duration::from_secs(2), rx.recv())
+                    .await
+                    .expect("bot state broadcast timeout")
+                    .expect("bot state broadcast");
+                let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+                if value["type"] == serde_json::json!("GameState")
+                    && value["state"]["moves"] == serde_json::json!(2)
+                    && value["is_terminal"] == serde_json::json!(true)
+                {
+                    saw_terminal_bot_state = true;
+                    break;
+                }
+            }
+            assert!(saw_terminal_bot_state);
+
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            let session = room.session.lock().await;
+            match session.state_msg_for_player(0) {
+                ServerMsg::GameState { state, .. } => {
+                    assert_eq!(state["moves"], serde_json::json!(2));
+                }
+                other => panic!("expected final game state, got {other:?}"),
+            }
+        });
     }
 
     #[test]
