@@ -54,6 +54,8 @@ pub struct ReplayState {
     pub id: String,
     pub cursor: usize,
     pub len: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub player_names: Option<[String; 2]>,
 }
 
 /// Seat summary for an invite-code multiplayer room.

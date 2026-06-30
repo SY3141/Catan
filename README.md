@@ -98,6 +98,19 @@ fails startup if Postgres replay storage cannot connect. Leave it unset
 or `false` for local development so filesystem replay logs remain a
 fallback.
 
+If you need to wipe old Postgres replays after a replay-schema change,
+take any backup you want first, then run:
+
+```sql
+TRUNCATE TABLE replay_log_accounts, replay_logs RESTART IDENTITY CASCADE;
+```
+
+For the local Docker database, the same wipe can be run with:
+
+```bash
+docker compose exec postgres psql -U hexfish -d hexfish -c "TRUNCATE TABLE replay_log_accounts, replay_logs RESTART IDENTITY CASCADE;"
+```
+
 Then open <http://localhost:3000>.
 
 ## Cloud Run + Cloud SQL replay storage

@@ -1455,12 +1455,19 @@ function playNameForPlayer(idx) {
   return idx === playMode.humanPlayer ? (localName || 'You') : playBotName();
 }
 
+function replayNameForPlayer(idx, msg = currentState) {
+  const replayName = String(msg?.replay?.player_names?.[idx] || '').trim();
+  if (replayName) return replayName;
+  const stateName = String(msg?.state?.player_names?.[idx] || '').trim();
+  return stateName || null;
+}
+
 function playerDisplayName(idx) {
-  return playNameForPlayer(idx) || `P${idx + 1}`;
+  return playNameForPlayer(idx) || replayNameForPlayer(idx) || `P${idx + 1}`;
 }
 
 function formatPlayerRefs(text) {
-  if (!playViewActive()) return text;
+  if (!playViewActive() && !currentState?.replay) return text;
   return String(text).replace(/\bP([12])\b/g, (_, num) => playerDisplayName(Number(num) - 1));
 }
 
@@ -5755,7 +5762,7 @@ function updatePlayerPanel(idx, state) {
   const pf = frame.players[idx];
   if (!pf) return;
 
-  const displayName = playNameForPlayer(idx) || state.player_names?.[idx] || `P${idx + 1}`;
+  const displayName = playNameForPlayer(idx) || replayNameForPlayer(idx) || state.player_names?.[idx] || `P${idx + 1}`;
   document.getElementById(`p${idx}-name`).textContent = displayName;
 
   // Total resource cards

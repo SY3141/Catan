@@ -40,6 +40,7 @@ struct HistoryEntry<G> {
 
 struct ReplayMode {
     id: String,
+    player_names: Option<[String; 2]>,
 }
 
 /// Owns the game state, search tree, evaluator, and presenter.
@@ -191,8 +192,22 @@ impl<G: Game + 'static> GameSession<G> {
 
     /// Load a saved replay and mark the session as replay-mode.
     pub fn load_saved_replay(&mut self, id: impl Into<String>, initial_state: G, log: &GameLog) {
+        self.load_saved_replay_with_player_names(id, initial_state, log, None);
+    }
+
+    /// Load a saved replay and attach optional display names to replay metadata.
+    pub fn load_saved_replay_with_player_names(
+        &mut self,
+        id: impl Into<String>,
+        initial_state: G,
+        log: &GameLog,
+        player_names: Option<[String; 2]>,
+    ) {
         self.load_replay(initial_state, log);
-        self.replay = Some(ReplayMode { id: id.into() });
+        self.replay = Some(ReplayMode {
+            id: id.into(),
+            player_names,
+        });
     }
 
     /// Parse and load a saved replay log through the presenter codec.
@@ -200,6 +215,16 @@ impl<G: Game + 'static> GameSession<G> {
         &mut self,
         id: impl Into<String>,
         log: &GameLog,
+    ) -> Result<(), String> {
+        self.load_saved_replay_log_with_player_names(id, log, None)
+    }
+
+    /// Parse and load a saved replay log with optional replay display names.
+    pub fn load_saved_replay_log_with_player_names(
+        &mut self,
+        id: impl Into<String>,
+        log: &GameLog,
+        player_names: Option<[String; 2]>,
     ) -> Result<(), String> {
         let initial_state = self.presenter.deserialize_log_state(&log.initial_state)?;
         let log = GameLog {
@@ -209,7 +234,7 @@ impl<G: Game + 'static> GameSession<G> {
                 .normalize_replay_actions(&initial_state, &log.actions),
         };
         validate_replay_log(initial_state.clone(), &log, self.presenter.as_ref())?;
-        self.load_saved_replay(id, initial_state, &log);
+        self.load_saved_replay_with_player_names(id, initial_state, &log, player_names);
         Ok(())
     }
 
@@ -729,6 +754,7 @@ impl<G: Game + 'static> GameSession<G> {
                 id: replay.id.clone(),
                 cursor: self.cursor,
                 len: self.history.len(),
+                player_names: replay.player_names.clone(),
             }),
         }
     }
@@ -2961,7 +2987,11 @@ mod tests {
             actions: vec![0, 0],
         };
         session
-            .load_saved_replay_log("saved.log", &log)
+            .load_saved_replay_log_with_player_names(
+                "saved.log",
+                &log,
+                Some(["Alice".into(), "Bob".into()]),
+            )
             .expect("valid replay");
 
         match session.state_msg() {
@@ -2970,6 +3000,7 @@ mod tests {
                 assert_eq!(replay.id, "saved.log");
                 assert_eq!(replay.cursor, 0);
                 assert_eq!(replay.len, 2);
+                assert_eq!(replay.player_names, Some(["Alice".into(), "Bob".into()]));
             }
             _ => panic!("expected GameState"),
         }
@@ -2994,7 +3025,9 @@ mod tests {
         session.handle(ClientMsg::SetReplayCursor { cursor: 2 });
         match session.state_msg() {
             ServerMsg::GameState { replay, state, .. } => {
-                assert_eq!(replay.expect("replay metadata").cursor, 2);
+                let replay = replay.expect("replay metadata");
+                assert_eq!(replay.cursor, 2);
+                assert_eq!(replay.player_names, Some(["Alice".into(), "Bob".into()]));
                 assert_eq!(state["moves"], serde_json::json!(2));
             }
             _ => panic!("expected GameState"),

@@ -22,9 +22,9 @@ use super::{
     GameSession, MANAGED_BOT_LOBBY_REFRESH_MS, MULTIPLAYER_ANALYSIS_SIMS,
     MULTIPLAYER_CHAT_HISTORY_LIMIT, MULTIPLAYER_EMPTY_ROOM_GRACE_MS, ManagedBotLobbySlot,
     MultiplayerChatMessage, MultiplayerLobbyRoom, MultiplayerPlayer, MultiplayerSpectator,
-    ReplayStore, RoomOutcome, SearchBudget, SeatOwnerKind, ServerMsg, SessionFactory,
-    current_unix_ms, managed_bot_display_name, managed_bot_search_budget, managed_bot_user_id,
-    new_room_code, normalize_room_code, normalize_room_increment_seconds,
+    ReplayParticipant, ReplayStore, RoomOutcome, SearchBudget, SeatOwnerKind, ServerMsg,
+    SessionFactory, current_unix_ms, managed_bot_display_name, managed_bot_search_budget,
+    managed_bot_user_id, new_room_code, normalize_room_code, normalize_room_increment_seconds,
     normalize_room_time_minutes, replay_result_for_room_outcome, sanitize_multiplayer_chat_text,
     winner_from_reward,
 };
@@ -1952,7 +1952,9 @@ impl<G: Game + 'static> RedisMultiplayerRoomStore<G> {
                     .iter()
                     .enumerate()
                     .filter_map(|(player, seat)| {
-                        seat.as_ref().map(|seat| (player, seat.account_key.clone()))
+                        seat.as_ref().map(|seat| {
+                            (player, seat.account_key.clone(), seat.display_name.clone())
+                        })
                     })
                     .collect::<Vec<_>>();
                 let outcome = room.outcome.clone();
@@ -1973,29 +1975,40 @@ impl<G: Game + 'static> RedisMultiplayerRoomStore<G> {
         let Some((log, seats, outcome, room_id, mut counter)) = payload else {
             return Vec::new();
         };
-        let mut first_share_slug = None;
-        for (player, account_key) in seats {
-            let result = outcome.as_ref().and_then(|outcome| {
+        let participants = seats
+            .into_iter()
+            .map(|(player, account_key, display_name)| {
                 let outcome = RoomOutcome {
-                    winner: outcome.winner,
-                    reason: outcome.reason.clone(),
-                    replay_share_slug: outcome.replay_share_slug.clone(),
+                    winner: outcome.as_ref().and_then(|outcome| outcome.winner),
+                    reason: outcome
+                        .as_ref()
+                        .map(|outcome| outcome.reason.clone())
+                        .unwrap_or_else(|| "incomplete".into()),
+                    replay_share_slug: outcome
+                        .as_ref()
+                        .and_then(|outcome| outcome.replay_share_slug.clone()),
                 };
-                replay_result_for_room_outcome(&outcome, player)
-            });
-            match store
-                .save_with_result(&account_key, room_id, counter, &log, result)
-                .await
-            {
-                Ok(entry) => {
-                    if first_share_slug.is_none() {
-                        first_share_slug = Some(entry.share_slug);
-                    }
+                ReplayParticipant {
+                    player,
+                    account_key,
+                    display_name,
+                    result: replay_result_for_room_outcome(&outcome, player)
+                        .unwrap_or("incomplete")
+                        .to_string(),
                 }
-                Err(message) => errors.push(ServerMsg::Error { message }),
+            })
+            .collect::<Vec<_>>();
+        let saved = store
+            .save_multiplayer_with_results(room_id, counter, &log, &participants)
+            .await;
+        counter = counter.saturating_add(1);
+        let first_share_slug = match saved {
+            Ok(entry) => Some(entry.share_slug),
+            Err(message) => {
+                errors.push(ServerMsg::Error { message });
+                None
             }
-            counter = counter.saturating_add(1);
-        }
+        };
         if let Some(slug) = first_share_slug {
             let code = room.code.clone();
             let _ = self
