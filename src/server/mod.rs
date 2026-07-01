@@ -2123,7 +2123,13 @@ impl<G: Game + 'static> MultiplayerRoom<G> {
     }
 
     fn managed_bot_should_refresh(&self, now_ms: u64) -> bool {
-        if self.managed_bot_slot.is_none() || self.has_human_player_occupant() {
+        if self.managed_bot_slot.is_none() {
+            return false;
+        }
+        if self.is_finished() {
+            return true;
+        }
+        if self.has_human_player_occupant() {
             return false;
         }
         self.managed_human_ever_joined.load(Ordering::Relaxed)
@@ -4658,6 +4664,7 @@ async fn handle_multiplayer_message_for_user<G: Game + 'static>(
                 Err(message) => return vec![ServerMsg::Error { message }],
             };
             let responses = activate_multiplayer_room(
+                Arc::clone(rooms),
                 room,
                 user_id,
                 display_name,
@@ -4679,6 +4686,7 @@ async fn handle_multiplayer_message_for_user<G: Game + 'static>(
                     Err(message) => return vec![ServerMsg::Error { message }],
                 };
             let responses = activate_multiplayer_room(
+                Arc::clone(rooms),
                 Arc::clone(&room),
                 user_id,
                 display_name,
@@ -4747,7 +4755,7 @@ async fn handle_multiplayer_message_for_user<G: Game + 'static>(
                 )
             };
             schedule_lobby_broadcast(Arc::clone(rooms));
-            schedule_multiplayer_clock_timeout(Arc::clone(&room));
+            schedule_multiplayer_clock_timeout(Arc::clone(rooms), Arc::clone(&room));
             schedule_multiplayer_analysis(room, analysis_generation, analysis_session);
             if let Some(active) = active_room.as_ref() {
                 maybe_schedule_managed_bot_move(Arc::clone(rooms), Arc::clone(&active.room));
@@ -4867,6 +4875,7 @@ async fn handle_multiplayer_message_for_user<G: Game + 'static>(
                 if room.is_finished() {
                     let _ = save_finished_multiplayer_replay(Arc::clone(&room)).await;
                     room.broadcast_room_info_except(Some(active.socket_id));
+                    schedule_lobby_broadcast(Arc::clone(rooms));
                     return vec![room.room_msg_for_active(active)];
                 }
                 return vec![ServerMsg::Error {
@@ -4874,7 +4883,7 @@ async fn handle_multiplayer_message_for_user<G: Game + 'static>(
                 }];
             }
             room.broadcast_room_info_except(Some(active.socket_id));
-            schedule_multiplayer_clock_timeout(Arc::clone(&room));
+            schedule_multiplayer_clock_timeout(Arc::clone(rooms), Arc::clone(&room));
             vec![room.room_msg_for_active(active)]
         }
         _ => vec![ServerMsg::Error {
@@ -4884,6 +4893,7 @@ async fn handle_multiplayer_message_for_user<G: Game + 'static>(
 }
 
 async fn activate_multiplayer_room<G: Game + 'static>(
+    rooms: Arc<MultiplayerRoomStore<G>>,
     room: Arc<MultiplayerRoom<G>>,
     user_id: &str,
     display_name: Option<&str>,
@@ -4924,7 +4934,7 @@ async fn activate_multiplayer_room<G: Game + 'static>(
     if let Some((analysis_generation, analysis_session)) = analysis_job {
         schedule_multiplayer_analysis(Arc::clone(&room), analysis_generation, analysis_session);
     }
-    schedule_multiplayer_clock_timeout(Arc::clone(&room));
+    schedule_multiplayer_clock_timeout(rooms, Arc::clone(&room));
     schedule_room_info_broadcast(Arc::clone(&room), 300);
     schedule_room_info_broadcast(Arc::clone(&room), 1500);
     responses
@@ -4979,7 +4989,10 @@ fn schedule_room_info_broadcast<G: Game + 'static>(room: Arc<MultiplayerRoom<G>>
     });
 }
 
-fn schedule_multiplayer_clock_timeout<G: Game + 'static>(room: Arc<MultiplayerRoom<G>>) {
+fn schedule_multiplayer_clock_timeout<G: Game + 'static>(
+    rooms: Arc<MultiplayerRoomStore<G>>,
+    room: Arc<MultiplayerRoom<G>>,
+) {
     let Some((generation, remaining_ms)) = room.clock_timeout_schedule() else {
         return;
     };
@@ -4988,6 +5001,7 @@ fn schedule_multiplayer_clock_timeout<G: Game + 'static>(room: Arc<MultiplayerRo
         if room.mark_clock_timeout_if_current(generation) {
             let _ = save_finished_multiplayer_replay(Arc::clone(&room)).await;
             room.broadcast_room_info_except(None);
+            schedule_lobby_broadcast(rooms);
         }
     });
 }
@@ -5086,7 +5100,7 @@ fn maybe_schedule_managed_bot_move<G: Game + 'static>(
             };
 
             schedule_lobby_broadcast(Arc::clone(&rooms));
-            schedule_multiplayer_clock_timeout(Arc::clone(&room));
+            schedule_multiplayer_clock_timeout(Arc::clone(&rooms), Arc::clone(&room));
             if let Some(analysis_session) = analysis_session {
                 schedule_multiplayer_analysis(
                     Arc::clone(&room),
@@ -5949,7 +5963,7 @@ mod tests {
     }
 
     #[test]
-    fn managed_bot_lobby_refresh_respects_human_occupancy() {
+    fn managed_bot_lobby_refresh_respects_human_occupancy_until_finished() {
         let (rooms, _) = test_managed_room_store();
         rooms.ensure_managed_bot_lobbies();
         let (slot, code, room) = {
@@ -5995,7 +6009,10 @@ mod tests {
                 .contains_key(&refreshed_code)
         );
 
-        assert!(room.vacate_human_player(human_player));
+        assert!(room.mark_finished(
+            Some(room.managed_bot_player().unwrap_or(1 - human_player)),
+            "game"
+        ));
         assert!(rooms.ensure_managed_bot_lobbies());
         let stored = rooms.rooms.lock().expect("room store lock poisoned");
         assert!(!stored.contains_key(&refreshed_code));

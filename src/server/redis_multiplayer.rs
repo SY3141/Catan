@@ -610,7 +610,13 @@ impl RedisRoomSnapshot {
     }
 
     fn managed_bot_should_refresh(&self, now_ms: u64) -> bool {
-        if self.managed_bot_slot.is_none() || self.has_human_player_occupant() {
+        if self.managed_bot_slot.is_none() {
+            return false;
+        }
+        if self.is_finished() {
+            return true;
+        }
+        if self.has_human_player_occupant() {
             return false;
         }
         self.managed_human_ever_joined
@@ -1677,7 +1683,21 @@ impl<G: Game + 'static> RedisMultiplayerRoomStore<G> {
                     return Ok(false);
                 }
                 Some(room) if room.managed_bot_slot == Some(slot) => {
-                    self.delete_room_keys(&room.code).await;
+                    if room.is_finished() && self.connected_human_viewers(&room).await > 0 {
+                        let code = room.code.clone();
+                        let _ = self
+                            .update_room(&code, |room| {
+                                room.closed = true;
+                                Ok(())
+                            })
+                            .await?;
+                        let _ = self
+                            .client
+                            .command_owned(vec!["DEL".into(), slot_key.clone()])
+                            .await;
+                    } else {
+                        self.delete_room_keys(&room.code).await;
+                    }
                     changed = true;
                 }
                 _ => {
@@ -1895,6 +1915,24 @@ impl<G: Game + 'static> RedisMultiplayerRoomStore<G> {
 
     async fn connected_viewers(&self, room: &RedisRoomSnapshot) -> usize {
         self.connected_players(room).await + self.connected_spectators(room).await.len()
+    }
+
+    async fn connected_human_viewers(&self, room: &RedisRoomSnapshot) -> usize {
+        let mut connected = 0;
+        for player in 0..2 {
+            if !room.seats[player]
+                .as_ref()
+                .is_some_and(|seat| !seat.is_managed_bot())
+            {
+                continue;
+            }
+            if let Some(connection_id) = room.active_connections[player].as_deref() {
+                if self.presence_exists(connection_id).await {
+                    connected += 1;
+                }
+            }
+        }
+        connected + self.connected_spectators(room).await.len()
     }
 
     async fn presence_exists(&self, connection_id: &str) -> bool {
@@ -2188,6 +2226,10 @@ impl<G: Game + 'static> RedisMultiplayerRoomStore<G> {
                 continue;
             };
             if room.managed_bot_slot.is_some() {
+                if room.closed && self.connected_human_viewers(&room).await == 0 {
+                    self.delete_room_keys(&room.code).await;
+                    lobby_changed = true;
+                }
                 continue;
             }
             let mut stale_player_connections = Vec::new();
@@ -2843,6 +2885,44 @@ mod tests {
             Some("spec-2")
         );
         assert_eq!(room.last_activity_ms, 123);
+    }
+
+    #[test]
+    fn redis_managed_bot_refreshes_when_finished_even_with_human_occupant() {
+        let now_ms = current_unix_ms();
+        for reason in ["game", "resignation", "timeout"] {
+            let mut room = RedisRoomSnapshot::new_managed_bot(
+                format!("BOT{reason}"),
+                1,
+                "0".into(),
+                ManagedBotLobbySlot::FiveThree,
+                0,
+            );
+            assert_eq!(
+                room.assign_or_find_viewer(RedisSeatOwner {
+                    user_id: format!("human-{reason}"),
+                    account_key: format!("account-{reason}"),
+                    display_name: Some("Human".into()),
+                    kind: SeatOwnerKind::Human,
+                }),
+                Some(1)
+            );
+            room.last_activity_ms = now_ms.saturating_sub(MANAGED_BOT_LOBBY_REFRESH_MS + 1);
+
+            assert!(!room.managed_bot_should_refresh(now_ms));
+
+            if reason == "timeout" {
+                room.clock.winner = Some(0);
+            } else {
+                room.outcome = Some(RedisRoomOutcome {
+                    winner: Some(0),
+                    reason: reason.into(),
+                    replay_share_slug: None,
+                });
+            }
+
+            assert!(room.managed_bot_should_refresh(now_ms));
+        }
     }
 
     #[test]
