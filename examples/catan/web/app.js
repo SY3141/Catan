@@ -289,6 +289,7 @@ let playMode = {
 let multiplayerChatRoomCode = '';
 let multiplayerChatMessages = [];
 let serverSingleplayerHumanPlayer = undefined;
+let serverSingleplayerBotLevel = undefined;
 let multiplayerTurnTitleTimer = null;
 let multiplayerTurnTitleActive = false;
 window.hexfishProfileUsername = '';
@@ -706,9 +707,17 @@ controls.onAnalysisBlocked = () => showGuestSignInRequiredModal('Analysis');
 
 function setServerSingleplayerHumanPlayer(player, options = {}) {
   const humanPlayer = player == null ? null : player;
-  if (!options.force && serverSingleplayerHumanPlayer === humanPlayer) return false;
+  const botLevel = humanPlayer == null ? null : playDifficultyConfig().level;
+  if (
+    !options.force &&
+    serverSingleplayerHumanPlayer === humanPlayer &&
+    serverSingleplayerBotLevel === botLevel
+  ) {
+    return false;
+  }
   serverSingleplayerHumanPlayer = humanPlayer;
-  session.send({ type: 'SetSingleplayer', human_player: humanPlayer });
+  serverSingleplayerBotLevel = botLevel;
+  session.send({ type: 'SetSingleplayer', human_player: humanPlayer, bot_level: botLevel });
   return true;
 }
 

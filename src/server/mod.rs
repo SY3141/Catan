@@ -261,11 +261,33 @@ impl ReplayStore {
         log: &GameLog,
         result: Option<&str>,
     ) -> Result<ReplayEntry, String> {
+        self.save_with_metadata(account_key, session_id, counter, log, result, None)
+            .await
+    }
+
+    async fn save_with_metadata(
+        &self,
+        account_key: &str,
+        session_id: u64,
+        counter: u64,
+        log: &GameLog,
+        result: Option<&str>,
+        player_names: Option<&[String; 2]>,
+    ) -> Result<ReplayEntry, String> {
         match self {
-            Self::File(store) => {
-                store.save_with_result(account_key, session_id, counter, log, result)
+            Self::File(store) => store.save_with_metadata(
+                account_key,
+                session_id,
+                counter,
+                log,
+                result,
+                player_names,
+            ),
+            Self::Postgres(store) => {
+                store
+                    .save_with_metadata(account_key, log, result, player_names)
+                    .await
             }
-            Self::Postgres(store) => store.save_with_result(account_key, log, result).await,
         }
     }
 
@@ -881,12 +903,23 @@ impl PostgresReplayStore {
         log: &GameLog,
         result: Option<&str>,
     ) -> Result<ReplayEntry, String> {
+        self.save_with_metadata(account_key, log, result, None).await
+    }
+
+    async fn save_with_metadata(
+        &self,
+        account_key: &str,
+        log: &GameLog,
+        result: Option<&str>,
+        player_names: Option<&[String; 2]>,
+    ) -> Result<ReplayEntry, String> {
         let saved_at_ms = i64::try_from(current_unix_ms())
             .map_err(|_| "current timestamp does not fit in Postgres BIGINT".to_string())?;
         let action_count = i64::try_from(log.actions.len())
             .map_err(|_| "replay action count does not fit in Postgres BIGINT".to_string())?;
         let actions = actions_to_i64(&log.actions)?;
         let result = normalize_replay_result(result.unwrap_or("incomplete"));
+        let player_names = replay_player_names_vec_from_names(player_names);
 
         for _ in 0..32 {
             let id = random_base62(24);
@@ -905,9 +938,10 @@ impl PostgresReplayStore {
                             saved_at_ms,
                             action_count,
                             result,
-                            favorite
+                            favorite,
+                            player_names
                         )
-                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, FALSE)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, FALSE, $9)
                         ON CONFLICT DO NOTHING
                         RETURNING id, saved_at_ms, action_count, share_slug
                     ),
@@ -943,6 +977,7 @@ impl PostgresReplayStore {
                         &saved_at_ms,
                         &action_count,
                         &result,
+                        &player_names,
                     ],
                 )
                 .await?;
@@ -1260,6 +1295,17 @@ fn replay_player_names_vec_from_participants(participants: &[ReplayParticipant])
         }
     }
     names
+}
+
+fn replay_player_names_vec_from_names(player_names: Option<&[String; 2]>) -> Vec<String> {
+    player_names
+        .map(|names| {
+            names
+                .iter()
+                .map(|name| normalize_display_name(Some(name.clone())).unwrap_or_default())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn replay_player_names_from_participants(
@@ -2771,8 +2817,9 @@ fn normalize_room_increment_seconds(value: Option<u32>) -> Option<u32> {
 async fn save_replay_log<G: Game + 'static>(
     user_session: &UserSession<G>,
     log: &GameLog,
+    player_names: Option<&[String; 2]>,
 ) -> Option<ServerMsg> {
-    match save_replay_entry(user_session, log).await {
+    match save_replay_entry(user_session, log, player_names).await {
         Ok(_) => None,
         Err(message) => Some(ServerMsg::Error { message }),
     }
@@ -2781,14 +2828,16 @@ async fn save_replay_log<G: Game + 'static>(
 async fn save_replay_entry<G: Game + 'static>(
     user_session: &UserSession<G>,
     log: &GameLog,
+    player_names: Option<&[String; 2]>,
 ) -> Result<Option<ReplayEntry>, String> {
-    save_replay_entry_with_result(user_session, log, None).await
+    save_replay_entry_with_result(user_session, log, None, player_names).await
 }
 
 async fn save_replay_entry_with_result<G: Game + 'static>(
     user_session: &UserSession<G>,
     log: &GameLog,
     result: Option<&str>,
+    player_names: Option<&[String; 2]>,
 ) -> Result<Option<ReplayEntry>, String> {
     let Some(store) = user_session.replay_store.as_ref() else {
         return Ok(None);
@@ -2797,12 +2846,13 @@ async fn save_replay_entry_with_result<G: Game + 'static>(
         .next_replay_counter
         .fetch_add(1, Ordering::Relaxed);
     store
-        .save_with_result(
+        .save_with_metadata(
             &user_session.account_key,
             user_session.session_id,
             counter,
             log,
             result,
+            player_names,
         )
         .await
         .map(Some)
@@ -2811,6 +2861,7 @@ async fn save_replay_entry_with_result<G: Game + 'static>(
 async fn save_current_replay_once<G: Game + 'static>(
     user_session: &UserSession<G>,
     session: &mut GameSession<G>,
+    player_names: Option<[String; 2]>,
 ) -> Option<ServerMsg> {
     let has_store = user_session.replay_store.is_some();
     let replay_result = session.live_replay_result().map(str::to_owned);
@@ -2819,7 +2870,14 @@ async fn save_current_replay_once<G: Game + 'static>(
     } else {
         session.export_unsaved_current_log()?
     };
-    match save_replay_entry_with_result(user_session, &log, replay_result.as_deref()).await {
+    match save_replay_entry_with_result(
+        user_session,
+        &log,
+        replay_result.as_deref(),
+        player_names.as_ref(),
+    )
+    .await
+    {
         Ok(entry) => {
             if has_store {
                 session.mark_current_log_saved(&log);
@@ -2828,6 +2886,18 @@ async fn save_current_replay_once<G: Game + 'static>(
         }
         Err(message) => Some(ServerMsg::Error { message }),
     }
+}
+
+fn singleplayer_replay_player_names<G: Game + 'static>(
+    store: &UserSessionStore<G>,
+    user_id: &str,
+    display_name: Option<&str>,
+    session: &GameSession<G>,
+) -> Option<[String; 2]> {
+    let human_display_name = store
+        .current_username(user_id)
+        .or_else(|| display_name.map(str::to_string));
+    session.singleplayer_replay_player_names(human_display_name.as_deref())
 }
 
 async fn list_replay_entries<G: Game + 'static>(
@@ -4432,7 +4502,11 @@ async fn handle_authenticated_message<G: Game + 'static>(
             },
             ClientMsg::SaveReplay => {
                 let mut responses = Vec::new();
-                if let Some(msg) = save_current_replay_once(user_session, &mut session).await {
+                let player_names =
+                    singleplayer_replay_player_names(store, user_id, display_name, &session);
+                if let Some(msg) =
+                    save_current_replay_once(user_session, &mut session, player_names).await
+                {
                     responses.push(msg);
                 }
                 responses
@@ -4443,13 +4517,21 @@ async fn handle_authenticated_message<G: Game + 'static>(
                 } else {
                     session.export_unsaved_current_log()
                 };
+                let pending_player_names =
+                    singleplayer_replay_player_names(store, user_id, display_name, &session);
                 let mut msgs = session.handle(msg);
                 let started_game = msgs
                     .iter()
                     .any(|msg| matches!(msg, ServerMsg::GameState { .. }));
                 if started_game {
                     if let Some(log) = pending_log {
-                        if let Some(error) = save_replay_log(user_session, &log).await {
+                        if let Some(error) = save_replay_log(
+                            user_session,
+                            &log,
+                            pending_player_names.as_ref(),
+                        )
+                        .await
+                        {
                             msgs.insert(0, error);
                         }
                     }
@@ -4463,7 +4545,11 @@ async fn handle_authenticated_message<G: Game + 'static>(
             msg => session.handle(msg),
         };
         if !was_terminal && responses_include_terminal_game_state(&responses) {
-            if let Some(error) = save_current_replay_once(user_session, &mut session).await {
+            let player_names =
+                singleplayer_replay_player_names(store, user_id, display_name, &session);
+            if let Some(error) =
+                save_current_replay_once(user_session, &mut session, player_names).await
+            {
                 responses.insert(0, error);
             }
         }
@@ -7679,34 +7765,104 @@ mod tests {
             let factory =
                 SessionFactory::new_game(evaluator, "test", presenter, [true, true], None);
             let store = UserSessionStore::new(factory, Some(Arc::clone(&replay_store)));
+            store.set_display_name("user_a", "Alice");
             let (user_session, _) = store.get_or_create("user_a");
 
             let saved = {
                 let mut session = user_session.session.lock().await;
                 session.handle(ClientMsg::SetSingleplayer {
                     human_player: Some(0),
+                    bot_level: Some(5),
                 });
                 match session.handle(ClientMsg::ResignGame).as_slice() {
                     [ServerMsg::GameState { is_terminal, .. }] => assert!(*is_terminal),
                     other => panic!("expected terminal GameState after resign, got {other:?}"),
                 }
-                save_current_replay_once(&user_session, &mut session)
+                let player_names =
+                    singleplayer_replay_player_names(&store, "user_a", None, &session);
+                save_current_replay_once(&user_session, &mut session, player_names)
                     .await
                     .expect("resign should save a replay")
             };
 
-            match saved {
+            let entry = match saved {
                 ServerMsg::ReplaySaved { entry } => {
                     assert_eq!(entry.action_count, 0);
                     assert_eq!(entry.result, "lost_by_resignation");
+                    entry
                 }
                 other => panic!("expected ReplaySaved after resign, got {other:?}"),
-            }
+            };
             let entries = list_replay_entries(&user_session)
                 .await
                 .expect("list replay entries");
             assert_eq!(entries.len(), 1);
             assert_eq!(entries[0].result, "lost_by_resignation");
+            let loaded = replay_store
+                .load(&user_session.account_key, &entry.id)
+                .await
+                .expect("load saved singleplayer resignation replay");
+            assert_eq!(
+                loaded.player_names,
+                Some(["Alice".into(), "HexFish5".into()])
+            );
+            let shared = replay_store
+                .load_shared(&entry.share_slug)
+                .await
+                .expect("load shared singleplayer resignation replay");
+            assert_eq!(
+                shared.player_names,
+                Some(["Alice".into(), "HexFish5".into()])
+            );
+        });
+    }
+
+    #[test]
+    fn save_current_replay_once_singleplayer_persists_names_for_human_p2() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let replay_store = Arc::new(ReplayStore::File(FileReplayStore::new(temp_replay_dir(
+                "singleplayer-p2-save-replay-names",
+            ))));
+            let presenter = Arc::new(CountingPresenter {
+                created_games: AtomicUsize::new(0),
+            });
+            let evaluator: Arc<dyn Evaluator<TestGame> + Sync> = Arc::new(TestEvaluator);
+            let factory =
+                SessionFactory::new_game(evaluator, "test", presenter, [true, true], None);
+            let store = UserSessionStore::new(factory, Some(Arc::clone(&replay_store)));
+            store.set_display_name("user_a", "Alice");
+            let (user_session, _) = store.get_or_create("user_a");
+
+            let saved = {
+                let mut session = user_session.session.lock().await;
+                session.handle(ClientMsg::SetSingleplayer {
+                    human_player: Some(1),
+                    bot_level: Some(5),
+                });
+                match session.handle(ClientMsg::PlayAction { action: 0 }).as_slice() {
+                    [ServerMsg::GameState { .. }] => {}
+                    other => panic!("expected GameState after live action, got {other:?}"),
+                }
+                let player_names =
+                    singleplayer_replay_player_names(&store, "user_a", None, &session);
+                save_current_replay_once(&user_session, &mut session, player_names)
+                    .await
+                    .expect("live replay should save")
+            };
+
+            let entry = match saved {
+                ServerMsg::ReplaySaved { entry } => entry,
+                other => panic!("expected ReplaySaved, got {other:?}"),
+            };
+            let loaded = replay_store
+                .load(&user_session.account_key, &entry.id)
+                .await
+                .expect("load saved singleplayer replay");
+            assert_eq!(
+                loaded.player_names,
+                Some(["HexFish5".into(), "Alice".into()])
+            );
         });
     }
 
@@ -7796,6 +7952,37 @@ mod tests {
                 .expect("load shared replay");
             assert_eq!(shared.id, saved.id);
             assert_eq!(shared.log.actions, log.actions);
+            assert_eq!(shared.player_names, None);
+
+            let named_account = format!("named_{}_{}", current_unix_ms(), fastrand::u64(..));
+            let singleplayer_names = ["Alice".to_string(), "HexFish5".to_string()];
+            let named_saved = store
+                .save_with_metadata(
+                    &named_account,
+                    12,
+                    1,
+                    &log,
+                    None,
+                    Some(&singleplayer_names),
+                )
+                .await
+                .expect("save named singleplayer replay");
+            let named_loaded = store
+                .load(&named_account, &named_saved.id)
+                .await
+                .expect("load named singleplayer replay");
+            assert_eq!(
+                named_loaded.player_names,
+                Some(["Alice".into(), "HexFish5".into()])
+            );
+            let named_shared = store
+                .load_shared(&named_saved.share_slug)
+                .await
+                .expect("load shared named singleplayer replay");
+            assert_eq!(
+                named_shared.player_names,
+                Some(["Alice".into(), "HexFish5".into()])
+            );
 
             let multiplayer_a =
                 format!("multiplayer_a_{}_{}", current_unix_ms(), fastrand::u64(..));

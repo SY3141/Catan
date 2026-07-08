@@ -252,7 +252,11 @@ pub enum ClientMsg {
         delay_ms: Option<u64>,
     },
     /// Configure singleplayer mode. `None` disables singleplayer-specific UI rules.
-    SetSingleplayer { human_player: Option<u8> },
+    SetSingleplayer {
+        human_player: Option<u8>,
+        #[serde(default)]
+        bot_level: Option<u8>,
+    },
     /// Poll external state (e.g. colonist.io CDP). Default: returns current state.
     PollState,
     /// Request current game state.

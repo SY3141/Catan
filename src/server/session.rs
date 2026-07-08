@@ -13,6 +13,9 @@ use super::traits::GamePresenter;
 
 pub const MAX_PV_DEPTH_BUDGET: u32 = 30;
 pub const PV_DEPTH_SIM_SAFETY_CAP: u32 = 100_000;
+const DEFAULT_SINGLEPLAYER_BOT_LEVEL: u8 = 5;
+const MIN_SINGLEPLAYER_BOT_LEVEL: u8 = 1;
+const MAX_SINGLEPLAYER_BOT_LEVEL: u8 = 10;
 
 #[derive(Clone, Copy, Debug)]
 pub struct ActiveSearchBudget {
@@ -63,6 +66,7 @@ pub struct GameSession<G: Game> {
     live_log_export_disabled: bool,
     live_replay_result: Option<String>,
     singleplayer_human_player: Option<usize>,
+    singleplayer_bot_level: u8,
 }
 
 #[derive(Clone, Copy)]
@@ -124,6 +128,7 @@ impl<G: Game + 'static> GameSession<G> {
             live_log_export_disabled: false,
             live_replay_result: None,
             singleplayer_human_player: None,
+            singleplayer_bot_level: DEFAULT_SINGLEPLAYER_BOT_LEVEL,
         }
     }
 
@@ -163,6 +168,7 @@ impl<G: Game + 'static> GameSession<G> {
             live_log_export_disabled: false,
             live_replay_result: None,
             singleplayer_human_player: None,
+            singleplayer_bot_level: DEFAULT_SINGLEPLAYER_BOT_LEVEL,
         }
     }
 
@@ -332,6 +338,21 @@ impl<G: Game + 'static> GameSession<G> {
     /// Result metadata to store with the current live replay, if any.
     pub fn live_replay_result(&self) -> Option<&str> {
         self.live_replay_result.as_deref()
+    }
+
+    /// Display names to store with a singleplayer replay, ordered as [P1, P2].
+    pub fn singleplayer_replay_player_names(
+        &self,
+        human_display_name: Option<&str>,
+    ) -> Option<[String; 2]> {
+        let human_player = self.singleplayer_human_player?;
+        let human_display_name = human_display_name
+            .map(str::trim)
+            .filter(|name| !name.is_empty())?;
+        let mut names = [String::new(), String::new()];
+        names[human_player] = human_display_name.to_string();
+        names[1 - human_player] = singleplayer_bot_display_name(self.singleplayer_bot_level);
+        Some(names)
     }
 
     /// Load an externally-built timeline (e.g. from colonist.io replay).
@@ -1040,7 +1061,10 @@ impl<G: Game + 'static> GameSession<G> {
                 // Autoplay is handled client-side by sending BotMove in a loop.
                 vec![self.state_msg()]
             }
-            ClientMsg::SetSingleplayer { human_player } => {
+            ClientMsg::SetSingleplayer {
+                human_player,
+                bot_level,
+            } => {
                 self.singleplayer_human_player = match human_player {
                     Some(player) if player < 2 => Some(player as usize),
                     Some(player) => {
@@ -1050,6 +1074,7 @@ impl<G: Game + 'static> GameSession<G> {
                     }
                     None => None,
                 };
+                self.singleplayer_bot_level = normalize_singleplayer_bot_level(bot_level);
                 Vec::new()
             }
             ClientMsg::Undo => {
@@ -1666,6 +1691,19 @@ fn sanitize_search_budget(budget: SearchBudget) -> SearchBudget {
             simulations: simulations.map(|value| value.clamp(1, PV_DEPTH_SIM_SAFETY_CAP)),
         },
     }
+}
+
+fn normalize_singleplayer_bot_level(level: Option<u8>) -> u8 {
+    level
+        .unwrap_or(DEFAULT_SINGLEPLAYER_BOT_LEVEL)
+        .clamp(MIN_SINGLEPLAYER_BOT_LEVEL, MAX_SINGLEPLAYER_BOT_LEVEL)
+}
+
+fn singleplayer_bot_display_name(level: u8) -> String {
+    format!(
+        "HexFish{}",
+        level.clamp(MIN_SINGLEPLAYER_BOT_LEVEL, MAX_SINGLEPLAYER_BOT_LEVEL)
+    )
 }
 
 fn validate_replay_log<G: Game>(
@@ -2321,6 +2359,7 @@ mod tests {
 
         session.handle(ClientMsg::SetSingleplayer {
             human_player: Some(0),
+            bot_level: None,
         });
         assert_eq!(session.current_player_idx(), 0);
         assert_eq!(session.legal_actions().len(), 2);
@@ -2337,6 +2376,7 @@ mod tests {
         let mut session = test_session();
         session.handle(ClientMsg::SetSingleplayer {
             human_player: Some(0),
+            bot_level: None,
         });
         session.handle(ClientMsg::PlayAction { action: 0 });
         assert!(
@@ -2363,6 +2403,7 @@ mod tests {
         let mut session = test_session();
         session.handle(ClientMsg::SetSingleplayer {
             human_player: Some(0),
+            bot_level: None,
         });
 
         match session.handle(ClientMsg::ResignGame).as_slice() {
@@ -2478,6 +2519,7 @@ mod tests {
         let mut session = test_session();
         session.handle(ClientMsg::SetSingleplayer {
             human_player: Some(0),
+            bot_level: None,
         });
 
         match session
@@ -2519,6 +2561,7 @@ mod tests {
         let mut session = test_session();
         session.handle(ClientMsg::SetSingleplayer {
             human_player: Some(0),
+            bot_level: None,
         });
         session.handle(ClientMsg::PlayAction { action: 0 });
 
@@ -2570,6 +2613,7 @@ mod tests {
         let mut session = test_session();
         session.handle(ClientMsg::SetSingleplayer {
             human_player: Some(0),
+            bot_level: None,
         });
 
         match session

@@ -18,6 +18,14 @@ const PORT_COLORS = {
   ore: '#7a7a7a',
   generic: '#ffffff',
 };
+const PORT_LABELS = {
+  lumber: 'Lumber',
+  brick: 'Brick',
+  wool: 'Wool',
+  grain: 'Grain',
+  ore: 'Ore',
+  generic: 'Generic',
+};
 const TERRAIN_TEXTURES = {
   forest: {
     base: '#2d5a27',
@@ -817,7 +825,8 @@ class Board {
   _drawPort(parent, port, nodes) {
     const { x0, y0, x1, y1, lx, ly } = this._portGeometry(port, nodes);
     const color = PORT_COLORS[port.kind] || PORT_COLORS.generic;
-    const ratio = port.kind === 'generic' ? '3:1' : '2:1';
+    const ratio = this._portRatio(port.kind);
+    const tooltip = this._portTooltip(port);
     const darkText = port.kind === 'grain' || port.kind === 'wool' || port.kind === 'generic';
     const group = this._el('g', { class: port.selected ? 'port-marker selected' : 'port-marker' });
     parent.appendChild(group);
@@ -833,29 +842,42 @@ class Board {
       'pointer-events': 'none',
     }));
 
-    // Circle label with ratio
+    // Circle label with resource glyph and ratio.
     const isGeneric = port.kind === 'generic';
-    group.appendChild(this._el('circle', {
-      cx: lx, cy: ly, r: 10,
+    const token = this._el('g', {
+      class: 'port-token',
+      'pointer-events': 'all',
+      role: 'img',
+      'aria-label': tooltip,
+    });
+    group.appendChild(this._keepUpright(token, lx, ly));
+    this._attachTooltip(token, tooltip);
+
+    token.appendChild(this._el('circle', {
+      cx: lx, cy: ly, r: 12,
       fill: isGeneric ? '#334' : color,
       stroke: port.selected ? '#e94560' : (isGeneric ? color : 'none'),
       'stroke-width': port.selected ? 2.5 : 1.5,
       opacity: 0.85
     }));
     const txt = this._el('text', {
-      x: lx, y: ly + 3,
-      'text-anchor': 'middle', 'font-size': '8',
+      x: lx, y: ly - 4,
+      'text-anchor': 'middle', 'font-size': '6.4',
       fill: isGeneric ? '#ddd' : (darkText ? '#222' : '#fff'),
-      'font-weight': '600'
+      'font-weight': '800',
+      'pointer-events': 'none'
     });
     txt.textContent = ratio;
-    group.appendChild(this._keepUpright(txt, lx, ly));
+    token.appendChild(txt);
+    const iconColor = port.kind === 'wool' || port.kind === 'grain' || isGeneric
+      ? '#fff'
+      : (darkText ? '#222' : '#fff');
+    this._drawPortResourceIcon(token, port.kind, lx, ly + 4.5, iconColor);
   }
 
   _drawPortHit(parent, port, nodes) {
     if (!Number.isInteger(port.index)) return;
     const { lx, ly } = this._portGeometry(port, nodes);
-    const ratio = port.kind === 'generic' ? '3:1' : '2:1';
     const hit = this._el('circle', {
       cx: lx, cy: ly, r: 18,
       fill: 'transparent',
@@ -866,8 +888,108 @@ class Board {
       event.stopPropagation();
       this.onPortClick?.(port.index);
     });
-    this._attachTooltip(hit, `Port ${port.index + 1}: ${ratio}`);
+    this._attachTooltip(hit, this._portTooltip(port));
     parent.appendChild(hit);
+  }
+
+  _portRatio(kind) {
+    return kind === 'generic' ? '3:1' : '2:1';
+  }
+
+  _portTooltip(port) {
+    const label = PORT_LABELS[port.kind] || PORT_LABELS.generic;
+    return `${label} port: ${this._portRatio(port.kind)}`;
+  }
+
+  _drawPortResourceIcon(parent, kind, x, y, color) {
+    const strokeAttrs = {
+      fill: 'none',
+      stroke: color,
+      'stroke-width': 1.25,
+      'stroke-linecap': 'round',
+      'stroke-linejoin': 'round',
+      'pointer-events': 'none',
+    };
+    const fillAttrs = {
+      fill: color,
+      'pointer-events': 'none',
+    };
+
+    if (kind === 'lumber') {
+      parent.appendChild(this._el('path', {
+        d: `M ${x} ${y - 6} L ${x - 4.4} ${y + 1} H ${x + 4.4} Z`,
+        ...fillAttrs,
+      }));
+      parent.appendChild(this._el('rect', {
+        x: x - 0.8, y: y + 1, width: 1.6, height: 3.8,
+        ...fillAttrs,
+      }));
+    } else if (kind === 'brick') {
+      parent.appendChild(this._el('rect', {
+        x: x - 5, y: y - 4, width: 10, height: 7, rx: 1,
+        ...strokeAttrs,
+      }));
+      parent.appendChild(this._el('path', {
+        d: `M ${x - 5} ${y - 0.5} H ${x + 5} M ${x - 1.4} ${y - 4} V ${y - 0.5} M ${x + 1.7} ${y - 0.5} V ${y + 3}`,
+        ...strokeAttrs,
+      }));
+    } else if (kind === 'wool') {
+      const sheepStroke = { ...strokeAttrs, 'stroke-width': 1.35 };
+      parent.appendChild(this._el('path', {
+        d: `M ${x - 5.6} ${y + 1.1} C ${x - 5.8} ${y - 2.4}, ${x - 2.9} ${y - 4.3}, ${x + 0.4} ${y - 3.7} C ${x + 3.2} ${y - 3.1}, ${x + 4.2} ${y - 0.6}, ${x + 2.9} ${y + 1.8} C ${x + 1.2} ${y + 3.5}, ${x - 3.4} ${y + 3.3}, ${x - 5.6} ${y + 1.1} Z`,
+        ...sheepStroke,
+      }));
+      parent.appendChild(this._el('path', {
+        d: `M ${x + 3.2} ${y - 1.5} C ${x + 4.9} ${y - 3.3}, ${x + 7} ${y - 1.2}, ${x + 5.9} ${y + 1.1} C ${x + 4.5} ${y + 1.2}, ${x + 3.5} ${y + 0.2}, ${x + 3.2} ${y - 1.5} Z`,
+        ...sheepStroke,
+      }));
+      parent.appendChild(this._el('path', {
+        d: `M ${x + 4.7} ${y - 2.5} L ${x + 5.7} ${y - 4.1} M ${x - 3.6} ${y + 2.9} V ${y + 5} M ${x + 0.8} ${y + 3} V ${y + 5}`,
+        ...sheepStroke,
+      }));
+    } else if (kind === 'grain') {
+      parent.appendChild(this._el('path', {
+        d: `M ${x} ${y + 5} V ${y - 5.2}`,
+        ...strokeAttrs,
+      }));
+      for (const [dx, dy, angle] of [
+        [-2.4, -3.7, -30],
+        [2.4, -2.6, 30],
+        [-2.5, -1.3, -28],
+        [2.5, -0.2, 28],
+        [-2.3, 1, -25],
+        [2.3, 2, 25],
+      ]) {
+        parent.appendChild(this._el('ellipse', {
+          cx: x + dx,
+          cy: y + dy,
+          rx: 1.15,
+          ry: 2.15,
+          transform: `rotate(${angle} ${x + dx} ${y + dy})`,
+          ...fillAttrs,
+        }));
+      }
+    } else if (kind === 'ore') {
+      parent.appendChild(this._el('polygon', {
+        points: `${x - 5},${y + 3.5} ${x - 2.2},${y - 4.5} ${x + 1.2},${y - 1.8} ${x + 3.8},${y - 5} ${x + 5},${y + 3.5}`,
+        ...strokeAttrs,
+      }));
+      parent.appendChild(this._el('path', {
+        d: `M ${x - 2.2} ${y - 4.5} L ${x - 0.8} ${y + 3.5} M ${x + 1.2} ${y - 1.8} L ${x + 2.4} ${y + 3.5}`,
+        ...strokeAttrs,
+      }));
+    } else {
+      const question = this._el('text', {
+        x, y: y + 3.8,
+        'text-anchor': 'middle',
+        'font-size': '11',
+        'font-weight': '900',
+        fill: color,
+        'pointer-events': 'none',
+      });
+      question.textContent = '?';
+      parent.appendChild(question);
+    }
   }
 
   _playerColor(playerIndex) {
